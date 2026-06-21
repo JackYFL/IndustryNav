@@ -1,0 +1,72 @@
+# macOS / editor metadata
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
+# Python environments and packaging outputs
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+build/
+dist/
+*.egg-info/
+
+# External dependencies cloned locally
+external/
+
+# Unity clients/projects and generated Unity files
+unity_client/
+unity_clients/
+unity_project/
+unity_projects/
+*.app/
+*.x86_64
+*.exe
+*.log
+unity_log.txt
+test.log
+
+# Benchmark / training / evaluation outputs
+outputs/
+logs/
+tmp/
+collect_data/
+exp_frames*/
+ckpts/
+checkpoints/
+runs/
+wandb/
+tensorboard/
+analysis/grid_runs/
+
+# Generated result artifacts
+results.csv
+*_actions.csv
+agent_qa.txt
+*.npy
+*.npz
+*.gif
+
+# Large local archives or downloaded bundles
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
