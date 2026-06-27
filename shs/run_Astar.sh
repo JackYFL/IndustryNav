@@ -173,7 +173,7 @@ idx=0
 for scene_name in "${SCENES[@]}"; do
   scene_id="$(scene_id_for "$scene_name")"
 
-  "$PYTHON_BIN" - <<'PY' "$INPUT_FILE" "$scene_name" "$POINT_FILTER" | while IFS='|' read -r point_id init_wx init_wz init_dir target_x target_y; do
+  "$PYTHON_BIN" - <<'PY' "$INPUT_FILE" "$scene_name" "$POINT_FILTER" | while IFS='|' read -r point_id init_wx init_wz init_dir target_x target_y init_px init_py; do
 import json
 import sys
 from pathlib import Path
@@ -190,11 +190,14 @@ for entry in entries:
     if point_filter and pid != point_filter:
         continue
     start = entry["start"]
+    start_pixel = entry.get("start_pixel", {})
     target = entry["target"]
     print(
         f"{pid}|{float(start['x'])}|{float(start['z'])}|"
         f"{float(start.get('direction', 180.0))}|"
-        f"{int(target['x'])}|{int(target['y'])}",
+        f"{int(target['x'])}|{int(target['y'])}|"
+        f"{int(start_pixel['x']) if 'x' in start_pixel else ''}|"
+        f"{int(start_pixel['y']) if 'y' in start_pixel else ''}",
         flush=True,
     )
     matched += 1
@@ -204,6 +207,9 @@ if point_filter and matched == 0:
 PY
     echo "[astar] scene=${scene_name} scene_id=${scene_id} point=${point_id}"
     echo "[astar] init_world=(${init_wx},${init_wz},dir=${init_dir}) target_px=(${target_x},${target_y})"
+    if [[ -n "$init_px" && -n "$init_py" ]]; then
+      echo "[astar] init_pixel_calibration=(${init_px},${init_py})"
+    fi
 
     worker_id=$((31 + idx))
     base_port="$(pick_base_port "$((BASE_PORT_START + idx))")"
@@ -229,6 +235,10 @@ PY
          --init_curr_direction "$init_dir"
          --target_x "$target_x"
          --target_y "$target_y")
+
+    if [[ -n "$init_px" && -n "$init_py" ]]; then
+      cmd+=(--init_curr_x "$init_px" --init_curr_y "$init_py")
+    fi
 
     if [[ "$HIDE_UNITY_RED_MARKER" == "0" || "$HIDE_UNITY_RED_MARKER" == "false" || "$HIDE_UNITY_RED_MARKER" == "off" ]]; then
       cmd+=(--no-hide_unity_red_marker)

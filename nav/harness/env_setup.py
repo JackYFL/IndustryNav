@@ -23,7 +23,7 @@ from mlagents_envs.side_channel.environment_parameters_channel import (
     EnvironmentParametersChannel,
 )
 
-from nav.config import BEHAVIOR_NAME
+from nav.config import BEHAVIOR_NAME, UNITY_ENGINE_QUALITY_LEVEL
 from nav.harness.coordinates import find_exact_map_bounds, visual_to_unity_coords
 from nav.harness.observations import get_minimap_rgb_for_init, patch_observation_decoding
 from nav.harness.side_channels import BoundsSideChannel, TargetSideChannel
@@ -74,9 +74,17 @@ def _launch_env(args, logger):
         base_port=int(args.base_port),
         timeout_wait=120,
     )
+    quality_level = int(getattr(args, "quality_level", UNITY_ENGINE_QUALITY_LEVEL))
     engine.set_configuration_parameters(
-        time_scale=1, quality_level=0, target_frame_rate=-1,
-        width=args.screen_width, height=args.screen_height,
+        time_scale=1,
+        quality_level=quality_level,
+        target_frame_rate=-1,
+        width=args.screen_width,
+        height=args.screen_height,
+    )
+    logger.info(
+        f"Engine config: quality_level={quality_level}, "
+        f"screen={args.screen_width}x{args.screen_height}"
     )
 
     # Scene selection MUST happen before the first reset that produces obs we use.
@@ -115,7 +123,17 @@ def _prime_spawn(env, env_params, target_sc, margin, args, logger) -> Optional[T
         env_params.set_float_parameter("spawn_rot", float(args.init_curr_direction))
         env.reset()
         init_world = (float(args.init_world_x), float(args.init_world_z))
-        logger.info(f"Spawn world({init_world[0]:.2f},{init_world[1]:.2f}) yaw={args.init_curr_direction}")
+        if target_sc.last_spawn_pixel is not None and target_sc.last_spawn_world is not None:
+            init_world = target_sc.last_spawn_world
+            logger.info(
+                f"Spawn world({init_world[0]:.2f},{init_world[1]:.2f}) -> "
+                f"unity{target_sc.last_spawn_pixel} yaw={args.init_curr_direction}"
+            )
+        else:
+            logger.info(
+                f"Spawn world({init_world[0]:.2f},{init_world[1]:.2f}) "
+                f"yaw={args.init_curr_direction}"
+            )
         return init_world
 
     if args.init_curr_x is not None and args.init_curr_y is not None:

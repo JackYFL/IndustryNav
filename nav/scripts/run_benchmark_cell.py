@@ -447,6 +447,31 @@ def main():
         primed.target_sc.last_target_pixel,
         primed.target_sc.last_target_world,
     )
+    if (
+        minimap_projector is None
+        and args.init_curr_x is not None
+        and args.init_curr_y is not None
+        and init_world_x is not None
+        and init_world_z is not None
+    ):
+        spawn_upx, spawn_upy = visual_to_unity_coords(
+            primed.margin,
+            int(args.init_curr_x),
+            int(args.init_curr_y),
+        )
+        minimap_projector = build_axis_aligned_projector(
+            (spawn_upx, spawn_upy),
+            (float(init_world_x), float(init_world_z)),
+            primed.target_sc.last_target_pixel,
+            primed.target_sc.last_target_world,
+        )
+        if minimap_projector is not None:
+            logger.info(
+                "Calibrated vector marker projection from CLI init pixel: "
+                f"visual=({int(args.init_curr_x)},{int(args.init_curr_y)}) "
+                f"unity=({spawn_upx:.1f},{spawn_upy:.1f}) "
+                f"world=({float(init_world_x):.2f},{float(init_world_z):.2f})"
+            )
 
     # ---- Per-modality save dirs (prefixed by the baseline token) ----
     subdirs = {}

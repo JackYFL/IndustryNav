@@ -37,7 +37,7 @@ from mlagents_envs.side_channel.environment_parameters_channel import (
 )
 
 from nav.config import ACTION_SPACE_ANNOTATION as ACTION_SPACE
-from nav.config import BEHAVIOR_NAME
+from nav.config import BEHAVIOR_NAME, UNITY_ENGINE_QUALITY_LEVEL
 from nav.harness.coordinates import find_exact_map_bounds
 from nav.harness.coordinates import visual_to_unity_coords as _visual_to_unity_coords
 from nav.harness.observations import get_obs_safe, patch_observation_decoding
@@ -690,7 +690,7 @@ def main():
         time_scale=1,
         # Project quality index 0 is "Ray Tracing (Realtime GI)", which can
         # add stochastic visual noise to CameraSensor frames.
-        quality_level=3,
+        quality_level=UNITY_ENGINE_QUALITY_LEVEL,
         target_frame_rate=-1,
         width=args.screen_width,
         height=args.screen_height,

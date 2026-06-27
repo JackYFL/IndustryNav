@@ -19,6 +19,7 @@ htmlcov/
 
 # Python environments and packaging outputs
 .venv/
+.uv-cache/
 venv/
 env/
 .env

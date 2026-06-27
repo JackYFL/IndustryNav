@@ -109,7 +109,7 @@ fi
 MAX_STEPS="${MAX_STEPS:-70}"
 
 idx=0
-"$PYTHON_BIN" - <<'PY' "$INPUT_FILE" "$SCENE_NAME" | while IFS='|' read -r point_id init_wx init_wz init_dir target_x target_y; do
+"$PYTHON_BIN" - <<'PY' "$INPUT_FILE" "$SCENE_NAME" | while IFS='|' read -r point_id init_wx init_wz init_dir target_x target_y init_px init_py; do
 import json, sys
 from pathlib import Path
 
@@ -123,12 +123,18 @@ for entry in data.get(scene, []):
     sx = entry["start"]["x"]
     sz = entry["start"]["z"]
     sd = entry["start"]["direction"]
+    start_pixel = entry.get("start_pixel", {})
     tx = int(entry["target"]["x"])
     ty = int(entry["target"]["y"])
-    print(f"{pid}|{sx}|{sz}|{sd}|{tx}|{ty}")
+    px = int(start_pixel["x"]) if "x" in start_pixel else ""
+    py = int(start_pixel["y"]) if "y" in start_pixel else ""
+    print(f"{pid}|{sx}|{sz}|{sd}|{tx}|{ty}|{px}|{py}")
 PY
   echo "[benchmark] scene=${SCENE_NAME} (scene_id=${SCENE_ID}) point=${point_id} baseline=${BASELINE} run=${RUN_NAME}"
   echo "[benchmark] init_world=(${init_wx},${init_wz},dir=${init_dir}) target_px=(${target_x},${target_y})"
+  if [[ -n "$init_px" && -n "$init_py" ]]; then
+    echo "[benchmark] init_pixel_calibration=(${init_px},${init_py})"
+  fi
 
   WORKER_ID=$((1 + idx))
   BASE_PORT="$($PYTHON_BIN -c 'import socket; s=socket.socket(); s.bind(("localhost",0)); print(s.getsockname()[1]); s.close()')"
@@ -150,6 +156,9 @@ PY
        --init_curr_direction "$init_dir"
        --target_x "$target_x"
        --target_y "$target_y")
+  if [[ -n "$init_px" && -n "$init_py" ]]; then
+    CMD+=(--init_curr_x "$init_px" --init_curr_y "$init_py")
+  fi
   # Prepend the xvfb prefix only when non-empty (safe under `set -u` on bash 3.2).
   if [[ ${#XVFB_PREFIX[@]} -gt 0 ]]; then
     CMD=("${XVFB_PREFIX[@]}" "${CMD[@]}")

@@ -67,6 +67,12 @@ ACTION_SPACE_ANNOTATION: Dict[str, float] = {
 #: calling ``env.set_actions(BEHAVIOR_NAME, ActionTuple(...))``.
 BEHAVIOR_NAME: str = "WarehouseAgent?team=0"
 
+#: Unity quality level used for CameraSensor capture. In the current Unity
+#: project, quality index 0 maps to a Ray Tracing / Realtime GI setting that
+#: introduces visible stochastic speckle noise in minimap/ego frames. Level 3
+#: is the stable capture setting used by both benchmark and data collection.
+UNITY_ENGINE_QUALITY_LEVEL: int = 3
+
 # ---------------------------------------------------------------------------
 # Red-dot detection (agent position marker on the minimap)
 # ---------------------------------------------------------------------------

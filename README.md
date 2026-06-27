@@ -1,13 +1,13 @@
-# IndustryNav
+# IndustryNav: Exploring Spatial Reasoning of Embodied Agents in Dynamic Industrial Navigation
 
-**Paper:** [IndustryNav: Exploring Spatial Reasoning of Embodied Agents in Dynamic Industrial Navigation](https://arxiv.org/pdf/2511.17384)  
-**Project Page:** [https://jackyfl.github.io/IndustryNav_project_page/](https://jackyfl.github.io/IndustryNav_project_page/)
+[![Paper](https://img.shields.io/badge/Paper-arXiv-b31b1b?style=flat-square)](https://arxiv.org/pdf/2511.17384)
+[![Project Page](https://img.shields.io/badge/Project-Page-2f80ed?style=flat-square)](https://jackyfl.github.io/IndustryNav_project_page/)
 
-**Authors:** Yifan Li, Lichi Li, Anh Dao, Xinyu Zhou, Yicheng Qiao, Zheda Mai, Daeun Lee, Zichen Chen, Zhen Tan, Mohit Bansal, Yu Kong
+**Authors:** Yifan Li, Lichi Li, Anh Dao, Xinyu Zhou, Wenjun Huang, Tianyi Ma, Yicheng Qiao, Zheda Mai, Daeun Lee, Zichen Chen, Pan Wang, Lehan Yang, Tianlong Wang, Zhen Tan, Sheng Li, Mohit Bansal, Yang Ni, Yu Kong
 
-![IndustryNav pipeline overview](docs/assets/industrynav_pipeline.png)
+![Overview of the IndustryNav benchmark](docs/assets/industrynav_overview.png)
 
-*IndustryNav pipeline overview: dynamic Unity warehouse scenes, multimodal agent observations, navigation decisions, and safety-aware evaluation.*
+*Overview of the IndustryNav benchmark: 12 dynamic Unity warehouses, egocentric observations with global odometry, action generation, and evaluation over success, efficiency, and safety.*
 
 ## About the Paper
 
@@ -75,7 +75,7 @@ From the `IndustryNav` root:
 uv python install 3.10
 
 mkdir -p external
-git clone --depth 1 --filter=blob:none https://github.com/Unity-Technologies/ml-agents.git external/ml-agents
+git clone --depth 1 https://github.com/Unity-Technologies/ml-agents.git external/ml-agents
 
 UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple uv sync
 source .venv/bin/activate
@@ -91,7 +91,7 @@ conda activate industrynav
 pip install -r requirements.txt
 
 mkdir -p external
-git clone --depth 1 --filter=blob:none https://github.com/Unity-Technologies/ml-agents.git external/ml-agents
+git clone --depth 1 https://github.com/Unity-Technologies/ml-agents.git external/ml-agents
 python -m pip install external/ml-agents/ml-agents-envs
 python -m pip install external/ml-agents/ml-agents
 ```
@@ -103,8 +103,8 @@ Place the compiled `scene_all` client under `unity_client/`, or pass an explicit
 Expected default locations:
 
 ```text
-unity_client/scene_all.app                    # macOS
-unity_client/scene_all/scene_all.x86_64       # Linux
+unity_clients/scene_all.app                    # macOS
+unity_clients/scene_all/scene_all.x86_64       # Linux
 ```
 
 On macOS, remove quarantine after downloading:
