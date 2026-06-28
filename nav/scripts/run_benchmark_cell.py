@@ -27,6 +27,7 @@ from nav.baselines.astar import AStarBaseline
 from nav.baselines.navid import NaVidBaseline
 from nav.config import ACTION_SPACE_ANNOTATION as ACTION_SPACE
 from nav.config import (
+    ASTAR_DEFAULTS,
     BEHAVIOR_NAME,
     BENCHMARK_BASELINES,
     DEFAULT_PROMPT_VISION,
@@ -155,8 +156,19 @@ def parse_args():
     p.add_argument("--bc_device", type=str, default="auto")
     p.add_argument("--bc_seq_len", type=int, default=0)
 
-    # A* baseline (no LLM, no API key). Tuning params default from
-    # nav.config.ASTAR_DEFAULTS; only the debug-viz knobs are CLI-exposed.
+    # A* baseline (no LLM, no API key).
+    p.add_argument("--astar_obstacle_inflate_px", type=int,
+                   default=ASTAR_DEFAULTS.obstacle_inflate_px,
+                   help="Dilate minimap obstacles by this many pixels before A*.")
+    p.add_argument("--astar_marker_clear_px", type=int,
+                   default=ASTAR_DEFAULTS.marker_clear_px,
+                   help="Radius cleared around current/target marker pixels.")
+    p.add_argument("--astar_proxy_stop_real_dist_px", type=float,
+                   default=ASTAR_DEFAULTS.proxy_stop_real_dist_px,
+                   help="When target is inside an obstacle, stop at a reachable proxy only if real target distance is under this value.")
+    p.add_argument("--astar_success_stop_px", type=float,
+                   default=ASTAR_DEFAULTS.success_stop_px,
+                   help="Stop A* once the real target distance is within this evaluation-success radius.")
     p.add_argument("--astar_debug_viz", action="store_true",
                    help="Dump A* walkable-grid / path overlays per step.")
     p.add_argument("--astar_debug_dir", type=str, default="",
@@ -400,11 +412,20 @@ def main():
             else os.path.join(args.frame_save_dir, "astar_debug")
         )
         astar_planner = AStarBaseline(
+            obstacle_inflate_px=args.astar_obstacle_inflate_px,
+            marker_clear_px=args.astar_marker_clear_px,
+            success_stop_px=args.astar_success_stop_px,
+            proxy_stop_real_dist_px=args.astar_proxy_stop_real_dist_px,
             debug_viz=args.astar_debug_viz,
             debug_dir=astar_debug_dir,
         )
         logger.info(
-            f"A* baseline ready | debug_viz={args.astar_debug_viz} | debug_dir={astar_debug_dir}"
+            "A* baseline ready | "
+            f"obstacle_inflate_px={args.astar_obstacle_inflate_px} | "
+            f"marker_clear_px={args.astar_marker_clear_px} | "
+            f"success_stop_px={args.astar_success_stop_px} | "
+            f"proxy_stop_real_dist_px={args.astar_proxy_stop_real_dist_px} | "
+            f"debug_viz={args.astar_debug_viz} | debug_dir={astar_debug_dir}"
         )
 
     bc_controller = None
@@ -447,31 +468,6 @@ def main():
         primed.target_sc.last_target_pixel,
         primed.target_sc.last_target_world,
     )
-    if (
-        minimap_projector is None
-        and args.init_curr_x is not None
-        and args.init_curr_y is not None
-        and init_world_x is not None
-        and init_world_z is not None
-    ):
-        spawn_upx, spawn_upy = visual_to_unity_coords(
-            primed.margin,
-            int(args.init_curr_x),
-            int(args.init_curr_y),
-        )
-        minimap_projector = build_axis_aligned_projector(
-            (spawn_upx, spawn_upy),
-            (float(init_world_x), float(init_world_z)),
-            primed.target_sc.last_target_pixel,
-            primed.target_sc.last_target_world,
-        )
-        if minimap_projector is not None:
-            logger.info(
-                "Calibrated vector marker projection from CLI init pixel: "
-                f"visual=({int(args.init_curr_x)},{int(args.init_curr_y)}) "
-                f"unity=({spawn_upx:.1f},{spawn_upy:.1f}) "
-                f"world=({float(init_world_x):.2f},{float(init_world_z):.2f})"
-            )
 
     # ---- Per-modality save dirs (prefixed by the baseline token) ----
     subdirs = {}
@@ -656,6 +652,8 @@ def main():
                 logger.info(
                     f"[Step:{step_count}] Action: {chosen_action} | Reasoning: {str(reasoning)[:200]}"
                 )
+                if args.baseline == "astar" and chosen_action == "stop":
+                    stop_reason = "astar_stop"
                 continuous_actions = action2signal(chosen_action, ACTION_SPACE)
             else:
                 # No decision in flight: either we've reached, or we kick one off.
@@ -778,8 +776,8 @@ def main():
             for _ in range(SIM_STEPS_PER_DECISION):
                 env.step()
 
-            if stop_reason == "reached_vicinity" and chosen_action == "stop":
-                logger.info(f"[Step:{step_count}] Reached target. Stopping.")
+            if stop_reason in {"reached_vicinity", "astar_stop"} and chosen_action == "stop":
+                logger.info(f"[Step:{step_count}] {stop_reason}. Stopping.")
                 break
 
     except Exception as e:

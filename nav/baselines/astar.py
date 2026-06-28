@@ -27,6 +27,7 @@ class AStarBaseline:
         obstacle_threshold: int = ASTAR_DEFAULTS.obstacle_threshold,
         min_free_ratio: float = ASTAR_DEFAULTS.min_free_ratio,
         obstacle_inflate_px: int = ASTAR_DEFAULTS.obstacle_inflate_px,
+        marker_clear_px: int = ASTAR_DEFAULTS.marker_clear_px,
         waypoint_distance_px: float = ASTAR_DEFAULTS.waypoint_distance_px,
         waypoint_reach_px: float = ASTAR_DEFAULTS.waypoint_reach_px,
         path_replan_distance_px: float = ASTAR_DEFAULTS.path_replan_distance_px,
@@ -42,6 +43,11 @@ class AStarBaseline:
         stuck_px_epsilon: float = ASTAR_DEFAULTS.stuck_px_epsilon,
         stuck_steps: int = ASTAR_DEFAULTS.stuck_steps,
         recovery_turn_steps: int = ASTAR_DEFAULTS.recovery_turn_steps,
+        stuck_block_ahead_px: float = ASTAR_DEFAULTS.stuck_block_ahead_px,
+        stuck_block_radius_px: float = ASTAR_DEFAULTS.stuck_block_radius_px,
+        stuck_block_ttl_steps: int = ASTAR_DEFAULTS.stuck_block_ttl_steps,
+        success_stop_px: float = ASTAR_DEFAULTS.success_stop_px,
+        proxy_stop_real_dist_px: float = ASTAR_DEFAULTS.proxy_stop_real_dist_px,
         debug_viz: bool = False,
         debug_dir: Optional[str] = None,
     ):
@@ -49,6 +55,7 @@ class AStarBaseline:
         self.obstacle_threshold = int(obstacle_threshold)
         self.min_free_ratio = float(min_free_ratio)
         self.obstacle_inflate_px = int(obstacle_inflate_px)
+        self.marker_clear_px = int(marker_clear_px)
         self.waypoint_distance_px = float(waypoint_distance_px)
         self.waypoint_reach_px = float(waypoint_reach_px)
         self.path_replan_distance_px = float(path_replan_distance_px)
@@ -64,6 +71,11 @@ class AStarBaseline:
         self.stuck_px_epsilon = float(stuck_px_epsilon)
         self.stuck_steps = int(stuck_steps)
         self.recovery_turn_steps = int(recovery_turn_steps)
+        self.stuck_block_ahead_px = float(stuck_block_ahead_px)
+        self.stuck_block_radius_px = float(stuck_block_radius_px)
+        self.stuck_block_ttl_steps = int(stuck_block_ttl_steps)
+        self.success_stop_px = float(success_stop_px)
+        self.proxy_stop_real_dist_px = float(proxy_stop_real_dist_px)
         self.debug_viz = bool(debug_viz)
         self.debug_dir = debug_dir
         self.last_path: List[Point] = []
@@ -77,8 +89,10 @@ class AStarBaseline:
         self.recovery_count = 0
         self.recovery_turn_sign = 1
         self.last_target_xy: Optional[Point] = None
+        self.last_effective_target_xy: Optional[Point] = None
         self.last_debug = {}
         self.last_plan_status = "not_planned"
+        self.virtual_obstacles: List[Tuple[int, int, float, int]] = []
 
     def decide(
         self,
@@ -91,12 +105,18 @@ class AStarBaseline:
         curr_world_xz: Optional[Tuple[float, float]] = None,
     ) -> Tuple[str, str, List[Point]]:
         distance = math.hypot(target_xy[0] - curr_xy[0], target_xy[1] - curr_xy[1])
-        if distance <= reach_px:
+        stop_px = max(float(reach_px), self.success_stop_px)
+        if distance <= stop_px:
             self.last_path = [curr_xy, target_xy]
             self.last_action_was_move = False
-            return "stop", "Astar reached target vicinity.", self.last_path
+            return (
+                "stop",
+                f"Astar reached target vicinity; dist={distance:.1f}px stop_px={stop_px:.1f}.",
+                self.last_path,
+            )
 
-        stuck_reason = self._update_stuck_state(curr_xy, curr_world_xz)
+        self._decay_virtual_obstacles()
+        stuck_reason = self._update_stuck_state(curr_xy, curr_world_xz, agent_theta)
         if self.recovery_count > 0:
             action = self._recovery_action()
             self._record_action(action)
@@ -129,6 +149,7 @@ class AStarBaseline:
             self.follow_waypoints = []
             self.follow_waypoint_index = 0
             self.last_target_xy = None
+            self.last_effective_target_xy = None
             self._save_debug_visualization(
                 minimap_rgb, curr_xy, target_xy, fallback_path, None, step
             )
@@ -137,6 +158,24 @@ class AStarBaseline:
 
         self.last_path = path
         self.last_target_xy = target_xy
+        if self._using_unreachable_proxy() and self.last_effective_target_xy is not None:
+            proxy_distance = math.hypot(
+                self.last_effective_target_xy[0] - curr_xy[0],
+                self.last_effective_target_xy[1] - curr_xy[1],
+            )
+            if proxy_distance <= reach_px and distance <= self.proxy_stop_real_dist_px:
+                self.last_action_was_move = False
+                self._save_debug_visualization(
+                    minimap_rgb, curr_xy, target_xy, path, self.last_effective_target_xy, step
+                )
+                return (
+                    "stop",
+                    f"Astar reached reachable proxy {self.last_effective_target_xy} "
+                    f"for blocked target; proxy_dist={proxy_distance:.1f}px "
+                    f"target_dist={distance:.1f}px plan_status={self.last_plan_status}",
+                    path,
+                )
+
         if not self.follow_waypoints:
             self.follow_waypoints = self._build_follow_waypoints(path, curr_xy, target_xy)
             self.follow_waypoint_index = 0
@@ -175,7 +214,7 @@ class AStarBaseline:
         # Keep the colored spawn/target markers from becoming obstacles.
         free_u8 = free.astype(np.uint8)
         for point in (curr_xy, target_xy):
-            cv2.circle(free_u8, (int(point[0]), int(point[1])), self.grid_step * 2, 1, -1)
+            cv2.circle(free_u8, (int(point[0]), int(point[1])), self.marker_clear_px, 1, -1)
         free = free_u8.astype(bool)
 
         if self.obstacle_inflate_px > 0:
@@ -185,7 +224,13 @@ class AStarBaseline:
             free = obstacles == 0
             free_u8 = free.astype(np.uint8)
             for point in (curr_xy, target_xy):
-                cv2.circle(free_u8, (int(point[0]), int(point[1])), self.grid_step * 2, 1, -1)
+                cv2.circle(free_u8, (int(point[0]), int(point[1])), self.marker_clear_px, 1, -1)
+            free = free_u8.astype(bool)
+
+        if self.virtual_obstacles:
+            free_u8 = free.astype(np.uint8)
+            for ox, oy, radius, _ttl in self.virtual_obstacles:
+                cv2.circle(free_u8, (int(ox), int(oy)), int(radius), 0, -1)
             free = free_u8.astype(bool)
 
         h, w = free.shape
@@ -273,6 +318,7 @@ class AStarBaseline:
     ) -> List[Point]:
         start = self._nearest_free_cell(walkable, self._point_to_cell(curr_xy))
         goal = self._nearest_free_cell(walkable, self._point_to_cell(target_xy))
+        self.last_effective_target_xy = None
         if start is None or goal is None:
             return []
 
@@ -296,6 +342,7 @@ class AStarBaseline:
                 continue
             if current == goal:
                 self.last_plan_status = "target_reachable"
+                self.last_effective_target_xy = target_xy
                 return self._reconstruct_path(came_from, current, target_xy)
 
             cy, cx = current
@@ -326,11 +373,15 @@ class AStarBaseline:
             return []
 
         proxy_xy = self._cell_to_point(best_reachable)
+        self.last_effective_target_xy = proxy_xy
         self.last_plan_status = (
             f"target_unreachable_proxy={proxy_xy}_"
             f"grid_dist={self._heuristic(best_reachable, goal):.1f}"
         )
         return self._reconstruct_path(came_from, best_reachable, proxy_xy)
+
+    def _using_unreachable_proxy(self) -> bool:
+        return self.last_plan_status.startswith("target_unreachable_proxy=")
 
     def _nearest_free_cell(
         self, walkable: np.ndarray, cell: Tuple[int, int], max_radius: int = 10
@@ -534,7 +585,10 @@ class AStarBaseline:
         return relative
 
     def _update_stuck_state(
-        self, curr_xy: Point, curr_world_xz: Optional[Tuple[float, float]]
+        self,
+        curr_xy: Point,
+        curr_world_xz: Optional[Tuple[float, float]],
+        agent_theta: float,
     ) -> str:
         reason = "last_action_not_move"
         if self.last_action_was_move:
@@ -569,6 +623,7 @@ class AStarBaseline:
             self.prev_world_xz = (float(curr_world_xz[0]), float(curr_world_xz[1]))
 
         if self.stuck_count >= self.stuck_steps:
+            self._add_stuck_obstacle(curr_xy, agent_theta)
             self.recovery_count = self.recovery_turn_steps
             self.recovery_turn_sign = -self.last_turn_sign if self.last_turn_sign else 1
             self.stuck_count = 0
@@ -579,6 +634,24 @@ class AStarBaseline:
             reason = f"{reason}_start_recovery"
 
         return reason
+
+    def _add_stuck_obstacle(self, curr_xy: Point, agent_theta: float) -> None:
+        bearing = math.radians((float(agent_theta) - 180.0) % 360.0)
+        ox = int(round(curr_xy[0] + math.cos(bearing) * self.stuck_block_ahead_px))
+        oy = int(round(curr_xy[1] + math.sin(bearing) * self.stuck_block_ahead_px))
+        self.virtual_obstacles.append(
+            (ox, oy, self.stuck_block_radius_px, self.stuck_block_ttl_steps)
+        )
+        self.virtual_obstacles = self.virtual_obstacles[-12:]
+
+    def _decay_virtual_obstacles(self) -> None:
+        if not self.virtual_obstacles:
+            return
+        kept = []
+        for ox, oy, radius, ttl in self.virtual_obstacles:
+            if ttl > 1:
+                kept.append((ox, oy, radius, ttl - 1))
+        self.virtual_obstacles = kept
 
     def _recovery_action(self) -> str:
         self.recovery_count = max(0, self.recovery_count - 1)

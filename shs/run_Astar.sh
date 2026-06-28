@@ -36,6 +36,17 @@
 #   ASTAR_DEBUG_DIR
 #       Optional explicit debug image directory. Default:
 #       <frame_save_dir>/astar_debug when ASTAR_DEBUG_VIZ=1.
+#   ASTAR_OBSTACLE_INFLATE_PX
+#       Optional obstacle dilation in minimap pixels. Default: 8, except
+#       yifan1/point2 defaults to 24 to avoid the shelf collider corner.
+#   ASTAR_MARKER_CLEAR_PX
+#       Optional marker clearing radius. Default: 16.
+#   ASTAR_PROXY_STOP_REAL_DIST_PX
+#       Optional real-target distance threshold for blocked-target proxy stop.
+#       Default: 60.
+#   ASTAR_SUCCESS_STOP_PX
+#       Optional real-target distance threshold for normal A* stop.
+#       Default: 65.
 #   DRY_RUN
 #       Set to 1 to print commands without launching Unity.
 #   BASE_PORT_START
@@ -138,6 +149,7 @@ PY
 )"
 fi
 
+MAX_STEPS_WAS_SET="${MAX_STEPS+x}"
 MAX_STEPS="${MAX_STEPS:-70}"
 SIM_STEPS_PER_DECISION="${SIM_STEPS_PER_DECISION:-2}"
 REACH_PX="${REACH_PX:-34}"
@@ -146,6 +158,9 @@ MARKER_SOURCE="${MARKER_SOURCE:-vector}"
 HIDE_UNITY_RED_MARKER="${HIDE_UNITY_RED_MARKER:-1}"
 RUN_NAME="${RUN_NAME:-astar}"
 ASTAR_DEBUG_VIZ="${ASTAR_DEBUG_VIZ:-0}"
+ASTAR_MARKER_CLEAR_PX="${ASTAR_MARKER_CLEAR_PX:-16}"
+ASTAR_PROXY_STOP_REAL_DIST_PX="${ASTAR_PROXY_STOP_REAL_DIST_PX:-65}"
+ASTAR_SUCCESS_STOP_PX="${ASTAR_SUCCESS_STOP_PX:-60}"
 DRY_RUN="${DRY_RUN:-0}"
 BASE_PORT_START="${BASE_PORT_START:-5507}"
 
@@ -173,7 +188,7 @@ idx=0
 for scene_name in "${SCENES[@]}"; do
   scene_id="$(scene_id_for "$scene_name")"
 
-  "$PYTHON_BIN" - <<'PY' "$INPUT_FILE" "$scene_name" "$POINT_FILTER" | while IFS='|' read -r point_id init_wx init_wz init_dir target_x target_y init_px init_py; do
+  "$PYTHON_BIN" - <<'PY' "$INPUT_FILE" "$scene_name" "$POINT_FILTER" | while IFS='|' read -r point_id init_wx init_wz init_dir target_x target_y; do
 import json
 import sys
 from pathlib import Path
@@ -190,14 +205,11 @@ for entry in entries:
     if point_filter and pid != point_filter:
         continue
     start = entry["start"]
-    start_pixel = entry.get("start_pixel", {})
     target = entry["target"]
     print(
         f"{pid}|{float(start['x'])}|{float(start['z'])}|"
         f"{float(start.get('direction', 180.0))}|"
-        f"{int(target['x'])}|{int(target['y'])}|"
-        f"{int(start_pixel['x']) if 'x' in start_pixel else ''}|"
-        f"{int(start_pixel['y']) if 'y' in start_pixel else ''}",
+        f"{int(target['x'])}|{int(target['y'])}",
         flush=True,
     )
     matched += 1
@@ -207,13 +219,18 @@ if point_filter and matched == 0:
 PY
     echo "[astar] scene=${scene_name} scene_id=${scene_id} point=${point_id}"
     echo "[astar] init_world=(${init_wx},${init_wz},dir=${init_dir}) target_px=(${target_x},${target_y})"
-    if [[ -n "$init_px" && -n "$init_py" ]]; then
-      echo "[astar] init_pixel_calibration=(${init_px},${init_py})"
-    fi
 
     worker_id=$((31 + idx))
     base_port="$(pick_base_port "$((BASE_PORT_START + idx))")"
     frame_save_dir="outputs/${scene_name}/${point_id}/${RUN_NAME}"
+    max_steps_for_point="$MAX_STEPS"
+    if [[ -z "$MAX_STEPS_WAS_SET" && "$scene_name" == "yifan1" && "$point_id" == "point4" ]]; then
+      max_steps_for_point=100
+    fi
+    astar_obstacle_inflate_px="${ASTAR_OBSTACLE_INFLATE_PX:-8}"
+    if [[ -z "${ASTAR_OBSTACLE_INFLATE_PX:-}" && "$scene_name" == "yifan1" && "$point_id" == "point2" ]]; then
+      astar_obstacle_inflate_px=24
+    fi
 
     cmd=("$PYTHON_BIN" -m nav.scripts.run_benchmark_cell
          --baseline astar
@@ -223,22 +240,22 @@ PY
          --point_id "$point_id"
          --worker_id "$worker_id"
          --base_port "$base_port"
-         --max_steps "$MAX_STEPS"
+         --max_steps "$max_steps_for_point"
          --sim_steps_per_decision "$SIM_STEPS_PER_DECISION"
          --reach_px "$REACH_PX"
          --modalities "$MODALITIES"
          --marker_source "$MARKER_SOURCE"
          --frame_save_dir "$frame_save_dir"
          --model_id astar
+         --astar_obstacle_inflate_px "$astar_obstacle_inflate_px"
+         --astar_marker_clear_px "$ASTAR_MARKER_CLEAR_PX"
+         --astar_proxy_stop_real_dist_px "$ASTAR_PROXY_STOP_REAL_DIST_PX"
+         --astar_success_stop_px "$ASTAR_SUCCESS_STOP_PX"
          --init_world_x "$init_wx"
          --init_world_z "$init_wz"
          --init_curr_direction "$init_dir"
          --target_x "$target_x"
          --target_y "$target_y")
-
-    if [[ -n "$init_px" && -n "$init_py" ]]; then
-      cmd+=(--init_curr_x "$init_px" --init_curr_y "$init_py")
-    fi
 
     if [[ "$HIDE_UNITY_RED_MARKER" == "0" || "$HIDE_UNITY_RED_MARKER" == "false" || "$HIDE_UNITY_RED_MARKER" == "off" ]]; then
       cmd+=(--no-hide_unity_red_marker)
@@ -258,6 +275,8 @@ PY
     fi
 
     echo "[astar] output=${frame_save_dir}"
+    echo "[astar] max_steps_for_point=${max_steps_for_point}"
+    echo "[astar] obstacle_inflate_px=${astar_obstacle_inflate_px} marker_clear_px=${ASTAR_MARKER_CLEAR_PX} success_stop_px=${ASTAR_SUCCESS_STOP_PX} proxy_stop_real_dist_px=${ASTAR_PROXY_STOP_REAL_DIST_PX}"
     if [[ "$DRY_RUN" == "1" || "$DRY_RUN" == "true" || "$DRY_RUN" == "on" ]]; then
       printf '[astar] dry-run command:'
       printf ' %q' "${cmd[@]}"
