@@ -12,10 +12,9 @@ Supported baselines (see :data:`nav.config.BENCHMARK_BASELINES`):
 - ``"llm"`` — LLM via :func:`nav.harness.llm_provider.llm_openrouter`.
 - ``"bc"`` — a behavior-cloning controller's ``predict_action``.
 - ``"astar"`` — minimap A* planner (:class:`nav.baselines.astar.AStarBaseline`).
-- ``"navid"`` — NaVid VLN adapter (:class:`nav.baselines.navid.NaVidBaseline`).
 
-``astar``/``navid`` are synchronous, but route through the same dispatcher so
-the entry loop has one code path for every baseline.
+``astar`` is synchronous, but routes through the same dispatcher so the entry
+loop has one code path for every baseline.
 """
 
 from __future__ import annotations
@@ -76,10 +75,6 @@ def execute_decision(baseline: str, payload: dict, result_container: dict) -> No
                 step=payload["step"],
                 curr_world_xz=payload["curr_world_xz"],
             )
-            result_container["action"] = action
-            result_container["reasoning"] = reasoning
-        elif baseline == "navid":
-            action, reasoning = payload["navid_planner"].decide(payload["ego_rgb"])
             result_container["action"] = action
             result_container["reasoning"] = reasoning
         else:

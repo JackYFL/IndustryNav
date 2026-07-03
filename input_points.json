@@ -1,5 +1,5 @@
 {
-  "yifan1": [
+  "scene1": [
     {
       "point_id": "point1",
       "start": {
@@ -49,7 +49,7 @@
       }
     }
   ],
-  "yifan2": [
+  "scene2": [
     {
       "point_id": "point1",
       "start": {
@@ -99,7 +99,7 @@
       }
     }
   ],
-  "yifan3": [
+  "scene3": [
     {
       "point_id": "point1",
       "start": {
@@ -149,7 +149,7 @@
       }
     }
   ],
-  "yifan4": [
+  "scene4": [
     {
       "point_id": "point1",
       "start": {
@@ -199,7 +199,7 @@
       }
     }
   ],
-  "yicheng": [
+  "scene5": [
     {
       "point_id": "point1",
       "start": {
@@ -249,7 +249,7 @@
       }
     }
   ],
-  "lichi1": [  
+  "scene6": [
     {
       "point_id": "point1",
       "start": {
@@ -299,7 +299,7 @@
       }
     }
   ],
-  "lichi2": [
+  "scene7": [
     {
       "point_id": "point1",
       "start": {
@@ -349,7 +349,7 @@
       }
     }
   ],
-  "xinyu1": [
+  "scene8": [
     {
       "point_id": "point1",
       "start": {
@@ -399,7 +399,7 @@
       }
     }
   ],
-  "xinyu2": [
+  "scene9": [
     {
       "point_id": "point1",
       "start": {
@@ -449,7 +449,7 @@
       }
     }
   ],
-  "anh1": [
+  "scene10": [
     {
       "point_id": "point1",
       "start": {
@@ -499,7 +499,7 @@
       }
     }
   ],
-  "anh2": [
+  "scene11": [
     {
       "point_id": "point1",
       "start": {
@@ -549,7 +549,7 @@
       }
     }
   ],
-  "anh3": [
+  "scene12": [
     {
       "point_id": "point1",
       "start": {

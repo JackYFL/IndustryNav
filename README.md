@@ -43,7 +43,7 @@ IndustryNav/
     ├── config.py              # Central constants and path discovery
     ├── scripts/               # CLI entry points
     ├── harness/               # Unity/env setup, routing, prompts, side channels
-    ├── baselines/             # A* and NaVid baseline implementations
+    ├── baselines/             # A* baseline implementation
     ├── eval/                  # Post-hoc run evaluation
     ├── stats/                 # Aggregate statistical analysis
     ├── models/                # BC model definitions
@@ -56,6 +56,12 @@ Main entry points:
 - `python -m nav.scripts.run_benchmark_grid`
 - `python -m nav.scripts.eval_run`
 - `python -m nav.scripts.compile_stats`
+
+Scene/client maintenance docs:
+
+- [`docs/scene_list.md`](docs/scene_list.md): supported `scene1`-`scene12` codes and `scene_id` mapping.
+- [`docs/scene_files_and_interfaces.md`](docs/scene_files_and_interfaces.md): runtime scene codes, environment parameters, side channels, and spawn/target mapping.
+- [`docs/bc_workflow.md`](docs/bc_workflow.md): behavior-cloning data collection, training, and inference.
 
 ## Environment Setup
 
@@ -98,13 +104,13 @@ python -m pip install external/ml-agents/ml-agents
 
 ### Unity Client
 
-Place the compiled `scene_all` client under `unity_client/`, or pass an explicit path with environment variables.
+Place the compiled `scene_all` client under one of the auto-discovery folders (`unity_clients/` or `unity_client/`), or pass an explicit path with environment variables.
 
 Expected default locations:
 
 ```text
 unity_clients/scene_all.app                    # macOS
-unity_clients/scene_all/scene_all.x86_64       # Linux
+unity_client/scene_all/scene_all.x86_64        # Linux
 ```
 
 On macOS, remove quarantine after downloading:
@@ -128,18 +134,20 @@ export OPENROUTER_API_KEY="..."
 
 A* does not need an API key.
 
+For details about scene-code mapping, Unity environment parameters, and Python/Unity side-channel handshake, see [`docs/scene_files_and_interfaces.md`](docs/scene_files_and_interfaces.md).
+
 ## Run Benchmark
 
 The easiest way to run an LLM benchmark is the shell wrapper:
 
 ```bash
-bash shs/run_headless_benchmark.sh yifan1 google/gemini-3-flash-preview
+bash shs/run_headless_benchmark.sh scene1 google/gemini-3-flash-preview
 ```
 
-This runs every point in `input_points.json["yifan1"]` and writes outputs under:
+This runs every point in `input_points.json["scene1"]` and writes outputs under:
 
 ```text
-outputs/<scene_name>/<point_id>/<model_short_name>/
+outputs/<scene_code>/<point_id>/<model_short_name>/
 ```
 
 Useful environment variables:
@@ -155,7 +163,7 @@ Example:
 ```bash
 OPENROUTER_API_KEY="..." \
 MAX_STEPS=70 \
-bash shs/run_headless_benchmark.sh yifan1 google/gemini-3-flash-preview
+bash shs/run_headless_benchmark.sh scene1 google/gemini-3-flash-preview
 ```
 
 To run one explicit benchmark cell:
@@ -165,10 +173,10 @@ python -m nav.scripts.run_benchmark_cell \
   --baseline llm \
   --file_name auto \
   --scene_id 1 \
-  --scene_name yifan1 \
+  --scene_name scene1 \
   --point_id point1 \
   --max_steps 70 \
-  --frame_save_dir outputs/yifan1/point1/gemini-3-flash-preview \
+  --frame_save_dir outputs/scene1/point1/gemini-3-flash-preview \
   --model_id google/gemini-3-flash-preview \
   --init_world_x 31 \
   --init_world_z 50 \
@@ -177,10 +185,10 @@ python -m nav.scripts.run_benchmark_cell \
   --target_y 450
 ```
 
-Supported scene names:
+Supported scene codes:
 
 ```text
-yifan1 yifan2 yifan3 yifan4 yicheng lichi1 lichi2 xinyu1 xinyu2 anh1 anh2 anh3
+scene1 scene2 scene3 scene4 scene5 scene6 scene7 scene8 scene9 scene10 scene11 scene12
 ```
 
 ## Run A*
@@ -190,13 +198,13 @@ A* is the offline classical navigation baseline. It does not call OpenRouter.
 Run A* on all points for one scene:
 
 ```bash
-bash shs/run_Astar.sh yifan1
+bash shs/run_Astar.sh scene1
 ```
 
 Run A* on one point:
 
 ```bash
-bash shs/run_Astar.sh yifan1 point1
+bash shs/run_Astar.sh scene1 point1
 ```
 
 Run A* on all scenes:
@@ -208,17 +216,17 @@ bash shs/run_Astar.sh all
 Enable debug visualizations:
 
 ```bash
-ASTAR_DEBUG_VIZ=1 bash shs/run_Astar.sh yifan1 point1
+ASTAR_DEBUG_VIZ=1 bash shs/run_Astar.sh scene1 point1
 ```
 
 Equivalent path through the general benchmark wrapper:
 
 ```bash
-BASELINE=astar bash shs/run_headless_benchmark.sh yifan1
+BASELINE=astar bash shs/run_headless_benchmark.sh scene1
 ```
 
 A* outputs are written under:
 
 ```text
-outputs/<scene_name>/<point_id>/astar/
+outputs/<scene_code>/<point_id>/astar/
 ```

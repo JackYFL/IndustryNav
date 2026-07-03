@@ -43,8 +43,8 @@ source .venv/bin/activate     # macOS/Linux
 Or skip activation and prefix any command with `uv run`:
 
 ```bash
-uv run python -m nav.scripts.eval_run --input-dir outputs/yifan2/point1/glm-4.6v
-uv run bash shs/run_headless_benchmark.sh yifan1 anthropic/claude-sonnet-4.6
+uv run python -m nav.scripts.eval_run --input-dir outputs/scene2/point1/glm-4.6v
+uv run bash shs/run_headless_benchmark.sh scene1 anthropic/claude-sonnet-4.6
 ```
 
 ### ml-agents (REQUIRED — cloned from source)

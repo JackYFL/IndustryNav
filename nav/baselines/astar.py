@@ -46,7 +46,6 @@ class AStarBaseline:
         stuck_block_ahead_px: float = ASTAR_DEFAULTS.stuck_block_ahead_px,
         stuck_block_radius_px: float = ASTAR_DEFAULTS.stuck_block_radius_px,
         stuck_block_ttl_steps: int = ASTAR_DEFAULTS.stuck_block_ttl_steps,
-        success_stop_px: float = ASTAR_DEFAULTS.success_stop_px,
         proxy_stop_real_dist_px: float = ASTAR_DEFAULTS.proxy_stop_real_dist_px,
         debug_viz: bool = False,
         debug_dir: Optional[str] = None,
@@ -74,7 +73,6 @@ class AStarBaseline:
         self.stuck_block_ahead_px = float(stuck_block_ahead_px)
         self.stuck_block_radius_px = float(stuck_block_radius_px)
         self.stuck_block_ttl_steps = int(stuck_block_ttl_steps)
-        self.success_stop_px = float(success_stop_px)
         self.proxy_stop_real_dist_px = float(proxy_stop_real_dist_px)
         self.debug_viz = bool(debug_viz)
         self.debug_dir = debug_dir
@@ -105,13 +103,12 @@ class AStarBaseline:
         curr_world_xz: Optional[Tuple[float, float]] = None,
     ) -> Tuple[str, str, List[Point]]:
         distance = math.hypot(target_xy[0] - curr_xy[0], target_xy[1] - curr_xy[1])
-        stop_px = max(float(reach_px), self.success_stop_px)
-        if distance <= stop_px:
+        if distance <= reach_px:
             self.last_path = [curr_xy, target_xy]
             self.last_action_was_move = False
             return (
                 "stop",
-                f"Astar reached target vicinity; dist={distance:.1f}px stop_px={stop_px:.1f}.",
+                f"Astar reached target vicinity; dist={distance:.1f}px.",
                 self.last_path,
             )
 

@@ -24,16 +24,15 @@ import numpy as np
 from mlagents_envs.base_env import ActionTuple
 
 from nav.baselines.astar import AStarBaseline
-from nav.baselines.navid import NaVidBaseline
-from nav.config import ACTION_SPACE_ANNOTATION as ACTION_SPACE
 from nav.config import (
+    ACTION_SPACE_AGENTS,
+    ACTION_SPACE_ANNOTATION,
     ASTAR_DEFAULTS,
     BEHAVIOR_NAME,
     BENCHMARK_BASELINES,
     DEFAULT_PROMPT_VISION,
     LLM_DEFAULT_HISTORY_SIZE,
     LLM_DEFAULT_MAX_TOKENS,
-    NAVID_DEFAULTS,
     UNITY_MAP_SIZE,
     resolve_scene_all_path,
 )
@@ -65,7 +64,7 @@ def parse_args():
         description="IndustryNav headless async benchmarking against the unified Unity client."
     )
     p.add_argument("--baseline", type=str, default="llm", choices=BENCHMARK_BASELINES,
-                   help="Decision baseline: random|llm|bc|astar|navid.")
+                   help="Decision baseline: random|llm|bc|astar.")
     p.add_argument("--frame_sleep", type=float, default=0.0,
                    help="Idle sleep while a decision thread is in flight.")
     p.add_argument("--max_steps", type=int, default=70, help="0 = run indefinitely.")
@@ -101,7 +100,7 @@ def parse_args():
     p.add_argument("--scene_id", type=int, required=True,
                    help="Scene id baked into the unified client (1..12).")
     p.add_argument("--scene_name", type=str, default="",
-                   help="Scene name (e.g. 'yifan1'). Recorded in results.csv as both "
+                   help="Scene code (e.g. 'scene1'). Recorded in results.csv as both "
                         "scene_name and the legacy exp_name column. Optional; the wrappers "
                         "and run_benchmark_grid.py pass it through.")
     p.add_argument("--point_id", type=str, default="",
@@ -166,22 +165,10 @@ def parse_args():
     p.add_argument("--astar_proxy_stop_real_dist_px", type=float,
                    default=ASTAR_DEFAULTS.proxy_stop_real_dist_px,
                    help="When target is inside an obstacle, stop at a reachable proxy only if real target distance is under this value.")
-    p.add_argument("--astar_success_stop_px", type=float,
-                   default=ASTAR_DEFAULTS.success_stop_px,
-                   help="Stop A* once the real target distance is within this evaluation-success radius.")
     p.add_argument("--astar_debug_viz", action="store_true",
                    help="Dump A* walkable-grid / path overlays per step.")
     p.add_argument("--astar_debug_dir", type=str, default="",
                    help="Where to write A* debug images (default: <frame_save_dir>/astar_debug).")
-
-    # NaVid baseline (needs torch + an external NaVid-VLN-CE checkout + checkpoint).
-    p.add_argument("--navid_repo", type=str, default="",
-                   help="Path to a NaVid-VLN-CE checkout containing the navid package.")
-    p.add_argument("--navid_model_path", type=str, default="",
-                   help="Path to the finetuned NaVid checkpoint directory.")
-    p.add_argument("--navid_instruction", type=str, default=NAVID_DEFAULTS.instruction)
-    p.add_argument("--navid_max_new_tokens", type=int, default=NAVID_DEFAULTS.max_new_tokens)
-    p.add_argument("--navid_temperature", type=float, default=NAVID_DEFAULTS.temperature)
 
     return p.parse_args()
 
@@ -385,6 +372,13 @@ def maybe_calibrate_projector_from_raw_marker(
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+def action_space_for_baseline(baseline: str) -> dict:
+    """Use agent controls for learned/LLM agents; keep A* on annotation controls."""
+    if baseline == "astar":
+        return ACTION_SPACE_ANNOTATION
+    return ACTION_SPACE_AGENTS
+
+
 def main():
     args = parse_args()
     # Resolve --file_name="auto" against config.SCENE_ALL_BUILDS so a single
@@ -400,7 +394,13 @@ def main():
     assert enabled_modalities.issubset({"ego", "minimap", "depth", "his"}), \
         "modalities must be subset of {ego,minimap,depth,his}"
 
-    allowed_actions = get_allowed_actions(ACTION_SPACE)
+    action_space = action_space_for_baseline(args.baseline)
+    allowed_actions = get_allowed_actions(action_space)
+    logger.info(
+        "Action space: "
+        f"{'ACTION_SPACE_ANNOTATION' if action_space is ACTION_SPACE_ANNOTATION else 'ACTION_SPACE_AGENTS'} "
+        f"{action_space}"
+    )
     prompt_template = load_prompt_template(args.prompt_file) if args.baseline == "llm" else ""
     history_deque = deque(maxlen=args.history_size if args.history_size > 0 else None)
 
@@ -414,7 +414,6 @@ def main():
         astar_planner = AStarBaseline(
             obstacle_inflate_px=args.astar_obstacle_inflate_px,
             marker_clear_px=args.astar_marker_clear_px,
-            success_stop_px=args.astar_success_stop_px,
             proxy_stop_real_dist_px=args.astar_proxy_stop_real_dist_px,
             debug_viz=args.astar_debug_viz,
             debug_dir=astar_debug_dir,
@@ -423,7 +422,6 @@ def main():
             "A* baseline ready | "
             f"obstacle_inflate_px={args.astar_obstacle_inflate_px} | "
             f"marker_clear_px={args.astar_marker_clear_px} | "
-            f"success_stop_px={args.astar_success_stop_px} | "
             f"proxy_stop_real_dist_px={args.astar_proxy_stop_real_dist_px} | "
             f"debug_viz={args.astar_debug_viz} | debug_dir={astar_debug_dir}"
         )
@@ -440,17 +438,6 @@ def main():
             f"BC agent loaded from {args.bc_ckpt} | device={bc_controller.device} | "
             f"seq_len={bc_controller.seq_len}"
         )
-
-    navid_planner = None
-    if args.baseline == "navid":
-        navid_planner = NaVidBaseline(
-            model_path=args.navid_model_path,
-            repo_path=args.navid_repo,
-            instruction=args.navid_instruction,
-            max_new_tokens=args.navid_max_new_tokens,
-            temperature=args.navid_temperature,
-        )
-        logger.info(f"NaVid baseline ready | model_path={args.navid_model_path}")
 
     # ---- Launch Unity + prime spawn/target (see nav.harness.env_setup) ----
     try:
@@ -472,6 +459,8 @@ def main():
     # ---- Per-modality save dirs (prefixed by the baseline token) ----
     subdirs = {}
     for mod in ("ego", "minimap", "depth"):
+        if args.baseline == "llm" and mod == "minimap":
+            continue
         if mod in enabled_modalities:
             subdirs[mod] = os.path.join(args.frame_save_dir, f"{args.baseline}_{('fp' if mod=='ego' else mod)}")
             clear_and_reset_dir(subdirs[mod])
@@ -537,6 +526,16 @@ def main():
             except Exception:
                 pos_x = pos_y = pos_z = 0.0
                 rot_x = rot_y = rot_z = 0.0
+
+            if decision_thread is not None and decision_thread.is_alive():
+                # Decision in flight: advance Unity with STOP, but do not resave
+                # the same decision-step frame under the same step_count.
+                env.set_actions(BEHAVIOR_NAME, ActionTuple(continuous=action2signal("stop", action_space)))
+                for _ in range(SIM_STEPS_PER_DECISION):
+                    env.step()
+                if args.frame_sleep > 0:
+                    time.sleep(args.frame_sleep)
+                continue
 
             curr_xy = last_curr_xy
             curr_heading_xy = None
@@ -614,15 +613,6 @@ def main():
                 )
 
             # ----- Async decision state machine -----
-            if decision_thread is not None and decision_thread.is_alive():
-                # Decision in flight: advance Unity with STOP so animations breathe.
-                env.set_actions(BEHAVIOR_NAME, ActionTuple(continuous=action2signal("stop", ACTION_SPACE)))
-                for _ in range(SIM_STEPS_PER_DECISION):
-                    env.step()
-                if args.frame_sleep > 0:
-                    time.sleep(args.frame_sleep)
-                continue
-
             if decision_thread is not None and not decision_thread.is_alive():
                 decision_thread.join()
                 decision_thread = None
@@ -654,19 +644,19 @@ def main():
                 )
                 if args.baseline == "astar" and chosen_action == "stop":
                     stop_reason = "astar_stop"
-                continuous_actions = action2signal(chosen_action, ACTION_SPACE)
+                continuous_actions = action2signal(chosen_action, action_space)
             else:
                 # No decision in flight: either we've reached, or we kick one off.
                 if (curr_xy is not None and target_xy is not None
                         and pix_dist(curr_xy, target_xy) <= args.reach_px):
                     chosen_action = "stop"
                     step_count += 1
-                    continuous_actions = action2signal(chosen_action, ACTION_SPACE)
+                    continuous_actions = action2signal(chosen_action, action_space)
                     stop_reason = "reached_vicinity"
                 else:
                     payload = None
                     if args.baseline == "random":
-                        payload = {"action_space": list(ACTION_SPACE.keys())}
+                        payload = {"action_space": list(action_space.keys())}
                     elif args.baseline == "llm":
                         if curr_xy is not None and target_xy is not None:
                             distance = pix_dist(curr_xy, target_xy)
@@ -699,8 +689,6 @@ def main():
                                 "step": step_count,
                                 "curr_world_xz": (float(pos_x), float(pos_z)),
                             }
-                    elif args.baseline == "navid":
-                        payload = {"navid_planner": navid_planner, "ego_rgb": ego_rgb}
                     elif args.baseline == "bc":
                         payload = {
                             "bc_controller": bc_controller,
@@ -716,7 +704,7 @@ def main():
                     if payload is None:
                         chosen_action = "stop"
                         step_count += 1
-                        continuous_actions = action2signal(chosen_action, ACTION_SPACE)
+                        continuous_actions = action2signal(chosen_action, action_space)
                     else:
                         decision_result = {"finished": False}
                         decision_thread = threading.Thread(
@@ -725,7 +713,7 @@ def main():
                             daemon=True,
                         )
                         decision_thread.start()
-                        env.set_actions(BEHAVIOR_NAME, ActionTuple(continuous=action2signal("stop", ACTION_SPACE)))
+                        env.set_actions(BEHAVIOR_NAME, ActionTuple(continuous=action2signal("stop", action_space)))
                         for _ in range(SIM_STEPS_PER_DECISION):
                             env.step()
                         if args.frame_sleep > 0:

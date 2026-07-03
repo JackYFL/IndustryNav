@@ -6,7 +6,7 @@ bounded ProcessPoolExecutor:
 
   python -m nav.scripts.run_benchmark_grid \
       --models anthropic/claude-sonnet-4.6 google/gemini-3-flash-preview \
-      --scenes yifan1 yifan2 ... \
+      --scenes scene1 scene2 ... \
       --seeds 0 1 2 \
       --vision_input both \
       --history_sizes 0 5 10 \
@@ -71,7 +71,7 @@ HISTORY_SWEEP_ROOT = REPO_ROOT / "outputs" / "_history_size"
 @dataclass(frozen=True)
 class Cell:
     model: str          # e.g. "anthropic/claude-sonnet-4.6"
-    scene_name: str     # e.g. "yifan1"
+    scene_name: str     # e.g. "scene1"
     point_id: str       # e.g. "point1"
     seed_id: str        # e.g. "0"
     vision_input: bool  # True | False

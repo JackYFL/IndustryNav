@@ -3,12 +3,12 @@
 # unified scene_all client.
 #
 # Usage:
-#   bash shs/run_Astar.sh <scene_name|all> [point_id]
+#   bash shs/run_Astar.sh <scene_code|all> [point_id]
 #
 # Examples:
-#   bash shs/run_Astar.sh yifan1
-#   bash shs/run_Astar.sh yifan1 point1
-#   ASTAR_DEBUG_VIZ=1 bash shs/run_Astar.sh yifan1 point1
+#   bash shs/run_Astar.sh scene1
+#   bash shs/run_Astar.sh scene1 point1
+#   ASTAR_DEBUG_VIZ=1 bash shs/run_Astar.sh scene1 point1
 #   MAX_STEPS=120 bash shs/run_Astar.sh all
 #
 # Env:
@@ -38,14 +38,11 @@
 #       <frame_save_dir>/astar_debug when ASTAR_DEBUG_VIZ=1.
 #   ASTAR_OBSTACLE_INFLATE_PX
 #       Optional obstacle dilation in minimap pixels. Default: 8, except
-#       yifan1/point2 defaults to 24 to avoid the shelf collider corner.
+#       scene1/point2 defaults to 24 to avoid the shelf collider corner.
 #   ASTAR_MARKER_CLEAR_PX
 #       Optional marker clearing radius. Default: 16.
 #   ASTAR_PROXY_STOP_REAL_DIST_PX
 #       Optional real-target distance threshold for blocked-target proxy stop.
-#       Default: 60.
-#   ASTAR_SUCCESS_STOP_PX
-#       Optional real-target distance threshold for normal A* stop.
 #       Default: 65.
 #   DRY_RUN
 #       Set to 1 to print commands without launching Unity.
@@ -64,8 +61,8 @@ SCENE_ARG="${1:-}"
 POINT_FILTER="${2:-}"
 
 if [[ -z "$SCENE_ARG" ]]; then
-  echo "Usage: $0 <scene_name|all> [point_id]"
-  echo "scene_name must be one of: yifan1 yifan2 yifan3 yifan4 yicheng lichi1 lichi2 xinyu1 xinyu2 anh1 anh2 anh3"
+  echo "Usage: $0 <scene_code|all> [point_id]"
+  echo "scene_code must be one of: scene1 scene2 scene3 scene4 scene5 scene6 scene7 scene8 scene9 scene10 scene11 scene12"
   echo "Use 'all' to run every scene. Optional point_id filters to one point, e.g. point1."
   exit 1
 fi
@@ -87,27 +84,27 @@ fi
 
 scene_id_for() {
   case "$1" in
-    yifan1)  echo 1  ;;
-    yifan2)  echo 2  ;;
-    yifan3)  echo 3  ;;
-    yifan4)  echo 4  ;;
-    yicheng) echo 5  ;;
-    lichi1)  echo 6  ;;
-    lichi2)  echo 7  ;;
-    xinyu1)  echo 8  ;;
-    xinyu2)  echo 9  ;;
-    anh1)    echo 10 ;;
-    anh2)    echo 11 ;;
-    anh3)    echo 12 ;;
+    scene1)  echo 1  ;;
+    scene2)  echo 2  ;;
+    scene3)  echo 3  ;;
+    scene4)  echo 4  ;;
+    scene5)  echo 5  ;;
+    scene6)  echo 6  ;;
+    scene7)  echo 7  ;;
+    scene8)  echo 8  ;;
+    scene9)  echo 9  ;;
+    scene10) echo 10 ;;
+    scene11) echo 11 ;;
+    scene12) echo 12 ;;
     *)       return 1 ;;
   esac
 }
 
 if [[ "$SCENE_ARG" == "all" ]]; then
-  SCENES=(yifan1 yifan2 yifan3 yifan4 yicheng lichi1 lichi2 xinyu1 xinyu2 anh1 anh2 anh3)
+  SCENES=(scene1 scene2 scene3 scene4 scene5 scene6 scene7 scene8 scene9 scene10 scene11 scene12)
 else
   if ! scene_id_for "$SCENE_ARG" >/dev/null; then
-    echo "Unknown scene_name: $SCENE_ARG"
+    echo "Unknown scene_code: $SCENE_ARG"
     exit 1
   fi
   SCENES=("$SCENE_ARG")
@@ -160,7 +157,6 @@ RUN_NAME="${RUN_NAME:-astar}"
 ASTAR_DEBUG_VIZ="${ASTAR_DEBUG_VIZ:-0}"
 ASTAR_MARKER_CLEAR_PX="${ASTAR_MARKER_CLEAR_PX:-16}"
 ASTAR_PROXY_STOP_REAL_DIST_PX="${ASTAR_PROXY_STOP_REAL_DIST_PX:-65}"
-ASTAR_SUCCESS_STOP_PX="${ASTAR_SUCCESS_STOP_PX:-60}"
 DRY_RUN="${DRY_RUN:-0}"
 BASE_PORT_START="${BASE_PORT_START:-5507}"
 
@@ -224,11 +220,11 @@ PY
     base_port="$(pick_base_port "$((BASE_PORT_START + idx))")"
     frame_save_dir="outputs/${scene_name}/${point_id}/${RUN_NAME}"
     max_steps_for_point="$MAX_STEPS"
-    if [[ -z "$MAX_STEPS_WAS_SET" && "$scene_name" == "yifan1" && "$point_id" == "point4" ]]; then
+    if [[ -z "$MAX_STEPS_WAS_SET" && "$scene_name" == "scene1" && "$point_id" == "point4" ]]; then
       max_steps_for_point=100
     fi
     astar_obstacle_inflate_px="${ASTAR_OBSTACLE_INFLATE_PX:-8}"
-    if [[ -z "${ASTAR_OBSTACLE_INFLATE_PX:-}" && "$scene_name" == "yifan1" && "$point_id" == "point2" ]]; then
+    if [[ -z "${ASTAR_OBSTACLE_INFLATE_PX:-}" && "$scene_name" == "scene1" && "$point_id" == "point2" ]]; then
       astar_obstacle_inflate_px=24
     fi
 
@@ -250,7 +246,6 @@ PY
          --astar_obstacle_inflate_px "$astar_obstacle_inflate_px"
          --astar_marker_clear_px "$ASTAR_MARKER_CLEAR_PX"
          --astar_proxy_stop_real_dist_px "$ASTAR_PROXY_STOP_REAL_DIST_PX"
-         --astar_success_stop_px "$ASTAR_SUCCESS_STOP_PX"
          --init_world_x "$init_wx"
          --init_world_z "$init_wz"
          --init_curr_direction "$init_dir"
@@ -276,7 +271,7 @@ PY
 
     echo "[astar] output=${frame_save_dir}"
     echo "[astar] max_steps_for_point=${max_steps_for_point}"
-    echo "[astar] obstacle_inflate_px=${astar_obstacle_inflate_px} marker_clear_px=${ASTAR_MARKER_CLEAR_PX} success_stop_px=${ASTAR_SUCCESS_STOP_PX} proxy_stop_real_dist_px=${ASTAR_PROXY_STOP_REAL_DIST_PX}"
+    echo "[astar] obstacle_inflate_px=${astar_obstacle_inflate_px} marker_clear_px=${ASTAR_MARKER_CLEAR_PX} proxy_stop_real_dist_px=${ASTAR_PROXY_STOP_REAL_DIST_PX}"
     if [[ "$DRY_RUN" == "1" || "$DRY_RUN" == "true" || "$DRY_RUN" == "on" ]]; then
       printf '[astar] dry-run command:'
       printf ' %q' "${cmd[@]}"

@@ -4,30 +4,30 @@
 # `python -m nav.scripts.run_benchmark_cell` invocation per point.
 #
 # Usage:
-#   bash shs/run_headless_benchmark.sh <scene_name> [model_id]
-#   BASELINE=astar bash shs/run_headless_benchmark.sh yifan1
+#   bash shs/run_headless_benchmark.sh <scene_code> [model_id]
+#   BASELINE=astar bash shs/run_headless_benchmark.sh scene1
 #
 # OS handling (auto via `uname -s`): Linux wraps each invocation in `xvfb-run`
 # (unless USE_XVFB=0) and defaults the client to the .x86_64 ELF; macOS uses the
 # .app and no xvfb. The Python module itself is OS-agnostic.
 #
 # Env:
-#   BASELINE     llm | astar | navid | bc | random        (default: llm)
+#   BASELINE     llm | astar | bc | random        (default: llm)
 #   MODEL_ID     OpenRouter model id (BASELINE=llm only)   (default: google/gemini-3-flash-preview)
 #   SCENE_ALL_APP / SCENE_ALL_BIN  client path override     (default: auto -> config.SCENE_ALL_BUILDS,
 #                                  which prefers the in-repo unity_client/ build, no path needed)
-#   SCENE_ID     override the scene_name->scene_id mapping
+#   SCENE_ID     override the scene_code->scene_id mapping
 #   MAX_STEPS    per-point decision-step cap               (default: 70)
 #   PYTHON_BIN   interpreter                               (default: <repo>/.venv/bin/python)
 #   USE_XVFB / XVFB_SCREEN   Linux virtual-display knobs    (default: 1 / 1724x1024x24)
 
 set -euo pipefail
 
-SCENE_NAME="${1:-}"
-if [[ -z "$SCENE_NAME" ]]; then
-  echo "Usage: $0 <scene_name> [model_id]"
-  echo "scene_name must be one of: yifan1 yifan2 yifan3 yifan4 yicheng lichi1 lichi2 xinyu1 xinyu2 anh1 anh2 anh3"
-  echo "Set BASELINE={llm,astar,navid,bc,random} (default llm)."
+SCENE_CODE="${1:-}"
+if [[ -z "$SCENE_CODE" ]]; then
+  echo "Usage: $0 <scene_code> [model_id]"
+  echo "scene_code must be one of: scene1 scene2 scene3 scene4 scene5 scene6 scene7 scene8 scene9 scene10 scene11 scene12"
+  echo "Set BASELINE={llm,astar,bc,random} (default llm)."
   exit 1
 fi
 
@@ -40,21 +40,21 @@ else
   RUN_NAME="$BASELINE"
 fi
 
-# scene_name -> scene_id baked into the unified client. Override via SCENE_ID.
-case "$SCENE_NAME" in
-  yifan1)  SCENE_ID_DEFAULT=1  ;;
-  yifan2)  SCENE_ID_DEFAULT=2  ;;
-  yifan3)  SCENE_ID_DEFAULT=3  ;;
-  yifan4)  SCENE_ID_DEFAULT=4  ;;
-  yicheng) SCENE_ID_DEFAULT=5  ;;
-  lichi1)  SCENE_ID_DEFAULT=6  ;;
-  lichi2)  SCENE_ID_DEFAULT=7  ;;
-  xinyu1)  SCENE_ID_DEFAULT=8  ;;
-  xinyu2)  SCENE_ID_DEFAULT=9  ;;
-  anh1)    SCENE_ID_DEFAULT=10 ;;
-  anh2)    SCENE_ID_DEFAULT=11 ;;
-  anh3)    SCENE_ID_DEFAULT=12 ;;
-  *)       echo "Unknown scene_name: $SCENE_NAME"; exit 1 ;;
+# scene_code -> scene_id baked into the unified client. Override via SCENE_ID.
+case "$SCENE_CODE" in
+  scene1)  SCENE_ID_DEFAULT=1  ;;
+  scene2)  SCENE_ID_DEFAULT=2  ;;
+  scene3)  SCENE_ID_DEFAULT=3  ;;
+  scene4)  SCENE_ID_DEFAULT=4  ;;
+  scene5)  SCENE_ID_DEFAULT=5  ;;
+  scene6)  SCENE_ID_DEFAULT=6  ;;
+  scene7)  SCENE_ID_DEFAULT=7  ;;
+  scene8)  SCENE_ID_DEFAULT=8  ;;
+  scene9)  SCENE_ID_DEFAULT=9  ;;
+  scene10) SCENE_ID_DEFAULT=10 ;;
+  scene11) SCENE_ID_DEFAULT=11 ;;
+  scene12) SCENE_ID_DEFAULT=12 ;;
+  *)       echo "Unknown scene_code: $SCENE_CODE"; exit 1 ;;
 esac
 SCENE_ID="${SCENE_ID:-$SCENE_ID_DEFAULT}"
 
@@ -109,7 +109,7 @@ fi
 MAX_STEPS="${MAX_STEPS:-70}"
 
 idx=0
-"$PYTHON_BIN" - <<'PY' "$INPUT_FILE" "$SCENE_NAME" | while IFS='|' read -r point_id init_wx init_wz init_dir target_x target_y; do
+"$PYTHON_BIN" - <<'PY' "$INPUT_FILE" "$SCENE_CODE" | while IFS='|' read -r point_id init_wx init_wz init_dir target_x target_y; do
 import json, sys
 from pathlib import Path
 
@@ -127,18 +127,18 @@ for entry in data.get(scene, []):
     ty = int(entry["target"]["y"])
     print(f"{pid}|{sx}|{sz}|{sd}|{tx}|{ty}")
 PY
-  echo "[benchmark] scene=${SCENE_NAME} (scene_id=${SCENE_ID}) point=${point_id} baseline=${BASELINE} run=${RUN_NAME}"
+  echo "[benchmark] scene=${SCENE_CODE} (scene_id=${SCENE_ID}) point=${point_id} baseline=${BASELINE} run=${RUN_NAME}"
   echo "[benchmark] init_world=(${init_wx},${init_wz},dir=${init_dir}) target_px=(${target_x},${target_y})"
 
   WORKER_ID=$((1 + idx))
   BASE_PORT="$($PYTHON_BIN -c 'import socket; s=socket.socket(); s.bind(("localhost",0)); print(s.getsockname()[1]); s.close()')"
-  FRAME_SAVE_DIR="outputs/${SCENE_NAME}/${point_id}/${RUN_NAME}"
+  FRAME_SAVE_DIR="outputs/${SCENE_CODE}/${point_id}/${RUN_NAME}"
 
   CMD=("$PYTHON_BIN" -m nav.scripts.run_benchmark_cell
        --baseline "$BASELINE"
        --file_name "$CLIENT"
        --scene_id "$SCENE_ID"
-       --scene_name "$SCENE_NAME"
+       --scene_name "$SCENE_CODE"
        --point_id "$point_id"
        --worker_id "$WORKER_ID"
        --base_port "$BASE_PORT"

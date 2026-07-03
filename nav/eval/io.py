@@ -11,10 +11,10 @@ The post-hoc evaluators all read from the same on-disk layout produced by
         ...
 
 Different ``--baseline`` runs use slightly different directory/CSV prefixes
-(``llm_*``, ``astar_*``, ``navid_*``, ``bc_*`` plus legacy ``agent_*`` /
-``bc_agent_*`` / ``manual_*``). The candidate prefix lists live in
-:mod:`nav.config`; the helpers here hide that variation behind a single
-interface so individual metric implementations don't reimplement probing.
+(``llm_*``, ``astar_*``, ``bc_*`` plus legacy ``agent_*`` / ``bc_agent_*`` /
+``manual_*``). The candidate prefix lists live in :mod:`nav.config`; the
+helpers here hide that variation behind a single interface so individual metric
+implementations don't reimplement probing.
 """
 
 from __future__ import annotations

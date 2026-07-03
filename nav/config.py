@@ -42,18 +42,18 @@ UNITY_MAP_SIZE: Tuple[float, float] = (862.0, 512.0)
 MODALITY_TO_IDX: Dict[str, int] = {"ego": 0, "depth": 1, "minimap": 2}
 
 SCENE_ID_MAP: Dict[str, int] = {
-    "yifan1": 1,
-    "yifan2": 2,
-    "yifan3": 3,
-    "yifan4": 4,
-    "yicheng": 5,
-    "lichi1": 6,
-    "lichi2": 7,
-    "xinyu1": 8,
-    "xinyu2": 9,
-    "anh1": 10,
-    "anh2": 11,
-    "anh3": 12,
+    "scene1": 1,
+    "scene2": 2,
+    "scene3": 3,
+    "scene4": 4,
+    "scene5": 5,
+    "scene6": 6,
+    "scene7": 7,
+    "scene8": 8,
+    "scene9": 9,
+    "scene10": 10,
+    "scene11": 11,
+    "scene12": 12,
 }
 
 # UUIDs/opcodes must match the Unity C# side-channel registration.
@@ -121,24 +121,10 @@ class AStarParams:
     stuck_block_ahead_px: float = 28.0
     stuck_block_radius_px: float = 18.0
     stuck_block_ttl_steps: int = 24
-    success_stop_px: float = 60.0
     proxy_stop_real_dist_px: float = 65.0
 
 
 ASTAR_DEFAULTS = AStarParams()
-
-
-@dataclass(frozen=True)
-class NaVidParams:
-    """NaVid baseline adapter defaults."""
-
-    max_new_tokens: int = 256
-    temperature: float = 0.2
-    conv_mode: str = "vicuna_v1"
-    instruction: str = "Navigate to the target location using the visual observations."
-
-
-NAVID_DEFAULTS = NaVidParams()
 
 
 # Evaluation
@@ -396,12 +382,11 @@ BC_BASE_PRESETS: Dict[str, BCTrainConfig] = {
 
 # Benchmark/eval file discovery
 
-BENCHMARK_BASELINES: List[str] = ["random", "llm", "bc", "astar", "navid"]
+BENCHMARK_BASELINES: List[str] = ["random", "llm", "bc", "astar"]
 EVAL_RUN_PREFIXES: List[str] = [
     "llm",
     "bc",
     "astar",
-    "navid",
     "random",
     "agent",
     "bc_agent",

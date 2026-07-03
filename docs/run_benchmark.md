@@ -1,6 +1,6 @@
 # Running benchmarks (macOS / Ubuntu Linux, unified Unity client)
 
-This is the canonical guide for running AI navigation benchmarks against the **unified** Unity client (`scene_all`, 12 scenes bundled, scene chosen at runtime). The legacy per-scene clients (`yifan1.app`, `lichi1.app`, …) and the older `run_sync.py` / `run_async.py` / `shs/run_agent.sh` flow are **not** the latest; treat them as reference only.
+This is the canonical guide for running AI navigation benchmarks against the **unified** Unity client (`scene_all`, 12 scenes bundled, scene chosen at runtime). Legacy per-scene clients and the older `run_sync.py` / `run_async.py` / `shs/run_agent.sh` flow are **not** the latest; treat them as reference only.
 
 The current entry point is `nav/scripts/run_benchmark_cell.py` (run via `python -m nav.scripts.run_benchmark_cell`), driven by:
 
@@ -29,20 +29,20 @@ The Python script itself is OS-agnostic; the wrappers only differ in client-path
 macOS:
 ```bash
 source tmp/secrets.sh
-bash shs/run_headless_benchmark.sh yifan1 google/gemini-3-flash-preview
+bash shs/run_headless_benchmark.sh scene1 google/gemini-3-flash-preview
 ```
 
 Ubuntu Linux:
 ```bash
 source tmp/secrets.sh
-bash shs/run_headless_benchmark.sh yifan1 google/gemini-3-flash-preview
+bash shs/run_headless_benchmark.sh scene1 google/gemini-3-flash-preview
 ```
 
-This iterates every point under `input_points.json["yifan1"]` and produces (per-run
+This iterates every point under `input_points.json["scene1"]` and produces (per-run
 sub-dirs/CSVs are prefixed by the **baseline token** — `llm_*` here; `astar_*`, `random_*`, … otherwise):
 
 ```
-outputs/<scene_name>/<point_id>/<model_short_name>/
+outputs/<scene_code>/<point_id>/<model_short_name>/
 ├── llm_fp/           # ego camera frames (PNG)
 ├── llm_minimap/      # raw minimap frames
 ├── llm_depth/        # depth frames
@@ -57,13 +57,14 @@ The wrapper reads spawn + target from `input_points.json`, picks a free TCP base
 point (so multiple scenes can run in parallel from different terminals), and dispatches one
 `python -m nav.scripts.run_benchmark_cell` per point.
 
-The full list of valid `<scene_name>` values (and their `scene_id` mapping) is documented in [`scene_list.md`](scene_list.md).
+The full list of valid `<scene_code>` values (and their `scene_id` mapping) is documented in [`scene_list.md`](scene_list.md). For the Unity scene files and Python/Unity interface details, see [`scene_files_and_interfaces.md`](scene_files_and_interfaces.md).
 
 ### Baselines and sweeps
 
-- **Non-LLM baselines** (no API key): set `BASELINE` ∈ `{astar, navid, bc, random}`, e.g.
-  `BASELINE=astar bash shs/run_headless_benchmark.sh yifan1`. The output subdir is named by the
+- **Non-LLM baselines** (no API key): set `BASELINE` ∈ `{astar, bc, random}`, e.g.
+  `BASELINE=astar bash shs/run_headless_benchmark.sh scene1`. The output subdir is named by the
   baseline token instead of a model name. `llm` (default) is the only one that calls OpenRouter.
+  For BC data collection, training, and checkpoint inference details, see [`bc_workflow.md`](bc_workflow.md).
 - **Grid sweeps** across `model × scene × point × seed × vision × history_size` go through the
   orchestrator: `python -m nav.scripts.run_benchmark_grid --models … --scenes … [--history_sizes 0 5 10]`.
   Aggregates land under `analysis/grid_runs/<timestamp>/`; non-default history sizes are routed under
@@ -80,7 +81,7 @@ SCENE_ALL_APP=/home/liyifa11/MyCodes/IndustryNav/scene_files/Linux/scene_all/sce
   --baseline llm \
   --file_name "$SCENE_ALL_APP" \
   --scene_id 1 --base_port 5520 --max_steps 70 \
-  --frame_save_dir outputs/yifan1/point1/gemini-3-flash-preview \
+  --frame_save_dir outputs/scene1/point1/gemini-3-flash-preview \
   --model_id google/gemini-3-flash-preview \
   --init_world_x 31.0 --init_world_z 49.63 --init_curr_direction 180 \
   --target_x 550 --target_y 450
@@ -93,7 +94,7 @@ xvfb-run -a -s "-screen 0 1724x1024x24" .venv/bin/python -m nav.scripts.run_benc
   --baseline llm \
   --file_name /mnt/ss2/devops/sandbox/industrynav2/client/scene_all/scene_all.x86_64 \
   --scene_id 1 --base_port 5520 --max_steps 70 \
-  --frame_save_dir outputs/yifan1/point1/gemini-3-flash-preview \
+  --frame_save_dir outputs/scene1/point1/gemini-3-flash-preview \
   --model_id google/gemini-3-flash-preview \
   --init_world_x 31.0 --init_world_z 49.63 --init_curr_direction 180 \
   --target_x 550 --target_y 450
@@ -159,7 +160,7 @@ Tested OpenRouter model ids:
 | GPT-5.2 | `openai/gpt-5.2` | high |
 | Qwen 3.5 Plus | `qwen/qwen3.5-plus-02-15` | low |
 
-Pass via `bash shs/run_headless_benchmark.sh <scene_name> <model_id>`.
+Pass via `bash shs/run_headless_benchmark.sh <scene_code> <model_id>`.
 
 ---
 
@@ -175,7 +176,7 @@ Pass via `bash shs/run_headless_benchmark.sh <scene_name> <model_id>`.
 `nav.scripts.run_benchmark_cell` does **not** compute final benchmark scores by itself. It only writes raw per-step actions + frames + a one-row session summary. Aggregate metrics (success rate, total steps, distance, etc. — the columns in `eval_results.xlsx`) are produced by the **post-hoc** `nav.scripts.eval_run`:
 
 ```bash
-.venv/bin/python -m nav.scripts.eval_run --input-dir outputs/yifan1/point1/gemini-3-flash-preview
+.venv/bin/python -m nav.scripts.eval_run --input-dir outputs/scene1/point1/gemini-3-flash-preview
 ```
 
 Aggregation across runs into `eval_results.xlsx` is a manual / sheet-export step downstream of `nav.scripts.eval_run`.
