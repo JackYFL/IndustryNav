@@ -64,12 +64,91 @@ The full list of valid `<scene_code>` values (and their `scene_id` mapping) is d
 - **Non-LLM baselines** (no API key): set `BASELINE` ∈ `{astar, bc, random}`, e.g.
   `BASELINE=astar bash shs/run_headless_benchmark.sh scene1`. The output subdir is named by the
   baseline token instead of a model name. `llm` (default) is the only one that calls OpenRouter.
-  For BC data collection, training, and checkpoint inference details, see [`bc_workflow.md`](bc_workflow.md).
+  The same routing interface can be extended for additional baselines. For A* commands, tuning, debug visualizations, and extension notes, see [`astar_workflow.md`](astar_workflow.md).
+  For BC data collection, training, and checkpoint inference, see [`bc_workflow.md`](bc_workflow.md).
 - **Grid sweeps** across `model × scene × point × seed × vision × history_size` go through the
   orchestrator: `python -m nav.scripts.run_benchmark_grid --models … --scenes … [--history_sizes 0 5 10]`.
   Aggregates land under `analysis/grid_runs/<timestamp>/`; non-default history sizes are routed under
   `outputs/_history_size/hs<k>/` so the stats loader isn't polluted. Omit `--history_sizes` for a normal
   single-history sweep.
+
+### Shell wrapper variables
+
+The shell wrappers use environment variables as lightweight "macros": set them before the command to override defaults without editing the script.
+
+Example:
+
+```bash
+BASELINE=astar MAX_STEPS=100 bash shs/run_headless_benchmark.sh scene1
+```
+
+#### `shs/run_headless_benchmark.sh`
+
+This is the general benchmark wrapper for `llm`, `astar`, `bc`, and `random`.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `BASELINE` | `llm` | Decision backend: `llm`, `astar`, `bc`, or `random`. |
+| `MODEL_ID` | `google/gemini-3-flash-preview` | OpenRouter model id for `BASELINE=llm`. The second positional arg overrides this too. |
+| `SCENE_ALL_APP` | `auto` | macOS Unity runtime path override. |
+| `SCENE_ALL_BIN` | `auto` | Linux Unity runtime path override. |
+| `SCENE_ID` | derived from `scene_code` | Overrides the wrapper's `scene_code -> scene_id` mapping. Useful only if a local runtime build has a different scene order. |
+| `MAX_STEPS` | `70` | Per-point decision-step budget. |
+| `PYTHON_BIN` | `<repo>/.venv/bin/python` | Python interpreter used by the wrapper. |
+| `USE_XVFB` | `1` on Linux | Whether to wrap Unity with `xvfb-run` on Linux. |
+| `XVFB_SCREEN` | `1724x1024x24` | Virtual display size/depth passed to `xvfb-run`. |
+| `OPENROUTER_API_KEY` | unset | Required only for `BASELINE=llm`. |
+
+Output naming:
+
+- `BASELINE=llm` writes to `outputs/<scene_code>/<point_id>/<model_short_name>/`.
+- Non-LLM baselines write to `outputs/<scene_code>/<point_id>/<baseline>/`.
+
+#### `shs/run_Astar.sh`
+
+This is a convenience wrapper around `run_benchmark_cell --baseline astar`. It supports all variables above that relate to runtime launch, plus A*-specific controls.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `INPUT_FILE` | `<repo>/input_points.json` | Alternate point JSON. |
+| `MAX_STEPS` | `70` | Per-point step budget. `scene1/point4` defaults to `100` unless this is explicitly set. |
+| `SIM_STEPS_PER_DECISION` | `2` | Unity simulation steps per A* action. |
+| `REACH_PX` | `34` | Success radius in visual minimap pixels. |
+| `MODALITIES` | `ego,minimap,depth` | Saved sensor streams. |
+| `MARKER_SOURCE` | `vector` | `vector` projects Unity position/heading; `red` uses legacy red-marker detection. |
+| `HIDE_UNITY_RED_MARKER` | `1` | Hide old Unity red marker when drawing Python-side vector marker. |
+| `RUN_NAME` | `astar` | Output directory name under `outputs/<scene_code>/<point_id>/`. |
+| `ASTAR_DEBUG_VIZ` | `0` | Save A* walkable-grid/path debug frames. |
+| `ASTAR_DEBUG_DIR` | `<frame_save_dir>/astar_debug` | Explicit debug frame directory. |
+| `ASTAR_OBSTACLE_INFLATE_PX` | `8` | Obstacle dilation in minimap pixels. `scene1/point2` defaults to `24` unless this is explicitly set. |
+| `ASTAR_MARKER_CLEAR_PX` | `16` | Radius cleared around current/target marker artifacts. |
+| `ASTAR_PROXY_STOP_REAL_DIST_PX` | `65` | Stop threshold for blocked-target proxy stopping. |
+| `DRY_RUN` | `0` | Print the generated command without launching Unity. |
+| `BASE_PORT_START` | `5507` | Fallback base port if automatic free-port probing fails. |
+
+Common A* examples:
+
+```bash
+ASTAR_DEBUG_VIZ=1 bash shs/run_Astar.sh scene1 point1
+ASTAR_OBSTACLE_INFLATE_PX=20 RUN_NAME=astar_inflate20 bash shs/run_Astar.sh scene1 point2
+MAX_STEPS=120 bash shs/run_Astar.sh all
+```
+
+#### `shs/train_bc.sh`
+
+This wrapper is intentionally small. It forwards most configuration to `python -m nav.scripts.train_bc`.
+
+| Variable / arg | Default | Meaning |
+|---|---|---|
+| first positional arg | `resnet50` | BC preset: `cnn`, `resnet50`, or `dinov2`. |
+| `PYTHON_BIN` | `<repo>/.venv/bin/python` | Python interpreter. |
+| extra args | none | Forwarded directly to `nav.scripts.train_bc`, e.g. `--data_root`, `--epochs`, `--output_dir`. |
+
+Example:
+
+```bash
+bash shs/train_bc.sh resnet50 --data_root collect_data --epochs 20
+```
 
 ### Single-point run (for debugging)
 

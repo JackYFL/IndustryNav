@@ -21,7 +21,8 @@ The Python side provides:
 
 - a unified benchmark runner for the `scene_all` Unity client;
 - LLM-based navigation through OpenRouter;
-- classical baselines, especially A*;
+- built-in baselines including LLM, A*, BC, and random policies;
+- a shared baseline interface for adding additional navigation methods;
 - telemetry output for frames, actions, per-run results, and downstream analysis.
 
 The current benchmark uses one compiled Unity client, `scene_all`, which contains all supported scenes. The scene is selected at runtime by `scene_id`.
@@ -34,7 +35,7 @@ IndustryNav/
 ├── input_points.json          # Start/target points for each scene
 ├── pyproject.toml             # uv project config and pinned dependencies
 ├── requirements.txt           # pip/conda dependency fallback
-├── docs/                      # Detailed notes and historical project docs
+├── docs/                      # Detailed notes about the project, including scene file and interfaces, and behavior cloning
 ├── shs/                       # Shell wrappers for common runs
 │   ├── run_headless_benchmark.sh
 │   ├── run_Astar.sh
@@ -61,6 +62,7 @@ Scene/client maintenance docs:
 
 - [`docs/scene_list.md`](docs/scene_list.md): supported `scene1`-`scene12` codes and `scene_id` mapping.
 - [`docs/scene_files_and_interfaces.md`](docs/scene_files_and_interfaces.md): runtime scene codes, environment parameters, side channels, and spawn/target mapping.
+- [`docs/astar_workflow.md`](docs/astar_workflow.md): A* commands plus the shared baseline extension interface.
 - [`docs/bc_workflow.md`](docs/bc_workflow.md): behavior-cloning data collection, training, and inference.
 
 ## Environment Setup
@@ -106,11 +108,16 @@ python -m pip install external/ml-agents/ml-agents
 
 Place the compiled `scene_all` client under one of the auto-discovery folders (`unity_clients/` or `unity_client/`), or pass an explicit path with environment variables.
 
+macOS scene runtime:
+
+- [Download `scene_all.app` from Google Drive](https://drive.google.com/file/d/1J1cfe7ALcrkpxEfJwRo0yGis91zoW_Bs/view?usp=sharing)
+
 Expected default locations:
 
 ```text
 unity_clients/scene_all.app                    # macOS
 unity_client/scene_all/scene_all.x86_64        # Linux
+unity_client/scene_all/IndustryNav.exe         # Windows
 ```
 
 On macOS, remove quarantine after downloading:
@@ -125,6 +132,14 @@ If the client lives elsewhere:
 export SCENE_ALL_APP=/path/to/scene_all.app          # macOS
 export SCENE_ALL_BIN=/path/to/scene_all.x86_64       # Linux
 ```
+
+Windows PowerShell:
+
+```powershell
+$env:SCENE_ALL_EXE="C:\path\to\IndustryNav.exe"
+```
+
+The unified bash wrappers use `SCENE_ALL_APP` on macOS and `SCENE_ALL_BIN` on Linux. On Windows, pass the executable explicitly to the Python entry point, for example `--file_name $env:SCENE_ALL_EXE`.
 
 For LLM benchmarks, export an OpenRouter key:
 
@@ -195,34 +210,13 @@ scene1 scene2 scene3 scene4 scene5 scene6 scene7 scene8 scene9 scene10 scene11 s
 
 A* is the offline classical navigation baseline. It does not call OpenRouter.
 
-Run A* on all points for one scene:
+Common commands:
 
 ```bash
 bash shs/run_Astar.sh scene1
-```
-
-Run A* on one point:
-
-```bash
 bash shs/run_Astar.sh scene1 point1
-```
-
-Run A* on all scenes:
-
-```bash
 bash shs/run_Astar.sh all
-```
-
-Enable debug visualizations:
-
-```bash
 ASTAR_DEBUG_VIZ=1 bash shs/run_Astar.sh scene1 point1
-```
-
-Equivalent path through the general benchmark wrapper:
-
-```bash
-BASELINE=astar bash shs/run_headless_benchmark.sh scene1
 ```
 
 A* outputs are written under:
@@ -230,3 +224,5 @@ A* outputs are written under:
 ```text
 outputs/<scene_code>/<point_id>/astar/
 ```
+
+For tuning parameters, debug visualizations, direct Python invocation, troubleshooting, and notes on adding new baselines, see [`docs/astar_workflow.md`](docs/astar_workflow.md).
