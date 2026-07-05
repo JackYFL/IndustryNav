@@ -112,6 +112,14 @@ macOS scene runtime:
 
 - [Download `scene_all.app` from Google Drive](https://drive.google.com/file/d/1J1cfe7ALcrkpxEfJwRo0yGis91zoW_Bs/view?usp=sharing)
 
+Windows scene runtime:
+
+- [Download `IndustryNav.exe` from Google Drive](https://drive.google.com/file/d/1klhx0uaiYjCkVXwDDAI-YcbluNfA9D0I/view?usp=share_link)
+
+Linux scene runtime:
+
+- [Download `scene_all.x86_64` from Google Drive](https://drive.google.com/file/d/1aCzLIzZS67oftNZmYIANRJGyi6QwG3bv/view?usp=drive_link)
+
 Expected default locations:
 
 ```text
