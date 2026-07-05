@@ -247,12 +247,10 @@ SCENE_ALL_BUILDS: Dict[str, List[str]] = {
         str(REPO_ROOT / "unity_clients" / "scene_all.app"),
         str(UNITY_CLIENT_DIR / "scene_all.app"),
         str(REPO_ROOT / "scene_files" / "mac" / "scene_all.app"),
-        "/Users/lichili/dev/IndustryNav2/scene_all.app",
     ],
     "Linux": [
         str(UNITY_CLIENT_DIR / "scene_all" / "scene_all.x86_64"),
         "/mnt/ss2/devops/sandbox/industrynav2/client/scene_all/scene_all.x86_64",
-        "/home/liyifa11/MyCodes/IndustryNav/scene_files/Linux/scene_all/scene_all.x86_64",
     ],
     "Windows": [
         str(UNITY_CLIENT_DIR / "scene_all" / "IndustryNav.exe"),
