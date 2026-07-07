@@ -118,7 +118,7 @@ Windows scene runtime:
 
 Linux scene runtime:
 
-- [Download `scene_all.x86_64` from Google Drive](https://drive.google.com/file/d/1aCzLIzZS67oftNZmYIANRJGyi6QwG3bv/view?usp=drive_link)
+- [Download `scene_all.x86_64` from Google Drive](https://drive.google.com/file/d/1aCzLIzZS67oftNZmYIANRJGyi6QwG3bv/view?usp=share_link)
 
 Expected default locations:
 
