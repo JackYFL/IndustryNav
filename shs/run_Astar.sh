@@ -51,6 +51,9 @@
 #       Default: 5507.
 #   USE_XVFB / XVFB_SCREEN
 #       Linux only. Defaults: 1 / 1724x1024x24.
+#   INDUSTRYNAV_UNITY_BATCHMODE
+#       Whether Python passes -batchmode to Unity. Defaults to 0 on Linux and
+#       1 elsewhere.
 
 set -euo pipefail
 

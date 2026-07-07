@@ -20,6 +20,7 @@
 #   MAX_STEPS    per-point decision-step cap               (default: 70)
 #   PYTHON_BIN   interpreter                               (default: <repo>/.venv/bin/python)
 #   USE_XVFB / XVFB_SCREEN   Linux virtual-display knobs    (default: 1 / 1724x1024x24)
+#   INDUSTRYNAV_UNITY_BATCHMODE  pass -batchmode to Unity    (default: 0 on Linux, 1 elsewhere)
 
 set -euo pipefail
 

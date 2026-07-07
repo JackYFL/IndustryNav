@@ -12,6 +12,7 @@ the harness rather than in any one script.
 from __future__ import annotations
 
 import os
+import platform
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -55,21 +56,26 @@ def _launch_env(args, logger):
 
     unity_log_path = os.path.join(args.frame_save_dir, "unity_log.txt")
     os.makedirs(args.frame_save_dir, exist_ok=True)
+    use_batchmode_default = "0" if platform.system() == "Linux" else "1"
+    use_batchmode = os.environ.get("INDUSTRYNAV_UNITY_BATCHMODE", use_batchmode_default) == "1"
+    unity_args = [
+        "-logFile", unity_log_path,
+        "-screen-width", str(args.screen_width),
+        "-screen-height", str(args.screen_height),
+    ]
+    if use_batchmode:
+        unity_args.insert(0, "-batchmode")
 
     # NOTE on "headless": passing `-nographics` SIGKILLs scene_all.app (camera
     # sensors need a renderer); `no_graphics=True` makes the window invisible but
-    # blanks the sensor frames on macOS. So we run `no_graphics=False` +
-    # `-batchmode`: a Unity window shows but Python never opens display windows.
+    # blanks the sensor frames on macOS. macOS uses `-batchmode`; Linux defaults
+    # to windowed because some Linux builds SIGSEGV during Input System init in
+    # batchmode. Override with INDUSTRYNAV_UNITY_BATCHMODE=1/0.
     env = UnityEnvironment(
         file_name=args.file_name,
         no_graphics=False,
         side_channels=[engine, env_params, bounds_sc, target_sc],
-        additional_args=[
-            "-batchmode",
-            "-logFile", unity_log_path,
-            "-screen-width", str(args.screen_width),
-            "-screen-height", str(args.screen_height),
-        ],
+        additional_args=unity_args,
         worker_id=int(args.worker_id),
         base_port=int(args.base_port),
         timeout_wait=120,
@@ -89,7 +95,11 @@ def _launch_env(args, logger):
 
     # Scene selection MUST happen before the first reset that produces obs we use.
     env_params.set_float_parameter("scene_id", float(args.scene_id))
+    # Ensure the Unity player applies ML-Agents actions even when launched
+    # windowed on Linux, where Application.isBatchMode is false.
+    env_params.set_float_parameter("use_ai_control", 1.0)
     logger.info(f"Starting Unity ({args.file_name}) scene_id={args.scene_id}")
+    logger.info(f"Unity launch args: {unity_args}")
     env.reset()
     logger.info(f"Behaviors: {list(env.behavior_specs.keys())}")
     _ = env.behavior_specs[BEHAVIOR_NAME]

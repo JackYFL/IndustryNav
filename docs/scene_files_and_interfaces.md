@@ -55,17 +55,18 @@ Do not pass `start.x/start.z` as minimap pixels. The benchmark path sends them a
 
 The benchmark startup sequence is implemented in `nav/harness/env_setup.py`:
 
-1. Launch `UnityEnvironment` with `no_graphics=False` and `-batchmode`.
+1. Launch `UnityEnvironment` with `no_graphics=False`. macOS uses `-batchmode` by default; Linux defaults to windowed launch because some Linux Unity builds can crash during Input System initialization under `-batchmode`. Override with `INDUSTRYNAV_UNITY_BATCHMODE=1` or `0`.
 2. Attach side channels:
    - `EngineConfigurationChannel`
    - `EnvironmentParametersChannel`
    - `BoundsSideChannel`
    - `TargetSideChannel`
 3. Set `scene_id` before the first useful `env.reset()`.
-4. Read a minimap observation and detect the rendered minimap bounds.
-5. Send the minimap resolution to Unity as `minimap_px_width` / `minimap_px_height`.
-6. Prime spawn and target through environment parameters.
-7. Read Unity's side-channel acknowledgements for pixel/world mappings.
+4. Set `use_ai_control=1` so the Unity `WarehouseAgent` accepts ML-Agents continuous actions even when the player is launched windowed.
+5. Read a minimap observation and detect the rendered minimap bounds.
+6. Send the minimap resolution to Unity as `minimap_px_width` / `minimap_px_height`.
+7. Prime spawn and target through environment parameters.
+8. Read Unity's side-channel acknowledgements for pixel/world mappings.
 
 The behavior name expected by Python is:
 
@@ -82,6 +83,7 @@ Python sends these values through ML-Agents `EnvironmentParametersChannel`; Unit
 | Parameter | Direction | Meaning |
 |---|---|---|
 | `scene_id` | Python -> Unity | Selects which scene inside `scene_all` to load. Must be set before the reset whose observations are used. |
+| `use_ai_control` | Python -> Unity | Enables action-driven locomotion in `WarehouseAgent`. This is required for windowed Linux launches because `Application.isBatchMode` is false. |
 | `minimap_px_width`, `minimap_px_height` | Python -> Unity | Tells Unity the minimap resolution detected from the current observation. |
 | `spawn_x`, `spawn_y`, `spawn_z` | Python -> Unity | Preferred spawn path: direct Unity world coordinates. |
 | `spawn_px`, `spawn_py`, `spawn_wy` | Python -> Unity | Legacy spawn path: Unity minimap pixel coordinates converted to world by Unity. |

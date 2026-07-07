@@ -7,7 +7,7 @@ The current entry point is `nav/scripts/run_benchmark_cell.py` (run via `python 
 - `shs/run_headless_benchmark.sh` on macOS, or
 - `shs/run_headless_benchmark.sh` on Ubuntu Linux.
 
-The Python script itself is OS-agnostic; the wrappers only differ in client-path defaults and (on Linux) wrapping each invocation in `xvfb-run` to provide a virtual display surface.
+The Python script itself is OS-agnostic; the wrappers only differ in client-path defaults and (on Linux) wrapping each invocation in `xvfb-run` to provide a virtual display surface. Linux Unity launches default to windowed mode rather than `-batchmode`; set `INDUSTRYNAV_UNITY_BATCHMODE=1` only if your local Linux player supports batchmode.
 
 ---
 
@@ -97,6 +97,7 @@ This is the general benchmark wrapper for `llm`, `astar`, `bc`, and `random`.
 | `PYTHON_BIN` | `<repo>/.venv/bin/python` | Python interpreter used by the wrapper. |
 | `USE_XVFB` | `1` on Linux | Whether to wrap Unity with `xvfb-run` on Linux. |
 | `XVFB_SCREEN` | `1724x1024x24` | Virtual display size/depth passed to `xvfb-run`. |
+| `INDUSTRYNAV_UNITY_BATCHMODE` | `0` on Linux, `1` elsewhere | Whether Python passes `-batchmode` to Unity. Linux defaults to `0` to avoid Input System startup crashes seen in some builds. |
 | `OPENROUTER_API_KEY` | unset | Required only for `BASELINE=llm`. |
 
 Output naming:

@@ -149,6 +149,12 @@ $env:SCENE_ALL_EXE="C:\path\to\IndustryNav.exe"
 
 The unified bash wrappers use `SCENE_ALL_APP` on macOS and `SCENE_ALL_BIN` on Linux. On Windows, pass the executable explicitly to the Python entry point, for example `--file_name $env:SCENE_ALL_EXE`.
 
+Linux launches default to windowed Unity mode because some Linux players crash during Input System initialization under `-batchmode`. Override only if your build supports it:
+
+```bash
+export INDUSTRYNAV_UNITY_BATCHMODE=1
+```
+
 For LLM benchmarks, export an OpenRouter key:
 
 ```bash

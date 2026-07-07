@@ -17,6 +17,7 @@ import argparse
 import csv
 import datetime
 import os
+import platform
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -669,17 +670,22 @@ def main():
     target_sc = TargetSideChannel()
     env_params = EnvironmentParametersChannel()
 
+    use_batchmode_default = "0" if platform.system() == "Linux" else "1"
+    use_batchmode = os.environ.get("INDUSTRYNAV_UNITY_BATCHMODE", use_batchmode_default) == "1"
+    unity_args = [
+        "-logFile", "test.log",
+        "-screen-width", str(args.screen_width),
+        "-screen-height", str(args.screen_height),
+    ]
+    if use_batchmode:
+        unity_args.insert(0, "-batchmode")
+
     env = UnityEnvironment(
         file_name=args.file_name,
         # file_name=None,
         no_graphics=False,                             # keep rendering for CameraSensor
         side_channels=[engine, env_params, bounds_channel, target_sc],
-        additional_args=[
-            "-batchmode",                              # windowless + auto play
-            "-logFile", "test.log",
-            "-screen-width", str(args.screen_width),
-            "-screen-height", str(args.screen_height)
-        ],
+        additional_args=unity_args,
         # worker_id=1,
         worker_id=1,
         base_port=5507,
@@ -696,7 +702,9 @@ def main():
         height=args.screen_height,
     )
     env_params.set_float_parameter("scene_id", float(args.scene_id))
+    env_params.set_float_parameter("use_ai_control", 1.0)
     env_params.set_float_parameter("spline_speed_multiplier", float(args.spline_speed_multiplier))
+    logger.info(f"Unity launch args: {unity_args}")
     logger.info("Starting Unity…")
     env.reset()
     logger.info(f"Behaviors: {list(env.behavior_specs.keys())}")
