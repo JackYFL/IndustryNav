@@ -57,6 +57,7 @@ runs/
 wandb/
 tensorboard/
 analysis/grid_runs/
+tests/
 
 # Generated result artifacts
 results.csv
