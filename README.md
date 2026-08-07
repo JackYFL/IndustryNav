@@ -218,10 +218,9 @@ python -m nav.scripts.run_benchmark_cell \
 
 Use `--ego_width` and `--ego_height` to change both the egocentric RGB and depth
 observations and their saved frame sizes. The minimap resolution stays
-unchanged. Unity clients must be rebuilt from this repository to support the
-runtime sensor-resolution arguments.
+unchanged.
 
-Supported scene codes:
+Supported scenes:
 
 ```text
 scene1 scene2 scene3 scene4 scene5 scene6 scene7 scene8 scene9 scene10 scene11 scene12
@@ -248,6 +247,7 @@ outputs/<scene_code>/<point_id>/astar/
 
 For tuning parameters, debug visualizations, direct Python invocation, troubleshooting, and notes on adding new baselines, see [`docs/astar_workflow.md`](docs/astar_workflow.md).
 
+<!--
 ## TODO-list (Unity has more diverse scenes and faster speed than IssacSim)
 
 1. How bind these animations to the workers (manually edit)?
@@ -263,3 +263,4 @@ For tuning parameters, debug visualizations, direct Python invocation, troublesh
 7. Frame rate issues: light, shadow (at least 20fps).
 8. Physics simulation (explosion).
 9. Interactions with scene objects (NPC first, then ego).
+-->

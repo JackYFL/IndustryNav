@@ -215,7 +215,7 @@ When adding or rebuilding a scene, verify that the scene contains:
 - the target/goal marker object expected by `WarehouseAgent.cs`;
 - the side-channel host/registration objects required by the bounds and target channels.
 
-## Common Maintenance Tasks
+## Common Maintenance Tasks (for scene developers)
 
 ### Add a New Scene
 
