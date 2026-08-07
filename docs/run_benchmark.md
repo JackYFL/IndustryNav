@@ -193,12 +193,22 @@ observations. Use `--ego_width` and `--ego_height`, or the wrapper variables
 `EGO_WIDTH` and `EGO_HEIGHT`, to resize both the `AgentSensor` RGB observation
 and the `DepthSensor` observation:
 
+| Invocation | Resolution parameters |
+|---|---|
+| `run_benchmark_cell`, `run_benchmark_grid`, `collect_data` | `--ego_width <W> --ego_height <H>` |
+| `run_headless_benchmark.sh`, `run_Astar.sh` | `EGO_WIDTH=<W> EGO_HEIGHT=<H>` |
+
 ```bash
 EGO_WIDTH=768 EGO_HEIGHT=432 bash shs/run_headless_benchmark.sh scene1
+
+python -m nav.scripts.run_benchmark_cell \
+  --ego_width 768 --ego_height 432 \
+  ...
 ```
 
 The selected dimensions become part of the ML-Agents behavior specification at
-startup, and egocentric RGB/depth PNGs are saved at that size. The minimap
+startup and must be positive integers. Egocentric RGB/depth PNGs and depth NPY
+maps are saved at that size. The minimap
 dimensions remain unchanged, so minimap target coordinates and A* planning are
 not rescaled. This feature requires a Unity client rebuilt after the runtime
 resolution support was added to `WarehouseAgent.cs`; older clients ignore the

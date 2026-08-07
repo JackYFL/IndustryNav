@@ -98,6 +98,49 @@ spawn_x/spawn_y/spawn_z/spawn_rot
 target_px/target_py
 ```
 
+## Egocentric Sensor Resolution
+
+Egocentric resolution is passed as Unity process arguments before ML-Agents
+creates the behavior specification. It is not sent through an environment
+parameter and cannot be changed without restarting the Unity client.
+
+| Layer | Width | Height | Default |
+|---|---|---|---:|
+| Python CLI | `--ego_width` | `--ego_height` | `512 x 512` |
+| Shell wrappers | `EGO_WIDTH` | `EGO_HEIGHT` | `512 x 512` |
+| Unity launch arguments | `--ego-width` | `--ego-height` | `512 x 512` |
+
+The Python entry points validate that both dimensions are positive and forward
+them to Unity. `WarehouseAgent.cs` applies the same dimensions to `AgentSensor`
+(RGB) and `DepthSensor`, so their observations remain aligned:
+
+```text
+RGB observation:   (3, ego_height, ego_width)
+depth observation: (1, ego_height, ego_width)
+saved RGB/depth:   ego_width x ego_height
+```
+
+Examples:
+
+```bash
+# General benchmark wrapper
+EGO_WIDTH=768 EGO_HEIGHT=432 bash shs/run_headless_benchmark.sh scene1
+
+# A* wrapper
+EGO_WIDTH=768 EGO_HEIGHT=432 bash shs/run_Astar.sh scene1 point1
+
+# Direct benchmark, grid, or collector invocation
+python -m nav.scripts.run_benchmark_cell --ego_width 768 --ego_height 432 ...
+python -m nav.scripts.run_benchmark_grid --ego_width 768 --ego_height 432 ...
+python -m nav.scripts.collect_data --ego_width 768 --ego_height 432 ...
+```
+
+`--screen_width` / `--screen_height` configure the Unity Player window, not the
+camera observations. The minimap also keeps its native dimensions, so changing
+egocentric resolution does not rescale targets, spawn pixels, or A* paths. The
+feature requires a Unity client built after runtime resolution support was added;
+older clients ignore the launch arguments.
+
 ## Side Channels
 
 Custom side channels are defined in Python in `nav/harness/side_channels.py`. Their UUIDs and message opcodes live in `nav/config.py` and must match the C# side-channel registration.
