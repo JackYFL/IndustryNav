@@ -44,6 +44,12 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument("--warning-threshold", type=float, default=None)
     p.add_argument("--collision-threshold", type=int, default=None)
+    p.add_argument(
+        "--success-dist-px",
+        type=int,
+        default=None,
+        help="Success threshold in minimap pixels (paper/default: 20; legacy: 65).",
+    )
     p.add_argument("--bottom-margin", type=float, default=None)
     p.add_argument("--top-margin", type=float, default=None)
     p.add_argument("--bottom-pad", type=float, default=None)
@@ -63,6 +69,7 @@ def _opts_from_args(args: argparse.Namespace) -> EvaluateOptions:
     for arg_name, attr_name in [
         ("warning_threshold", "warning_threshold_m"),
         ("collision_threshold", "collision_threshold_px"),
+        ("success_dist_px", "success_dist_px"),
         ("bottom_margin", "bottom_margin"),
         ("top_margin", "top_margin"),
         ("bottom_pad", "bottom_pad"),

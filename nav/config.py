@@ -39,6 +39,7 @@ ACTION_SPACE_ANNOTATION: Dict[str, float] = {
 BEHAVIOR_NAME: str = "WarehouseAgent?team=0"
 UNITY_ENGINE_QUALITY_LEVEL: int = 3
 UNITY_MAP_SIZE: Tuple[float, float] = (862.0, 512.0)
+UNITY_DEPTH_MAX_DISTANCE_M: float = 20.0
 MODALITY_TO_IDX: Dict[str, int] = {"ego": 0, "depth": 1, "minimap": 2}
 
 SCENE_ID_MAP: Dict[str, int] = {
@@ -129,7 +130,7 @@ ASTAR_DEFAULTS = AStarParams()
 
 # Evaluation
 
-EVAL_SUCCESS_DIST_PX: int = 65
+EVAL_SUCCESS_DIST_PX: int = 20
 EVAL_COLLISION_PX_THRESH: int = 34
 EVAL_WARNING_THRESHOLD_M: float = 0.3
 EVAL_ROI_PARAMS: Dict[str, float] = {
@@ -243,6 +244,7 @@ STATS_REPORT_OPTIONAL_METRICS: Dict[str, Tuple[str, str, str]] = {
 
 SCENE_ALL_BUILDS: Dict[str, List[str]] = {
     "Darwin": [
+        str(REPO_ROOT / "unity_clients" / "scene_all_resizable.app"),
         str(REPO_ROOT / "unity_clients" / "scene_all_rebuilt.app"),
         str(REPO_ROOT / "unity_clients" / "scene_all.app"),
         str(UNITY_CLIENT_DIR / "scene_all.app"),

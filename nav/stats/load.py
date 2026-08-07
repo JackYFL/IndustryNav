@@ -184,8 +184,8 @@ def _rows_from_seed_dir(
                 "model_short": model_short_clean,
                 "vision_input": vision,
                 "seed_id": r.get("seed_id") or seed_dir.name.replace("seed", ""),
-                # eval_metrics.py canonical SR (distance_px < EVAL_SUCCESS_DIST_PX),
-                # not the run-time reach_px gate (which uses a tighter 34 px).
+                # eval_metrics.py canonical SR (distance_px < EVAL_SUCCESS_DIST_PX).
+                # The default run-time reach_px gate uses the same 20 px radius.
                 "success": int(sr_canon),
                 "distance_px": dist,
                 "distance_ratio": dr,

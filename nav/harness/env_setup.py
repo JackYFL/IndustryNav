@@ -48,20 +48,41 @@ class PrimedEnv:
     target_xy: Tuple[int, int]
 
 
+def _set_world_spawn_parameters(env_params, args) -> bool:
+    """Send a world-coordinate spawn when one is available on ``args``."""
+    init_world_x = getattr(args, "init_world_x", None)
+    init_world_z = getattr(args, "init_world_z", None)
+    if init_world_x is None or init_world_z is None:
+        return False
+    env_params.set_float_parameter("spawn_x", float(init_world_x))
+    env_params.set_float_parameter("spawn_y", 0.5)
+    env_params.set_float_parameter("spawn_z", float(init_world_z))
+    env_params.set_float_parameter(
+        "spawn_rot", float(getattr(args, "init_curr_direction", 0.0))
+    )
+    return True
+
+
 def _launch_env(args, logger):
     engine = EngineConfigurationChannel()
     bounds_sc = BoundsSideChannel()
     target_sc = TargetSideChannel()
     env_params = EnvironmentParametersChannel()
 
-    unity_log_path = os.path.join(args.frame_save_dir, "unity_log.txt")
+    unity_log_path = os.path.abspath(os.path.join(args.frame_save_dir, "unity_log.txt"))
     os.makedirs(args.frame_save_dir, exist_ok=True)
     use_batchmode_default = "0" if platform.system() == "Linux" else "1"
     use_batchmode = os.environ.get("INDUSTRYNAV_UNITY_BATCHMODE", use_batchmode_default) == "1"
+    ego_width = int(getattr(args, "ego_width", 512))
+    ego_height = int(getattr(args, "ego_height", 512))
+    if ego_width <= 0 or ego_height <= 0:
+        raise EnvSetupError("Egocentric RGB/depth resolution must use positive width and height values.")
     unity_args = [
         "-logFile", unity_log_path,
         "-screen-width", str(args.screen_width),
         "-screen-height", str(args.screen_height),
+        "--ego-width", str(ego_width),
+        "--ego-height", str(ego_height),
     ]
     if use_batchmode:
         unity_args.insert(0, "-batchmode")
@@ -90,7 +111,8 @@ def _launch_env(args, logger):
     )
     logger.info(
         f"Engine config: quality_level={quality_level}, "
-        f"screen={args.screen_width}x{args.screen_height}"
+        f"screen={args.screen_width}x{args.screen_height}, "
+        f"egocentric_rgb_depth={ego_width}x{ego_height}"
     )
 
     # Scene selection MUST happen before the first reset that produces obs we use.
@@ -98,6 +120,8 @@ def _launch_env(args, logger):
     # Ensure the Unity player applies ML-Agents actions even when launched
     # windowed on Linux, where Application.isBatchMode is false.
     env_params.set_float_parameter("use_ai_control", 1.0)
+    if _set_world_spawn_parameters(env_params, args):
+        logger.info("Seeded world spawn parameters before the initial Unity reset.")
     logger.info(f"Starting Unity ({args.file_name}) scene_id={args.scene_id}")
     logger.info(f"Unity launch args: {unity_args}")
     env.reset()
@@ -127,10 +151,7 @@ def _prime_spawn(env, env_params, target_sc, margin, args, logger) -> Optional[T
     #   (b) Visual-pixel (legacy): convert visual pixel -> unity pixel and send
     #       spawn_px/spawn_py; the world coords come back via the side-channel ack.
     if args.init_world_x is not None and args.init_world_z is not None:
-        env_params.set_float_parameter("spawn_x", float(args.init_world_x))
-        env_params.set_float_parameter("spawn_y", 0.5)
-        env_params.set_float_parameter("spawn_z", float(args.init_world_z))
-        env_params.set_float_parameter("spawn_rot", float(args.init_curr_direction))
+        _set_world_spawn_parameters(env_params, args)
         env.reset()
         init_world = (float(args.init_world_x), float(args.init_world_z))
         if target_sc.last_spawn_pixel is not None and target_sc.last_spawn_world is not None:

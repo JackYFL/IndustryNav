@@ -22,9 +22,11 @@
 #   SIM_STEPS_PER_DECISION
 #       Unity simulation steps per A* action. Default: 2.
 #   REACH_PX
-#       Success radius in minimap pixels. Default: 34.
+#       Success radius in minimap pixels. Default: 20.
 #   MODALITIES
 #       Sensor modalities to save. Default: ego,minimap,depth.
+#   EGO_WIDTH / EGO_HEIGHT
+#       Egocentric RGB/depth sensor resolution. Defaults: 512 / 512.
 #   MARKER_SOURCE
 #       vector | red. Default: vector. vector draws the Python-side red
 #       dot/arrow from Unity vector observations; red uses legacy HSV detection.
@@ -152,8 +154,10 @@ fi
 MAX_STEPS_WAS_SET="${MAX_STEPS+x}"
 MAX_STEPS="${MAX_STEPS:-70}"
 SIM_STEPS_PER_DECISION="${SIM_STEPS_PER_DECISION:-2}"
-REACH_PX="${REACH_PX:-34}"
+REACH_PX="${REACH_PX:-20}"
 MODALITIES="${MODALITIES:-ego,minimap,depth}"
+EGO_WIDTH="${EGO_WIDTH:-512}"
+EGO_HEIGHT="${EGO_HEIGHT:-512}"
 MARKER_SOURCE="${MARKER_SOURCE:-vector}"
 HIDE_UNITY_RED_MARKER="${HIDE_UNITY_RED_MARKER:-1}"
 RUN_NAME="${RUN_NAME:-astar}"
@@ -179,7 +183,7 @@ echo "[astar] scenes=${SCENES[*]}"
 if [[ -n "$POINT_FILTER" ]]; then
   echo "[astar] point_filter=${POINT_FILTER}"
 fi
-echo "[astar] max_steps=${MAX_STEPS} sim_steps_per_decision=${SIM_STEPS_PER_DECISION} reach_px=${REACH_PX}"
+echo "[astar] max_steps=${MAX_STEPS} sim_steps_per_decision=${SIM_STEPS_PER_DECISION} reach_px=${REACH_PX} ego=${EGO_WIDTH}x${EGO_HEIGHT}"
 echo "[astar] marker_source=${MARKER_SOURCE}"
 echo "[astar] hide_unity_red_marker=${HIDE_UNITY_RED_MARKER}"
 
@@ -241,6 +245,8 @@ PY
          --base_port "$base_port"
          --max_steps "$max_steps_for_point"
          --sim_steps_per_decision "$SIM_STEPS_PER_DECISION"
+         --ego_width "$EGO_WIDTH"
+         --ego_height "$EGO_HEIGHT"
          --reach_px "$REACH_PX"
          --modalities "$MODALITIES"
          --marker_source "$MARKER_SOURCE"

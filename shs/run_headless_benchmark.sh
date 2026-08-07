@@ -18,6 +18,7 @@
 #                                  which prefers the in-repo unity_client/ build, no path needed)
 #   SCENE_ID     override the scene_code->scene_id mapping
 #   MAX_STEPS    per-point decision-step cap               (default: 70)
+#   EGO_WIDTH / EGO_HEIGHT  egocentric RGB/depth sensor size (default: 512 / 512)
 #   PYTHON_BIN   interpreter                               (default: <repo>/.venv/bin/python)
 #   USE_XVFB / XVFB_SCREEN   Linux virtual-display knobs    (default: 1 / 1724x1024x24)
 #   INDUSTRYNAV_UNITY_BATCHMODE  pass -batchmode to Unity    (default: 0 on Linux, 1 elsewhere)
@@ -108,6 +109,8 @@ if [[ ! -f "$INPUT_FILE" ]]; then
 fi
 
 MAX_STEPS="${MAX_STEPS:-70}"
+EGO_WIDTH="${EGO_WIDTH:-512}"
+EGO_HEIGHT="${EGO_HEIGHT:-512}"
 
 idx=0
 "$PYTHON_BIN" - <<'PY' "$INPUT_FILE" "$SCENE_CODE" | while IFS='|' read -r point_id init_wx init_wz init_dir target_x target_y; do
@@ -144,6 +147,8 @@ PY
        --worker_id "$WORKER_ID"
        --base_port "$BASE_PORT"
        --max_steps "$MAX_STEPS"
+       --ego_width "$EGO_WIDTH"
+       --ego_height "$EGO_HEIGHT"
        --frame_save_dir "$FRAME_SAVE_DIR"
        --model_id "$MODEL_ID"
        --init_world_x "$init_wx"

@@ -162,7 +162,7 @@ The most useful environment variables are:
 |---|---:|---|
 | `MAX_STEPS` | `70` | Per-point decision-step budget. |
 | `SIM_STEPS_PER_DECISION` | `2` | Unity simulation steps per A* action. |
-| `REACH_PX` | `34` | Success radius in visual minimap pixels. |
+| `REACH_PX` | `20` | Success radius in visual minimap pixels. |
 | `MODALITIES` | `ego,minimap,depth` | Saved sensor modalities. |
 | `MARKER_SOURCE` | `vector` | `vector` uses Unity vector observations; `red` uses legacy red-marker detection. |
 | `HIDE_UNITY_RED_MARKER` | `1` | Removes the old Unity red marker when Python draws the vector marker. |
@@ -199,6 +199,14 @@ Save only minimap/debug outputs:
 MODALITIES=minimap ASTAR_DEBUG_VIZ=1 bash shs/run_Astar.sh scene1 point1
 ```
 
+Change the egocentric RGB and depth resolution together:
+
+```bash
+EGO_WIDTH=768 EGO_HEIGHT=432 bash shs/run_Astar.sh scene1 point1
+```
+
+This does not resize the minimap used by A*.
+
 Keep the raw Unity red marker visible:
 
 ```bash
@@ -224,7 +232,9 @@ python -m nav.scripts.run_benchmark_cell \
   --point_id point1 \
   --max_steps 70 \
   --sim_steps_per_decision 2 \
-  --reach_px 34 \
+  --ego_width 512 \
+  --ego_height 512 \
+  --reach_px 20 \
   --modalities ego,minimap,depth \
   --marker_source vector \
   --hide_unity_red_marker \

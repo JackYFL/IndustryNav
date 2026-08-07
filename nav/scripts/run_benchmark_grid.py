@@ -179,6 +179,8 @@ def run_cell(args_dict: dict) -> dict:
     max_steps = args_dict["max_steps"]
     use_xvfb = args_dict["use_xvfb"]
     xvfb_screen = args_dict["xvfb_screen"]
+    ego_width = args_dict["ego_width"]
+    ego_height = args_dict["ego_height"]
 
     cell.frame_save_dir.mkdir(parents=True, exist_ok=True)
     log_path = cell.frame_save_dir / "run.log"
@@ -202,6 +204,8 @@ def run_cell(args_dict: dict) -> dict:
         "--worker_id", "0",
         "--base_port", str(base_port),
         "--max_steps", str(max_steps),
+        "--ego_width", str(ego_width),
+        "--ego_height", str(ego_height),
         "--frame_save_dir", str(cell.frame_save_dir),
         "--prompt_file", prompt_file,
         "--model_id", cell.model,
@@ -336,6 +340,10 @@ def parse_args():
     p.add_argument("--max_concurrency", type=int, default=4,
                    help="Max parallel cells. Start at 4; bump up if you don't see OpenRouter 429s.")
     p.add_argument("--max_steps", type=int, default=70)
+    p.add_argument("--ego_width", type=int, default=512,
+                   help="Width of each egocentric RGB and depth observation.")
+    p.add_argument("--ego_height", type=int, default=512,
+                   help="Height of each egocentric RGB and depth observation.")
     p.add_argument("--max_retries", type=int, default=2,
                    help="Retry a failed cell this many times before logging it to failures.csv.")
     p.add_argument("--resume", action="store_true",
@@ -380,6 +388,8 @@ def resolve_file_name(arg_file_name: str) -> str:
 
 def main():
     args = parse_args()
+    if args.ego_width <= 0 or args.ego_height <= 0:
+        raise SystemExit("--ego_width and --ego_height must be positive integers.")
 
     vision_modes = {"on": [True], "off": [False], "both": [True, False]}[args.vision_input]
     cells = build_grid(
@@ -414,6 +424,7 @@ def main():
 
     print(f"[grid] cells={len(cells)} | concurrency={args.max_concurrency} | "
           f"max_steps={args.max_steps} | vision={args.vision_input} | "
+          f"ego={args.ego_width}x{args.ego_height} | "
           f"file={file_name} | xvfb={use_xvfb}", flush=True)
 
     if args.dry_run:
@@ -441,6 +452,8 @@ def main():
                         "file_name": file_name,
                         "python_bin": args.python_bin,
                         "max_steps": args.max_steps,
+                        "ego_width": args.ego_width,
+                        "ego_height": args.ego_height,
                         "use_xvfb": use_xvfb,
                         "xvfb_screen": args.xvfb_screen,
                         "per_cell_timeout_sec": (args.per_cell_timeout_sec or None),

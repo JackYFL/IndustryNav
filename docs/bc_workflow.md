@@ -35,9 +35,16 @@ python -m nav.scripts.collect_data \
   --scene_id 1 \
   --frame_save_dir collect_data/scene1/point1 \
   --max_steps 100 \
+  --ego_width 512 \
+  --ego_height 512 \
   --modalities ego,minimap,depth \
   --marker_source vector
 ```
+
+Set `--ego_width` and `--ego_height` to collect egocentric RGB and depth frames
+at a different resolution. The minimap dimensions remain unchanged. The Unity
+client must be rebuilt from the current project for these arguments to take
+effect.
 
 During collection, use the OpenCV control window to drive the agent. The collector writes per-frame observations and the action log when the episode exits.
 

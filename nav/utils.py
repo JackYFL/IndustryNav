@@ -27,7 +27,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from nav.config import RESULTS_CSV_FIELDS
+from nav.config import RESULTS_CSV_FIELDS, UNITY_DEPTH_MAX_DISTANCE_M
 
 
 # Configure once on import. ``basicConfig`` is a no-op if the root logger
@@ -160,13 +160,46 @@ def obs_to_rgb(obs_chw: np.ndarray) -> np.ndarray:
     return img
 
 
+def srgb_to_linear(values: np.ndarray) -> np.ndarray:
+    """Decode normalized sRGB values to linear intensity."""
+    values = np.clip(np.asarray(values, dtype=np.float32), 0.0, 1.0)
+    return np.where(
+        values <= 0.04045,
+        values / 12.92,
+        ((values + 0.055) / 1.055) ** 2.4,
+    ).astype(np.float32)
+
+
+def decode_depth_observation_meters(
+    obs: np.ndarray,
+    max_distance_m: float = UNITY_DEPTH_MAX_DISTANCE_M,
+) -> np.ndarray:
+    """Convert a Unity C=1 depth observation to an HWC-independent meter map.
+
+    The HDRP depth shader writes ``linear eye depth / MaxDistance`` into a
+    color target. The project uses linear color space, so the PNG-compressed
+    ML-Agents observation arrives with the sRGB transfer function applied.
+    ``max_distance_m`` must match ``_MaxDistance`` in the Unity depth material.
+    """
+    depth = np.asarray(obs)
+    if depth.ndim == 3:
+        if depth.shape[0] != 1:
+            raise ValueError(f"Expected a C=1 depth observation, got {depth.shape}.")
+        depth = depth[0]
+    elif depth.ndim != 2:
+        raise ValueError(f"Expected a 2D or C=1 depth observation, got {depth.shape}.")
+    if depth.dtype == np.uint8:
+        depth = depth.astype(np.float32) / 255.0
+    return srgb_to_linear(depth) * float(max_distance_m)
+
+
 def save_frame_from_obs(
     obs: np.ndarray, save_dir: str, filename: str = "frame.png"
 ) -> None:
     """Save a single CHW observation as an image file.
 
-    Supports RGB (C=3) and depth (C=1). Depth is min-max-normalized to a
-    grayscale visualization before writing.
+    Supports RGB (C=3) and depth (C=1). A depth observation is written as a
+    fixed-scale grayscale PNG plus a same-stem float32 ``.npy`` in meters.
     """
     os.makedirs(save_dir, exist_ok=True)
     C = obs.shape[0]
@@ -175,11 +208,10 @@ def save_frame_from_obs(
         rgb = obs_to_rgb(obs)
         img = Image.fromarray(rgb)
     elif C == 1:
-        depth = obs.squeeze(0)
-        d_min, d_max = depth.min(), depth.max()
-        if d_max - d_min > 1e-5:
-            depth = (depth - d_min) / (d_max - d_min)
-        depth_viz = (depth * 255).clip(0, 255).astype(np.uint8)
+        encoded_depth = obs.squeeze(0)
+        if encoded_depth.dtype == np.uint8:
+            encoded_depth = encoded_depth.astype(np.float32) / 255.0
+        depth_viz = (np.clip(encoded_depth, 0, 1) * 255).astype(np.uint8)
         img = Image.fromarray(depth_viz)  # PIL infers mode="L" from 2D uint8
     else:
         raise ValueError(
@@ -188,6 +220,9 @@ def save_frame_from_obs(
 
     file_path = os.path.join(save_dir, filename)
     img.save(file_path)
+    if C == 1:
+        depth_path = os.path.splitext(file_path)[0] + ".npy"
+        np.save(depth_path, decode_depth_observation_meters(obs).astype(np.float32))
     logger.info(f"Frame ({'RGB' if C == 3 else 'Depth'}) saved at {file_path}")
 
 

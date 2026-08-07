@@ -205,6 +205,8 @@ python -m nav.scripts.run_benchmark_cell \
   --scene_name scene1 \
   --point_id point1 \
   --max_steps 70 \
+  --ego_width 512 \
+  --ego_height 512 \
   --frame_save_dir outputs/scene1/point1/gemini-3-flash-preview \
   --model_id google/gemini-3-flash-preview \
   --init_world_x 31 \
@@ -213,6 +215,11 @@ python -m nav.scripts.run_benchmark_cell \
   --target_x 550 \
   --target_y 450
 ```
+
+Use `--ego_width` and `--ego_height` to change both the egocentric RGB and depth
+observations and their saved frame sizes. The minimap resolution stays
+unchanged. Unity clients must be rebuilt from this repository to support the
+runtime sensor-resolution arguments.
 
 Supported scene codes:
 
@@ -240,3 +247,19 @@ outputs/<scene_code>/<point_id>/astar/
 ```
 
 For tuning parameters, debug visualizations, direct Python invocation, troubleshooting, and notes on adding new baselines, see [`docs/astar_workflow.md`](docs/astar_workflow.md).
+
+## TODO-list (Unity has more diverse scenes and faster speed than IssacSim)
+
+1. How bind these animations to the workers (manually edit)?
+2. Use human/robots shape (like worker) as egocentric proxy.
+3. How to scale up scenes (edit based on current manually made seed scenes)?
+   agent mcp lib
+   how to solve collision issue?
+   spline
+   NPC ingame AI
+4. Multi-view
+5. Multi-modal (audio, visual, depth, language)
+6. Safety issues
+7. Frame rate issues: light, shadow (at least 20fps).
+8. Physics simulation (explosion).
+9. Interactions with scene objects (NPC first, then ego).

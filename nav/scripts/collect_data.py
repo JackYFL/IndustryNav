@@ -152,6 +152,18 @@ def parse_args():
         help="Unity player height used to constrain window aspect ratio.",
     )
     p.add_argument(
+        "--ego_width",
+        type=int,
+        default=512,
+        help="Width of the egocentric RGB and depth observations.",
+    )
+    p.add_argument(
+        "--ego_height",
+        type=int,
+        default=512,
+        help="Height of the egocentric RGB and depth observations.",
+    )
+    p.add_argument(
         "--file_name",
         type=str,
         default="/Users/liyifan/Documents/MyCodes/release/mac/scene_all.app",
@@ -672,10 +684,14 @@ def main():
 
     use_batchmode_default = "0" if platform.system() == "Linux" else "1"
     use_batchmode = os.environ.get("INDUSTRYNAV_UNITY_BATCHMODE", use_batchmode_default) == "1"
+    if args.ego_width <= 0 or args.ego_height <= 0:
+        raise ValueError("Egocentric RGB/depth resolution must use positive width and height values.")
     unity_args = [
         "-logFile", "test.log",
         "-screen-width", str(args.screen_width),
         "-screen-height", str(args.screen_height),
+        "--ego-width", str(args.ego_width),
+        "--ego-height", str(args.ego_height),
     ]
     if use_batchmode:
         unity_args.insert(0, "-batchmode")

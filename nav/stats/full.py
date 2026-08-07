@@ -24,7 +24,11 @@ from typing import List, Sequence, Tuple
 
 import numpy as np
 
-from nav.config import STATS_REPORT_BASE_METRICS, STATS_REPORT_OPTIONAL_METRICS
+from nav.config import (
+    EVAL_SUCCESS_DIST_PX,
+    STATS_REPORT_BASE_METRICS,
+    STATS_REPORT_OPTIONAL_METRICS,
+)
 from nav.stats.bootstrap import clustered_bootstrap_ci
 from nav.stats.permutation import paired_permutation_pvalue
 from nav.stats.spearman import spearman_corr
@@ -300,7 +304,10 @@ def _render_report(
     md.append(f"Permutations: {n_perm:,}. Bootstrap resamples: {n_boot:,}. "
               f"Spearman split: `{spearman_split}`.\n\n")
     md.append("**Metric definitions** (matching `eval_metrics.py`):\n")
-    md.append("- **SR** (success rate): final `distance_px < 65`. Per-cell binary 0/1.\n")
+    md.append(
+        f"- **SR** (success rate): final `distance_px < {EVAL_SUCCESS_DIST_PX}`. "
+        "Per-cell binary 0/1.\n"
+    )
     md.append("- **DR** (distance ratio): `|start_dist − final_dist| / start_dist`, clamped to 1 on success.\n")
     md.append("- **CR** (collision rate): forward-action steps with Manhattan pixel change < 34, divided by total forward-action steps.\n")
     if has_wr:

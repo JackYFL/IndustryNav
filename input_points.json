@@ -65,7 +65,7 @@
     {
       "point_id": "point2",
       "start": {
-        "x": 35.41,
+        "x": 36.41,
         "z": 13.23,
         "direction": 90.0
       },
@@ -115,7 +115,7 @@
     {
       "point_id": "point2",
       "start": {
-        "x": 12.9,
+        "x": 14.2,
         "z": 46.35,
         "direction": 0.0
       },
@@ -340,7 +340,7 @@
       "point_id": "point4",
       "start": {
         "x": 9.0,
-        "z": 9.5,
+        "z": 13.0,
         "direction": 90.0
       },
       "target": {

@@ -46,6 +46,7 @@ test.log
 
 # Benchmark / training / evaluation outputs
 outputs/
+build_logs/
 logs/
 tmp/
 collect_data/

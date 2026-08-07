@@ -116,8 +116,14 @@ def parse_args():
                         "for the matching no-vision-language prompt.")
     p.add_argument("--worker_id", type=int, default=1)
     p.add_argument("--base_port", type=int, default=5507)
-    p.add_argument("--screen_width", type=int, default=1724)
-    p.add_argument("--screen_height", type=int, default=1024)
+    p.add_argument("--screen_width", type=int, default=1724,
+                   help="Unity player/window width; does not set sensor resolution.")
+    p.add_argument("--screen_height", type=int, default=1024,
+                   help="Unity player/window height; does not set sensor resolution.")
+    p.add_argument("--ego_width", type=int, default=512,
+                   help="Width of the egocentric RGB and depth observations.")
+    p.add_argument("--ego_height", type=int, default=512,
+                   help="Height of the egocentric RGB and depth observations.")
     p.add_argument("--sim_steps_per_decision", type=int, default=2)
 
     # Spawn. Two mutually-exclusive ways to specify position:
@@ -143,7 +149,7 @@ def parse_args():
     # Target
     p.add_argument("--target_x", type=int, required=True)
     p.add_argument("--target_y", type=int, required=True)
-    p.add_argument("--reach_px", type=float, default=34.0)
+    p.add_argument("--reach_px", type=float, default=20.0)
 
     # LLM / BC
     p.add_argument("--prompt_file", type=str, default=DEFAULT_PROMPT_VISION)

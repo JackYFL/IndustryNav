@@ -94,6 +94,8 @@ This is the general benchmark wrapper for `llm`, `astar`, `bc`, and `random`.
 | `SCENE_ALL_BIN` | `auto` | Linux Unity runtime path override. |
 | `SCENE_ID` | derived from `scene_code` | Overrides the wrapper's `scene_code -> scene_id` mapping. Useful only if a local runtime build has a different scene order. |
 | `MAX_STEPS` | `70` | Per-point decision-step budget. |
+| `EGO_WIDTH` | `512` | Width of the egocentric RGB and depth observations and saved frames. |
+| `EGO_HEIGHT` | `512` | Height of the egocentric RGB and depth observations and saved frames. |
 | `PYTHON_BIN` | `<repo>/.venv/bin/python` | Python interpreter used by the wrapper. |
 | `USE_XVFB` | `1` on Linux | Whether to wrap Unity with `xvfb-run` on Linux. |
 | `XVFB_SCREEN` | `1724x1024x24` | Virtual display size/depth passed to `xvfb-run`. |
@@ -114,8 +116,9 @@ This is a convenience wrapper around `run_benchmark_cell --baseline astar`. It s
 | `INPUT_FILE` | `<repo>/input_points.json` | Alternate point JSON. |
 | `MAX_STEPS` | `70` | Per-point step budget. `scene1/point4` defaults to `100` unless this is explicitly set. |
 | `SIM_STEPS_PER_DECISION` | `2` | Unity simulation steps per A* action. |
-| `REACH_PX` | `34` | Success radius in visual minimap pixels. |
+| `REACH_PX` | `20` | Success radius in visual minimap pixels. |
 | `MODALITIES` | `ego,minimap,depth` | Saved sensor streams. |
+| `EGO_WIDTH`, `EGO_HEIGHT` | `512`, `512` | Egocentric RGB and depth observation size. Minimap is not resized. |
 | `MARKER_SOURCE` | `vector` | `vector` projects Unity position/heading; `red` uses legacy red-marker detection. |
 | `HIDE_UNITY_RED_MARKER` | `1` | Hide old Unity red marker when drawing Python-side vector marker. |
 | `RUN_NAME` | `astar` | Output directory name under `outputs/<scene_code>/<point_id>/`. |
@@ -161,6 +164,7 @@ SCENE_ALL_APP=/home/liyifa11/MyCodes/IndustryNav/scene_files/Linux/scene_all/sce
   --baseline llm \
   --file_name "$SCENE_ALL_APP" \
   --scene_id 1 --base_port 5520 --max_steps 70 \
+  --ego_width 512 --ego_height 512 \
   --frame_save_dir outputs/scene1/point1/gemini-3-flash-preview \
   --model_id google/gemini-3-flash-preview \
   --init_world_x 31.0 --init_world_z 49.63 --init_curr_direction 180 \
@@ -174,11 +178,31 @@ xvfb-run -a -s "-screen 0 1724x1024x24" .venv/bin/python -m nav.scripts.run_benc
   --baseline llm \
   --file_name /mnt/ss2/devops/sandbox/industrynav2/client/scene_all/scene_all.x86_64 \
   --scene_id 1 --base_port 5520 --max_steps 70 \
+  --ego_width 512 --ego_height 512 \
   --frame_save_dir outputs/scene1/point1/gemini-3-flash-preview \
   --model_id google/gemini-3-flash-preview \
   --init_world_x 31.0 --init_world_z 49.63 --init_curr_direction 180 \
   --target_x 550 --target_y 450
 ```
+
+### Egocentric resolution
+
+`--screen_width` and `--screen_height` control the Unity Player window (and are
+normally matched by `XVFB_SCREEN` on Linux). They do not change ML-Agents camera
+observations. Use `--ego_width` and `--ego_height`, or the wrapper variables
+`EGO_WIDTH` and `EGO_HEIGHT`, to resize both the `AgentSensor` RGB observation
+and the `DepthSensor` observation:
+
+```bash
+EGO_WIDTH=768 EGO_HEIGHT=432 bash shs/run_headless_benchmark.sh scene1
+```
+
+The selected dimensions become part of the ML-Agents behavior specification at
+startup, and egocentric RGB/depth PNGs are saved at that size. The minimap
+dimensions remain unchanged, so minimap target coordinates and A* planning are
+not rescaled. This feature requires a Unity client rebuilt after the runtime
+resolution support was added to `WarehouseAgent.cs`; older clients ignore the
+new launch arguments.
 
 ### Cheap dry boot (no API key, 2 random steps)
 
@@ -259,13 +283,25 @@ Pass via `bash shs/run_headless_benchmark.sh <scene_code> <model_id>`.
 .venv/bin/python -m nav.scripts.eval_run --input-dir outputs/scene1/point1/gemini-3-flash-preview
 ```
 
+The paper's success criterion is a final minimap distance strictly below 20 px.
+The runtime `--reach_px` stopping gate and post-hoc success threshold both
+default to 20 px. To reproduce historical evaluations that used 65 px, pass
+`--success-dist-px 65` to either `nav.scripts.eval_run` or
+`nav.scripts.aggregate_eval`.
+
+Each saved depth step contains two files. `<step>.png` is a fixed-scale
+grayscale view of the Unity sensor output; `<step>.npy` is a float32 depth map
+in meters, decoded from sRGB and clipped by the Unity shader at 20 m. Warning
+rate evaluation reads the `.npy` files. Do not compare old min-max-normalized
+depth PNG brightness directly with newly generated runs.
+
 Aggregation across runs into `eval_results.xlsx` is a manual / sheet-export step downstream of `nav.scripts.eval_run`.
 
 ---
 
 ## Headless caveats
 
-Despite the name, this script does **not** run with `-nographics`. The unified Unity build needs an active renderer to populate the camera/depth sensors; passing `-nographics` or `no_graphics=True` (in mlagents) results in either a SIGKILL on launch or blank sensor frames. The script always launches Unity with `-batchmode` + `no_graphics=False`. Python opens no windows of its own.
+Despite the name, this script does **not** run with `-nographics`. The unified Unity build needs an active renderer to populate the camera/depth sensors; passing `-nographics` or `no_graphics=True` (in mlagents) results in either a SIGKILL on launch or blank sensor frames. It always uses `no_graphics=False`; macOS adds `-batchmode`, while Linux defaults to a windowed player inside Xvfb because some Linux builds crash during Input System initialization in batch mode. Set `INDUSTRYNAV_UNITY_BATCHMODE=1` to override the Linux default. Python opens no display windows of its own.
 
 - **macOS** — the Unity window is visible on the host's display while the run is in progress; that's expected.
 - **Ubuntu Linux** — the wrapper invokes Python under `xvfb-run -a`, which provisions a fresh virtual display per invocation. No Unity window is visible to a remote SSH user. Don't rely on `DISPLAY` pointing at a real attached monitor — TVs sleep, login sessions get reclaimed, parallel runs collide on the same display. Use Xvfb. (Override with `USE_XVFB=0` only if you've thought about it.)
