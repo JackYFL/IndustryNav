@@ -37,14 +37,23 @@ python -m nav.scripts.collect_data \
   --max_steps 100 \
   --ego_width 512 \
   --ego_height 512 \
+  --minimap_width 862 \
+  --dynamic_objects moving \
   --modalities ego,minimap,depth \
   --marker_source vector
 ```
 
 Set `--ego_width` and `--ego_height` to collect egocentric RGB and depth frames
-at a different resolution. The minimap dimensions remain unchanged. The Unity
-client must be rebuilt from the current project for these arguments to take
-effect.
+at a different resolution. Set either `--minimap_width` or `--minimap_height`;
+the missing dimension is derived automatically from the canonical `862:512`
+aspect ratio. Canonical minimap coordinates and pixel thresholds are scaled to
+the selected runtime size automatically.
+The Unity client must be rebuilt from the current project for these arguments
+to take effect.
+
+Use `--dynamic_objects static` to collect or evaluate a static-environment
+variant. The navigation agent remains controllable; only environment motion is
+frozen. Keep this value consistent between data collection and BC inference.
 
 During collection, use the OpenCV control window to drive the agent. The collector writes per-frame observations and the action log when the episode exits.
 

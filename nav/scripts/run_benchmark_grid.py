@@ -58,6 +58,7 @@ from nav.config import (
     LLM_DEFAULT_HISTORY_SIZE,
     SCENE_ID_MAP,
 )
+from nav.harness.coordinates import resolve_minimap_resolution
 
 
 # nav/scripts/run_benchmark_grid.py -> repo root is two parents up.
@@ -181,6 +182,9 @@ def run_cell(args_dict: dict) -> dict:
     xvfb_screen = args_dict["xvfb_screen"]
     ego_width = args_dict["ego_width"]
     ego_height = args_dict["ego_height"]
+    minimap_width = args_dict["minimap_width"]
+    minimap_height = args_dict["minimap_height"]
+    dynamic_objects = args_dict["dynamic_objects"]
 
     cell.frame_save_dir.mkdir(parents=True, exist_ok=True)
     log_path = cell.frame_save_dir / "run.log"
@@ -206,6 +210,9 @@ def run_cell(args_dict: dict) -> dict:
         "--max_steps", str(max_steps),
         "--ego_width", str(ego_width),
         "--ego_height", str(ego_height),
+        "--minimap_width", str(minimap_width),
+        "--minimap_height", str(minimap_height),
+        "--dynamic_objects", dynamic_objects,
         "--frame_save_dir", str(cell.frame_save_dir),
         "--prompt_file", prompt_file,
         "--model_id", cell.model,
@@ -239,6 +246,7 @@ def run_cell(args_dict: dict) -> dict:
             "frame_save_dir": str(cell.frame_save_dir),
             "log_path": str(log_path),
             "cell": asdict(cell),
+            "dynamic_objects": dynamic_objects,
         }
     except subprocess.TimeoutExpired:
         return {
@@ -249,6 +257,7 @@ def run_cell(args_dict: dict) -> dict:
             "frame_save_dir": str(cell.frame_save_dir),
             "log_path": str(log_path),
             "cell": asdict(cell),
+            "dynamic_objects": dynamic_objects,
             "error": "timeout",
         }
     except Exception as e:  # noqa: BLE001
@@ -260,6 +269,7 @@ def run_cell(args_dict: dict) -> dict:
             "frame_save_dir": str(cell.frame_save_dir),
             "log_path": str(log_path),
             "cell": asdict(cell),
+            "dynamic_objects": dynamic_objects,
             "error": f"{type(e).__name__}: {e}",
         }
 
@@ -279,6 +289,7 @@ def append_grid_row(grid_csv: Path, status: dict):
         "seed_id": cell["seed_id"],
         "vision_input": cell["vision_input"],
         "history_size": cell["history_size"],
+        "dynamic_objects": status["dynamic_objects"],
         "ok": status["ok"],
         "returncode": status["returncode"],
         "duration_sec": round(status["duration_sec"], 2),
@@ -305,6 +316,7 @@ def append_failure_row(failures_csv: Path, status: dict, attempts: int):
         "seed_id": cell["seed_id"],
         "vision_input": cell["vision_input"],
         "history_size": cell["history_size"],
+        "dynamic_objects": status.get("dynamic_objects", ""),
         "attempts": attempts,
         "returncode": status["returncode"],
         "error": status.get("error", ""),
@@ -344,6 +356,16 @@ def parse_args():
                    help="Width of each egocentric RGB and depth observation.")
     p.add_argument("--ego_height", type=int, default=512,
                    help="Height of each egocentric RGB and depth observation.")
+    p.add_argument("--minimap_width", type=int, default=None,
+                   help="Optional minimap width; derived from height when omitted.")
+    p.add_argument("--minimap_height", type=int, default=None,
+                   help="Optional minimap height; derived from width when omitted.")
+    p.add_argument(
+        "--dynamic_objects",
+        choices=("moving", "static"),
+        default="moving",
+        help="Run environment objects normally or freeze them for every grid cell.",
+    )
     p.add_argument("--max_retries", type=int, default=2,
                    help="Retry a failed cell this many times before logging it to failures.csv.")
     p.add_argument("--resume", action="store_true",
@@ -390,6 +412,13 @@ def main():
     args = parse_args()
     if args.ego_width <= 0 or args.ego_height <= 0:
         raise SystemExit("--ego_width and --ego_height must be positive integers.")
+    try:
+        args.minimap_width, args.minimap_height = resolve_minimap_resolution(
+            args.minimap_width,
+            args.minimap_height,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
     vision_modes = {"on": [True], "off": [False], "both": [True, False]}[args.vision_input]
     cells = build_grid(
@@ -425,6 +454,8 @@ def main():
     print(f"[grid] cells={len(cells)} | concurrency={args.max_concurrency} | "
           f"max_steps={args.max_steps} | vision={args.vision_input} | "
           f"ego={args.ego_width}x{args.ego_height} | "
+          f"minimap={args.minimap_width}x{args.minimap_height} | "
+          f"dynamic_objects={args.dynamic_objects} | "
           f"file={file_name} | xvfb={use_xvfb}", flush=True)
 
     if args.dry_run:
@@ -454,6 +485,9 @@ def main():
                         "max_steps": args.max_steps,
                         "ego_width": args.ego_width,
                         "ego_height": args.ego_height,
+                        "minimap_width": args.minimap_width,
+                        "minimap_height": args.minimap_height,
+                        "dynamic_objects": args.dynamic_objects,
                         "use_xvfb": use_xvfb,
                         "xvfb_screen": args.xvfb_screen,
                         "per_cell_timeout_sec": (args.per_cell_timeout_sec or None),
@@ -471,7 +505,8 @@ def main():
                         "label": c.label, "ok": False, "returncode": -2000,
                         "duration_sec": 0, "frame_save_dir": str(c.frame_save_dir),
                         "log_path": str(c.frame_save_dir / "run.log"),
-                        "cell": asdict(c), "error": f"future failed: {type(e).__name__}: {e}",
+                        "cell": asdict(c), "dynamic_objects": args.dynamic_objects,
+                        "error": f"future failed: {type(e).__name__}: {e}",
                     }
 
                 if status["ok"]:

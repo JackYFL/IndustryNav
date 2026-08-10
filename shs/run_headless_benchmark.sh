@@ -19,6 +19,9 @@
 #   SCENE_ID     override the scene_code->scene_id mapping
 #   MAX_STEPS    per-point decision-step cap               (default: 70)
 #   EGO_WIDTH / EGO_HEIGHT  egocentric RGB/depth sensor size (default: 512 / 512)
+#   MINIMAP_WIDTH / MINIMAP_HEIGHT  minimap size; set either value and derive
+#                                  the other using 862:512 (default: 862x512)
+#   DYNAMIC_OBJECTS  moving | static                       (default: moving)
 #   PYTHON_BIN   interpreter                               (default: <repo>/.venv/bin/python)
 #   USE_XVFB / XVFB_SCREEN   Linux virtual-display knobs    (default: 1 / 1724x1024x24)
 #   INDUSTRYNAV_UNITY_BATCHMODE  pass -batchmode to Unity    (default: 0 on Linux, 1 elsewhere)
@@ -111,6 +114,16 @@ fi
 MAX_STEPS="${MAX_STEPS:-70}"
 EGO_WIDTH="${EGO_WIDTH:-512}"
 EGO_HEIGHT="${EGO_HEIGHT:-512}"
+MINIMAP_WIDTH="${MINIMAP_WIDTH:-}"
+MINIMAP_HEIGHT="${MINIMAP_HEIGHT:-}"
+DYNAMIC_OBJECTS="${DYNAMIC_OBJECTS:-moving}"
+if [[ "$DYNAMIC_OBJECTS" != "moving" && "$DYNAMIC_OBJECTS" != "static" ]]; then
+  echo "DYNAMIC_OBJECTS must be 'moving' or 'static', got: $DYNAMIC_OBJECTS"
+  exit 1
+fi
+if [[ -z "$MINIMAP_WIDTH" && -z "$MINIMAP_HEIGHT" ]]; then
+  MINIMAP_WIDTH=862
+fi
 
 idx=0
 "$PYTHON_BIN" - <<'PY' "$INPUT_FILE" "$SCENE_CODE" | while IFS='|' read -r point_id init_wx init_wz init_dir target_x target_y; do
@@ -149,6 +162,7 @@ PY
        --max_steps "$MAX_STEPS"
        --ego_width "$EGO_WIDTH"
        --ego_height "$EGO_HEIGHT"
+       --dynamic_objects "$DYNAMIC_OBJECTS"
        --frame_save_dir "$FRAME_SAVE_DIR"
        --model_id "$MODEL_ID"
        --init_world_x "$init_wx"
@@ -156,6 +170,12 @@ PY
        --init_curr_direction "$init_dir"
        --target_x "$target_x"
        --target_y "$target_y")
+  if [[ -n "$MINIMAP_WIDTH" ]]; then
+    CMD+=(--minimap_width "$MINIMAP_WIDTH")
+  fi
+  if [[ -n "$MINIMAP_HEIGHT" ]]; then
+    CMD+=(--minimap_height "$MINIMAP_HEIGHT")
+  fi
   # Prepend the xvfb prefix only when non-empty (safe under `set -u` on bash 3.2).
   if [[ ${#XVFB_PREFIX[@]} -gt 0 ]]; then
     CMD=("${XVFB_PREFIX[@]}" "${CMD[@]}")

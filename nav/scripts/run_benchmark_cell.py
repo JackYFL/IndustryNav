@@ -37,7 +37,15 @@ from nav.config import (
     resolve_scene_all_path,
 )
 from nav.harness.env_setup import EnvSetupError, setup_and_prime
-from nav.harness.coordinates import visual_to_unity_coords
+from nav.harness.coordinates import (
+    canonical_minimap_distance_to_runtime,
+    canonical_to_minimap_coords,
+    minimap_pixel_scale,
+    minimap_to_canonical_coords,
+    resolve_minimap_resolution,
+    runtime_minimap_distance_to_canonical,
+    visual_to_unity_coords,
+)
 from nav.harness.observations import get_obs_safe
 from nav.harness.perception import detect_red_point
 from nav.harness.prompt_assembly import format_history_for_prompt, render_nav_prompt
@@ -124,7 +132,24 @@ def parse_args():
                    help="Width of the egocentric RGB and depth observations.")
     p.add_argument("--ego_height", type=int, default=512,
                    help="Height of the egocentric RGB and depth observations.")
+    p.add_argument("--minimap_width", type=int, default=None,
+                   help="Optional minimap width; derived from height when omitted.")
+    p.add_argument("--minimap_height", type=int, default=None,
+                   help="Optional minimap height; derived from width when omitted.")
     p.add_argument("--sim_steps_per_decision", type=int, default=2)
+    p.add_argument(
+        "--dynamic_objects",
+        choices=("moving", "static"),
+        default="moving",
+        help="Run environment objects normally or freeze them in place. "
+             "The navigation agent remains controllable.",
+    )
+    p.add_argument(
+        "--spline_speed_multiplier",
+        type=float,
+        default=1.0,
+        help="Spline-object speed multiplier when --dynamic_objects=moving.",
+    )
 
     # Spawn. Two mutually-exclusive ways to specify position:
     #   (preferred) --init_world_x / --init_world_z : Unity world coords.
@@ -138,18 +163,21 @@ def parse_args():
     p.add_argument("--init_world_z", type=float, default=None,
                    help="Spawn z in Unity world coords.")
     p.add_argument("--init_curr_x", type=int, default=None,
-                   help="Spawn pixel x on the visual minimap. Used only if "
+                   help="Spawn x in canonical 862x512 minimap pixels. Used only if "
                         "--init_world_x/--init_world_z are not provided.")
     p.add_argument("--init_curr_y", type=int, default=None,
-                   help="Spawn pixel y on the visual minimap. Used only if "
+                   help="Spawn y in canonical 862x512 minimap pixels. Used only if "
                         "--init_world_x/--init_world_z are not provided.")
     p.add_argument("--init_curr_direction", type=float, default=180.0,
                    help="Spawn yaw in degrees (Unity convention; 0=W,90=N,180=E,270=S).")
 
     # Target
-    p.add_argument("--target_x", type=int, required=True)
-    p.add_argument("--target_y", type=int, required=True)
-    p.add_argument("--reach_px", type=float, default=20.0)
+    p.add_argument("--target_x", type=int, required=True,
+                   help="Target x in canonical 862x512 minimap pixels.")
+    p.add_argument("--target_y", type=int, required=True,
+                   help="Target y in canonical 862x512 minimap pixels.")
+    p.add_argument("--reach_px", type=float, default=20.0,
+                   help="Canonical 862x512 success radius; scaled at runtime.")
 
     # LLM / BC
     p.add_argument("--prompt_file", type=str, default=DEFAULT_PROMPT_VISION)
@@ -182,7 +210,7 @@ def parse_args():
 # ---------------------------------------------------------------------------
 # Python-side minimap marker overlay
 # ---------------------------------------------------------------------------
-def world2pixel(x, z):
+def world2pixel(x, z, map_size=UNITY_MAP_SIZE):
     """Fallback affine from Unity world X/Z into Unity minimap pixels."""
     ax, bx, cx = 9.842864E-10, -0.0754061, 43.76626
     az, bz, cz = -0.06702765, 1.205371E-08, 68.32464
@@ -191,16 +219,24 @@ def world2pixel(x, z):
         return 0, 0
     px = (bz * (x - cx) - bx * (z - cz)) / det
     py = (ax * (z - cz) - az * (x - cx)) / det
-    return float(px), float(py)
+    scale_x = float(map_size[0]) / float(UNITY_MAP_SIZE[0])
+    scale_y = float(map_size[1]) / float(UNITY_MAP_SIZE[1])
+    return float(px) * scale_x, float(py) * scale_y
 
 
-def unity_to_visual_coords(margin, unity_px, unity_py, img_shape=None):
+def unity_to_visual_coords(
+    margin,
+    unity_px,
+    unity_py,
+    img_shape=None,
+    unity_map_size=UNITY_MAP_SIZE,
+):
     """Inverse of the letterbox-aware visual->Unity minimap coordinate mapping."""
     if margin is None:
         px, py = float(unity_px), float(unity_py)
     else:
         min_x, max_x, min_y, max_y = margin
-        unity_w, unity_h = UNITY_MAP_SIZE
+        unity_w, unity_h = unity_map_size
         px = min_x + (float(unity_px) / unity_w) * (max_x - min_x)
         py = min_y + (float(unity_py) / unity_h) * (max_y - min_y)
 
@@ -227,17 +263,17 @@ def build_axis_aligned_projector(spawn_pixel, spawn_world, target_pixel, target_
     }
 
 
-def world_to_unity_coords(projector, world_x, world_z):
+def world_to_unity_coords(projector, world_x, world_z, map_size=UNITY_MAP_SIZE):
     """Project world X/Z into Unity minimap pixels using run calibration when available."""
     if projector is None:
-        return world2pixel(float(world_x), float(world_z))
+        return world2pixel(float(world_x), float(world_z), map_size=map_size)
 
     spawn_px, spawn_py = projector["spawn_pixel"]
     spawn_x, spawn_z = projector["spawn_world"]
     target_px, target_py = projector["target_pixel"]
     target_x, target_z = projector["target_world"]
 
-    fallback_px, fallback_py = world2pixel(float(world_x), float(world_z))
+    fallback_px, fallback_py = world2pixel(float(world_x), float(world_z), map_size=map_size)
 
     if abs(target_z - spawn_z) > 1e-6:
         px = spawn_px + (float(world_z) - spawn_z) * (target_px - spawn_px) / (target_z - spawn_z)
@@ -252,9 +288,27 @@ def world_to_unity_coords(projector, world_x, world_z):
     return px, py
 
 
-def world_to_visual_coords(margin, world_x, world_z, img_shape=None, projector=None):
-    unity_px, unity_py = world_to_unity_coords(projector, world_x, world_z)
-    return unity_to_visual_coords(margin, unity_px, unity_py, img_shape=img_shape)
+def world_to_visual_coords(
+    margin,
+    world_x,
+    world_z,
+    img_shape=None,
+    projector=None,
+    map_size=UNITY_MAP_SIZE,
+):
+    unity_px, unity_py = world_to_unity_coords(
+        projector,
+        world_x,
+        world_z,
+        map_size=map_size,
+    )
+    return unity_to_visual_coords(
+        margin,
+        unity_px,
+        unity_py,
+        img_shape=img_shape,
+        unity_map_size=map_size,
+    )
 
 
 def heading_endpoint_from_screen_direction(center_xy, direction_deg, length=24, img_shape=None):
@@ -277,7 +331,16 @@ def heading_endpoint_from_screen_direction(center_xy, direction_deg, length=24, 
     return int(x), int(y)
 
 
-def vector_marker_from_obs(margin, pos_x, pos_z, rot_y, img_shape=None, projector=None):
+def vector_marker_from_obs(
+    margin,
+    pos_x,
+    pos_z,
+    rot_y,
+    img_shape=None,
+    projector=None,
+    map_size=UNITY_MAP_SIZE,
+    pixel_scale=1.0,
+):
     """Return (center_xy, heading_xy) for a Python-side minimap marker arrow.
 
     The marker center uses world->minimap projection, while the arrow endpoint
@@ -287,38 +350,51 @@ def vector_marker_from_obs(margin, pos_x, pos_z, rot_y, img_shape=None, projecto
     points.
     """
     center_xy = world_to_visual_coords(
-        margin, pos_x, pos_z, img_shape=img_shape, projector=projector
+        margin,
+        pos_x,
+        pos_z,
+        img_shape=img_shape,
+        projector=projector,
+        map_size=map_size,
     )
     heading_xy = heading_endpoint_from_screen_direction(
         center_xy,
         rot_y,
-        length=24,
+        length=max(1, round(24 * float(pixel_scale))),
         img_shape=img_shape,
     )
     return center_xy, heading_xy
 
 
-def draw_curr_target_heading_rgb(minimap_rgb, curr_xy, target_xy, curr_heading_xy=None):
+def draw_curr_target_heading_rgb(
+    minimap_rgb,
+    curr_xy,
+    target_xy,
+    curr_heading_xy=None,
+    pixel_scale=1.0,
+):
     """Draw Python-side current marker, heading arrow, and target marker."""
     bgr = cv2.cvtColor(minimap_rgb, cv2.COLOR_RGB2BGR)
     if curr_xy is not None:
-        cv2.circle(bgr, (int(curr_xy[0]), int(curr_xy[1])), 5, (0, 0, 255), -1)
+        curr_radius = max(2, round(5 * float(pixel_scale)))
+        cv2.circle(bgr, (int(curr_xy[0]), int(curr_xy[1])), curr_radius, (0, 0, 255), -1)
         if curr_heading_xy is not None:
             cv2.arrowedLine(
                 bgr,
                 (int(curr_xy[0]), int(curr_xy[1])),
                 (int(curr_heading_xy[0]), int(curr_heading_xy[1])),
                 (0, 0, 255),
-                2,
+                max(1, round(2 * float(pixel_scale))),
                 cv2.LINE_AA,
                 tipLength=0.35,
             )
     if target_xy is not None:
-        cv2.circle(bgr, (int(target_xy[0]), int(target_xy[1])), 6, (0, 200, 0), -1)
+        target_radius = max(2, round(6 * float(pixel_scale)))
+        cv2.circle(bgr, (int(target_xy[0]), int(target_xy[1])), target_radius, (0, 200, 0), -1)
     return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
 
-def remove_unity_red_marker_rgb(minimap_rgb):
+def remove_unity_red_marker_rgb(minimap_rgb, pixel_scale=1.0):
     """Remove the old Unity-rendered red marker from an RGB minimap image."""
     if minimap_rgb is None:
         return minimap_rgb
@@ -327,9 +403,13 @@ def remove_unity_red_marker_rgb(minimap_rgb):
     if mask is None or cv2.countNonZero(mask) == 0:
         return minimap_rgb
 
-    kernel = np.ones((9, 9), np.uint8)
+    kernel_size = max(1, round(9 * float(pixel_scale)))
+    if kernel_size % 2 == 0:
+        kernel_size += 1
+    kernel = np.ones((kernel_size, kernel_size), np.uint8)
     mask = cv2.dilate(mask, kernel, iterations=1)
-    cleaned_bgr = cv2.inpaint(bgr, mask, 5, cv2.INPAINT_TELEA)
+    inpaint_radius = max(1, round(5 * float(pixel_scale)))
+    cleaned_bgr = cv2.inpaint(bgr, mask, inpaint_radius, cv2.INPAINT_TELEA)
     return cv2.cvtColor(cleaned_bgr, cv2.COLOR_BGR2RGB)
 
 
@@ -340,6 +420,7 @@ def maybe_calibrate_projector_from_raw_marker(
     world_x,
     world_z,
     logger,
+    map_size=UNITY_MAP_SIZE,
 ):
     """Use the Unity red marker once to calibrate world->minimap projection.
 
@@ -360,7 +441,12 @@ def maybe_calibrate_projector_from_raw_marker(
     if detected_xy is None or mask is None or cv2.countNonZero(mask) == 0:
         return None
 
-    spawn_upx, spawn_upy = visual_to_unity_coords(margin, detected_xy[0], detected_xy[1])
+    spawn_upx, spawn_upy = visual_to_unity_coords(
+        margin,
+        detected_xy[0],
+        detected_xy[1],
+        map_size=map_size,
+    )
     projector = build_axis_aligned_projector(
         (spawn_upx, spawn_upy),
         (float(world_x), float(world_z)),
@@ -387,6 +473,19 @@ def action_space_for_baseline(baseline: str) -> dict:
 
 def main():
     args = parse_args()
+    try:
+        args.minimap_width, args.minimap_height = resolve_minimap_resolution(
+            args.minimap_width,
+            args.minimap_height,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    minimap_size = (int(args.minimap_width), int(args.minimap_height))
+    pixel_scale = minimap_pixel_scale(minimap_size)
+    runtime_reach_px = canonical_minimap_distance_to_runtime(
+        args.reach_px,
+        minimap_size,
+    )
     # Resolve --file_name="auto" against config.SCENE_ALL_BUILDS so a single
     # invocation works across dev machines without a per-host wrapper hack.
     args.file_name = resolve_scene_all_path(args.file_name)
@@ -421,6 +520,7 @@ def main():
             obstacle_inflate_px=args.astar_obstacle_inflate_px,
             marker_clear_px=args.astar_marker_clear_px,
             proxy_stop_real_dist_px=args.astar_proxy_stop_real_dist_px,
+            pixel_scale=pixel_scale,
             debug_viz=args.astar_debug_viz,
             debug_dir=astar_debug_dir,
         )
@@ -429,6 +529,7 @@ def main():
             f"obstacle_inflate_px={args.astar_obstacle_inflate_px} | "
             f"marker_clear_px={args.astar_marker_clear_px} | "
             f"proxy_stop_real_dist_px={args.astar_proxy_stop_real_dist_px} | "
+            f"pixel_scale={pixel_scale:.4f} | "
             f"debug_viz={args.astar_debug_viz} | debug_dir={astar_debug_dir}"
         )
 
@@ -455,6 +556,10 @@ def main():
     init_world_x, init_world_z = primed.init_world or (None, None)
     target_world_x, target_world_z = primed.target_world or (None, None)
     target_xy = primed.target_xy
+    logger.info(
+        f"Minimap runtime space: {minimap_size[0]}x{minimap_size[1]} | "
+        f"canonical reach_px={args.reach_px:g} -> runtime={runtime_reach_px:.2f}"
+    )
     minimap_projector = build_axis_aligned_projector(
         primed.target_sc.last_spawn_pixel,
         primed.target_sc.last_spawn_world,
@@ -545,7 +650,10 @@ def main():
 
             curr_xy = last_curr_xy
             curr_heading_xy = None
-            raw_minimap_rgb = obs_to_rgb(minimap_obs_raw) if minimap_obs_raw is not None else None
+            sensor_minimap_rgb = (
+                obs_to_rgb(minimap_obs_raw) if minimap_obs_raw is not None else None
+            )
+            raw_minimap_rgb = sensor_minimap_rgb
             if args.marker_source == "vector" and minimap_projector is None:
                 calibrated_projector = maybe_calibrate_projector_from_raw_marker(
                     raw_minimap_rgb,
@@ -554,25 +662,31 @@ def main():
                     pos_x,
                     pos_z,
                     logger,
+                    map_size=minimap_size,
                 )
                 if calibrated_projector is not None:
                     minimap_projector = calibrated_projector
             true_minimap_rgb = raw_minimap_rgb
+            saved_minimap_rgb = sensor_minimap_rgb
             if (
                 true_minimap_rgb is not None
                 and args.marker_source == "vector"
                 and args.hide_unity_red_marker
             ):
-                true_minimap_rgb = remove_unity_red_marker_rgb(true_minimap_rgb)
+                true_minimap_rgb = remove_unity_red_marker_rgb(
+                    true_minimap_rgb,
+                    pixel_scale=pixel_scale,
+                )
+                saved_minimap_rgb = true_minimap_rgb
             ego_rgb = obs_to_rgb(ego_obs) if ego_obs is not None else None
 
             # Frame saving
             if ego_obs is not None and "ego" in subdirs:
                 save_frame_from_obs(ego_obs, save_dir=subdirs["ego"], filename=f"{step_count}.png")
-            if true_minimap_rgb is not None and "minimap" in subdirs:
+            if saved_minimap_rgb is not None and "minimap" in subdirs:
                 cv2.imwrite(
                     os.path.join(subdirs["minimap"], f"{step_count}.png"),
-                    cv2.cvtColor(true_minimap_rgb, cv2.COLOR_RGB2BGR),
+                    cv2.cvtColor(saved_minimap_rgb, cv2.COLOR_RGB2BGR),
                 )
             if depth_obs_raw is not None and "depth" in subdirs:
                 if depth_obs_raw.ndim == 2:
@@ -591,11 +705,16 @@ def main():
                     rot_y,
                     img_shape=true_minimap_rgb.shape if true_minimap_rgb is not None else None,
                     projector=minimap_projector,
+                    map_size=minimap_size,
+                    pixel_scale=pixel_scale,
                 )
             elif (step_count == 0 and last_curr_xy is None
                     and args.init_curr_x is not None and args.init_curr_y is not None):
-                curr_xy = (int(args.init_curr_x), int(args.init_curr_y))
-                logger.info(f"[Frame 0] Using CLI init position: {curr_xy}")
+                curr_xy = canonical_to_minimap_coords(
+                    (args.init_curr_x, args.init_curr_y),
+                    minimap_size,
+                )
+                logger.info(f"[Frame 0] Using scaled CLI init position: {curr_xy}")
             elif true_minimap_rgb is not None:
                 map_bgr = cv2.cvtColor(true_minimap_rgb, cv2.COLOR_RGB2BGR)
                 _, detected_xy, _ = detect_red_point(map_bgr)
@@ -612,6 +731,7 @@ def main():
                     curr_xy,
                     target_xy,
                     curr_heading_xy=curr_heading_xy,
+                    pixel_scale=pixel_scale,
                 )
                 cv2.imwrite(
                     os.path.join(subdir_ann, f"{step_count}.png"),
@@ -638,12 +758,21 @@ def main():
                     )
                     _qa_file.flush()
                 if args.baseline == "llm" and args.history_size > 0 and curr_xy is not None:
+                    history_xy = minimap_to_canonical_coords(curr_xy, minimap_size)
                     history_deque.append({
                         "step": step_count,
-                        "position": curr_xy,
+                        "position": (round(history_xy[0]), round(history_xy[1])),
                         "theta": unity_rotation_to_egocentric_theta(rot_y),
                         "action": chosen_action,
-                        "distance_to_target": pix_dist(curr_xy, target_xy) if target_xy else 0.0,
+                        "distance_to_target": (
+                            runtime_minimap_distance_to_canonical(
+                                curr_xy,
+                                target_xy,
+                                minimap_size,
+                            )
+                            if target_xy
+                            else 0.0
+                        ),
                     })
                 logger.info(
                     f"[Step:{step_count}] Action: {chosen_action} | Reasoning: {str(reasoning)[:200]}"
@@ -654,7 +783,7 @@ def main():
             else:
                 # No decision in flight: either we've reached, or we kick one off.
                 if (curr_xy is not None and target_xy is not None
-                        and pix_dist(curr_xy, target_xy) <= args.reach_px):
+                        and pix_dist(curr_xy, target_xy) <= runtime_reach_px):
                     chosen_action = "stop"
                     step_count += 1
                     continuous_actions = action2signal(chosen_action, action_space)
@@ -665,11 +794,21 @@ def main():
                         payload = {"action_space": list(action_space.keys())}
                     elif args.baseline == "llm":
                         if curr_xy is not None and target_xy is not None:
-                            distance = pix_dist(curr_xy, target_xy)
+                            prompt_curr_xy = minimap_to_canonical_coords(curr_xy, minimap_size)
+                            prompt_curr_xy = (
+                                round(prompt_curr_xy[0]),
+                                round(prompt_curr_xy[1]),
+                            )
+                            prompt_target_xy = (int(args.target_x), int(args.target_y))
+                            distance = runtime_minimap_distance_to_canonical(
+                                curr_xy,
+                                target_xy,
+                                minimap_size,
+                            )
                             theta = unity_rotation_to_egocentric_theta(rot_y)
                             history_str = format_history_for_prompt(history_deque)
                             prompt = render_nav_prompt(
-                                prompt_template, curr_xy, target_xy, theta,
+                                prompt_template, prompt_curr_xy, prompt_target_xy, theta,
                                 distance, allowed_actions, history_str,
                             )
                             last_prompt = prompt
@@ -691,7 +830,7 @@ def main():
                                 "curr_xy": curr_xy,
                                 "target_xy": target_xy,
                                 "agent_theta": unity_rotation_to_egocentric_theta(rot_y),
-                                "reach_px": args.reach_px,
+                                "reach_px": runtime_reach_px,
                                 "step": step_count,
                                 "curr_world_xz": (float(pos_x), float(pos_z)),
                             }
@@ -732,31 +871,45 @@ def main():
                 f"[Step:{step_count}] Sending Action -> Move:{action_sent[0]:.2f}, "
                 f"Strafe:{action_sent[1]:.2f}, Look:{action_sent[2]:.2f}"
             )
+            init_xy_canonical = (
+                minimap_to_canonical_coords(detected_init_xy, minimap_size)
+                if detected_init_xy is not None
+                else None
+            )
+            curr_xy_canonical = (
+                minimap_to_canonical_coords(curr_xy, minimap_size)
+                if curr_xy is not None
+                else None
+            )
             row = {
                 "step": step_count,
                 "action": chosen_action,
                 "move": float(action_sent[0]),
                 "strafe": float(action_sent[1]),
                 "look": float(action_sent[2]),
-                "init_px": int(detected_init_xy[0]) if detected_init_xy is not None else None,
-                "init_py": int(detected_init_xy[1]) if detected_init_xy is not None else None,
+                "init_px": round(init_xy_canonical[0]) if init_xy_canonical is not None else None,
+                "init_py": round(init_xy_canonical[1]) if init_xy_canonical is not None else None,
                 "init_world_x": init_world_x,
                 "init_world_z": init_world_z,
                 "init_direction": float(args.init_curr_direction),
-                "curr_px": int(curr_xy[0]) if curr_xy is not None else None,
-                "curr_py": int(curr_xy[1]) if curr_xy is not None else None,
+                "curr_px": round(curr_xy_canonical[0]) if curr_xy_canonical is not None else None,
+                "curr_py": round(curr_xy_canonical[1]) if curr_xy_canonical is not None else None,
                 "curr_world_x": float(pos_x),
                 "curr_world_y": float(pos_y),
                 "curr_world_z": float(pos_z),
                 "curr_direction_x": float(rot_x),
                 "curr_direction_y": float(rot_y),
                 "curr_direction_z": float(rot_z),
-                "target_px": int(target_xy[0]),
-                "target_py": int(target_xy[1]),
+                "target_px": int(args.target_x),
+                "target_py": int(args.target_y),
                 "target_world_x": target_world_x,
                 "target_world_z": target_world_z,
                 "marker_source": args.marker_source,
-                "distance_px": float(pix_dist(curr_xy, target_xy)) if curr_xy is not None else None,
+                "distance_px": (
+                    runtime_minimap_distance_to_canonical(curr_xy, target_xy, minimap_size)
+                    if curr_xy is not None
+                    else None
+                ),
                 "distance_world": (
                     float(np.hypot(float(pos_x) - target_world_x, float(pos_z) - target_world_z))
                     if (target_world_x is not None and target_world_z is not None) else None
@@ -786,8 +939,13 @@ def main():
         try:
             final_xy = last_curr_xy
             distance_px = (
-                float(pix_dist(final_xy, target_xy))
+                runtime_minimap_distance_to_canonical(final_xy, target_xy, minimap_size)
                 if final_xy is not None else float("nan")
+            )
+            final_xy_canonical = (
+                minimap_to_canonical_coords(final_xy, minimap_size)
+                if final_xy is not None
+                else None
             )
             result = {
                 "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
@@ -805,11 +963,11 @@ def main():
                 "vision_input": bool(args.vision_input),
                 "max_steps": int(args.max_steps),
                 "reach_px": float(args.reach_px),
-                "target_x": int(target_xy[0]) if target_xy else None,
-                "target_y": int(target_xy[1]) if target_xy else None,
+                "target_x": int(args.target_x),
+                "target_y": int(args.target_y),
                 "init_direction": float(args.init_curr_direction),
-                "final_x": int(final_xy[0]) if final_xy is not None else None,
-                "final_y": int(final_xy[1]) if final_xy is not None else None,
+                "final_x": round(final_xy_canonical[0]) if final_xy_canonical is not None else None,
+                "final_y": round(final_xy_canonical[1]) if final_xy_canonical is not None else None,
                 "distance_px": distance_px,
                 "stop_reason": stop_reason or "loop_end",
                 "steps_taken": step_count,
@@ -817,10 +975,13 @@ def main():
                 "modalities": ",".join(sorted(enabled_modalities)),
                 "sim_steps_per_decision": int(args.sim_steps_per_decision),
                 "marker_source": args.marker_source,
+                "spline_speed_multiplier": float(args.spline_speed_multiplier),
+                "dynamic_objects": args.dynamic_objects,
             }
             logger.info(
                 f"[FINAL] stop={result['stop_reason']} steps={result['steps_taken']} "
-                f"final={final_xy} target={target_xy} dist={distance_px:.2f}px"
+                f"runtime_final={final_xy} runtime_target={target_xy} "
+                f"canonical_dist={distance_px:.2f}px"
             )
             results_csv_path = (
                 args.results_csv.strip()

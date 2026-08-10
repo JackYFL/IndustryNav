@@ -164,6 +164,10 @@ The most useful environment variables are:
 | `SIM_STEPS_PER_DECISION` | `2` | Unity simulation steps per A* action. |
 | `REACH_PX` | `20` | Success radius in visual minimap pixels. |
 | `MODALITIES` | `ego,minimap,depth` | Saved sensor modalities. |
+| `EGO_WIDTH`, `EGO_HEIGHT` | `512`, `512` | Egocentric RGB and depth sensor resolution. |
+| `MINIMAP_WIDTH` | `862` | Optional minimap width; derived from height when only height is set. |
+| `MINIMAP_HEIGHT` | unset | Optional minimap height; derived from width when only width is set. |
+| `DYNAMIC_OBJECTS` | `moving` | `moving` runs environment motion; `static` freezes non-agent scene motion. |
 | `MARKER_SOURCE` | `vector` | `vector` uses Unity vector observations; `red` uses legacy red-marker detection. |
 | `HIDE_UNITY_RED_MARKER` | `1` | Removes the old Unity red marker when Python draws the vector marker. |
 | `ASTAR_DEBUG_VIZ` | `0` | Saves walkable-grid/path debug frames when enabled. |
@@ -205,7 +209,15 @@ Change the egocentric RGB and depth resolution together:
 EGO_WIDTH=768 EGO_HEIGHT=432 bash shs/run_Astar.sh scene1 point1
 ```
 
-This does not resize the minimap used by A*.
+Resize the minimap while preserving its aspect ratio:
+
+```bash
+MINIMAP_WIDTH=431 bash shs/run_Astar.sh scene1 point1
+```
+
+The saved minimap and A* runtime grid are `431 x 256`. Canonical target
+coordinates and pixel parameters are scaled by `0.5` at runtime, while CSV
+evaluation output remains in the canonical `862 x 512` space.
 
 Keep the raw Unity red marker visible:
 

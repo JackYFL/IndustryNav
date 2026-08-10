@@ -27,6 +27,7 @@ from nav.config import (
     MINIMAP_WARMUP_MAX_ATTEMPTS,
     MINIMAP_WARMUP_MIN_EDGES,
     MODALITY_TO_IDX,
+    UNITY_MAP_SIZE,
 )
 from nav.utils import action2signal, obs_to_rgb
 
@@ -96,6 +97,11 @@ def get_minimap_rgb_for_init(
         rgb = obs_to_rgb(mm)
         gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
         edges = cv2.Canny(gray, MINIMAP_CANNY_LO, MINIMAP_CANNY_HI)
-        if int((edges > 0).sum()) >= min_edges:
+        h, w = rgb.shape[:2]
+        edge_scale = (
+            (w / float(UNITY_MAP_SIZE[0])) + (h / float(UNITY_MAP_SIZE[1]))
+        ) / 2.0
+        required_edges = max(5, round(min_edges * edge_scale))
+        if int((edges > 0).sum()) >= required_edges:
             return rgb
     return None

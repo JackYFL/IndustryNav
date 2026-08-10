@@ -47,33 +47,41 @@ class AStarBaseline:
         stuck_block_radius_px: float = ASTAR_DEFAULTS.stuck_block_radius_px,
         stuck_block_ttl_steps: int = ASTAR_DEFAULTS.stuck_block_ttl_steps,
         proxy_stop_real_dist_px: float = ASTAR_DEFAULTS.proxy_stop_real_dist_px,
+        pixel_scale: float = 1.0,
         debug_viz: bool = False,
         debug_dir: Optional[str] = None,
     ):
-        self.grid_step = int(grid_step)
+        self.pixel_scale = float(pixel_scale)
+        if self.pixel_scale <= 0:
+            raise ValueError("pixel_scale must be positive.")
+
+        def scaled_int(value: float, minimum: int = 1) -> int:
+            return max(minimum, int(round(float(value) * self.pixel_scale)))
+
+        self.grid_step = scaled_int(grid_step)
         self.obstacle_threshold = int(obstacle_threshold)
         self.min_free_ratio = float(min_free_ratio)
-        self.obstacle_inflate_px = int(obstacle_inflate_px)
-        self.marker_clear_px = int(marker_clear_px)
-        self.waypoint_distance_px = float(waypoint_distance_px)
-        self.waypoint_reach_px = float(waypoint_reach_px)
-        self.path_replan_distance_px = float(path_replan_distance_px)
-        self.target_change_replan_px = float(target_change_replan_px)
+        self.obstacle_inflate_px = scaled_int(obstacle_inflate_px, minimum=0)
+        self.marker_clear_px = scaled_int(marker_clear_px)
+        self.waypoint_distance_px = float(waypoint_distance_px) * self.pixel_scale
+        self.waypoint_reach_px = float(waypoint_reach_px) * self.pixel_scale
+        self.path_replan_distance_px = float(path_replan_distance_px) * self.pixel_scale
+        self.target_change_replan_px = float(target_change_replan_px) * self.pixel_scale
         self.turn_tolerance_deg = float(turn_tolerance_deg)
         self.forward_priority_tolerance_deg = float(forward_priority_tolerance_deg)
         self.drive_turn_tolerance_deg = float(drive_turn_tolerance_deg)
-        self.lookahead_px = float(lookahead_px)
+        self.lookahead_px = float(lookahead_px) * self.pixel_scale
         self.front_cone_deg = float(front_cone_deg)
         self.hysteresis_reset_deg = float(hysteresis_reset_deg)
         self.hysteresis_lock_deg = float(hysteresis_lock_deg)
         self.stuck_world_epsilon = float(stuck_world_epsilon)
-        self.stuck_px_epsilon = float(stuck_px_epsilon)
+        self.stuck_px_epsilon = float(stuck_px_epsilon) * self.pixel_scale
         self.stuck_steps = int(stuck_steps)
         self.recovery_turn_steps = int(recovery_turn_steps)
-        self.stuck_block_ahead_px = float(stuck_block_ahead_px)
-        self.stuck_block_radius_px = float(stuck_block_radius_px)
+        self.stuck_block_ahead_px = float(stuck_block_ahead_px) * self.pixel_scale
+        self.stuck_block_radius_px = float(stuck_block_radius_px) * self.pixel_scale
         self.stuck_block_ttl_steps = int(stuck_block_ttl_steps)
-        self.proxy_stop_real_dist_px = float(proxy_stop_real_dist_px)
+        self.proxy_stop_real_dist_px = float(proxy_stop_real_dist_px) * self.pixel_scale
         self.debug_viz = bool(debug_viz)
         self.debug_dir = debug_dir
         self.last_path: List[Point] = []
@@ -294,9 +302,21 @@ class AStarBaseline:
         overlay = cv2.cvtColor(self._to_uint8_rgb(minimap_rgb), cv2.COLOR_RGB2BGR)
         if len(path) >= 2:
             pts = np.array(path, dtype=np.int32).reshape((-1, 1, 2))
-            cv2.polylines(overlay, [pts], isClosed=False, color=(0, 255, 255), thickness=2)
+            cv2.polylines(
+                overlay,
+                [pts],
+                isClosed=False,
+                color=(0, 255, 255),
+                thickness=max(1, round(2 * self.pixel_scale)),
+            )
         if waypoint is not None:
-            cv2.circle(overlay, (int(waypoint[0]), int(waypoint[1])), 5, (255, 255, 0), -1)
+            cv2.circle(
+                overlay,
+                (int(waypoint[0]), int(waypoint[1])),
+                max(2, round(5 * self.pixel_scale)),
+                (255, 255, 0),
+                -1,
+            )
         self._draw_points(overlay, curr_xy, target_xy)
         cv2.imwrite(f"{prefix}_path.png", overlay)
 
@@ -305,10 +325,11 @@ class AStarBaseline:
         img = np.where(mask, 255, 0).astype(np.uint8)
         return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
 
-    @staticmethod
-    def _draw_points(bgr: np.ndarray, curr_xy: Point, target_xy: Point) -> None:
-        cv2.circle(bgr, (int(curr_xy[0]), int(curr_xy[1])), 5, (0, 0, 255), -1)
-        cv2.circle(bgr, (int(target_xy[0]), int(target_xy[1])), 6, (0, 200, 0), -1)
+    def _draw_points(self, bgr: np.ndarray, curr_xy: Point, target_xy: Point) -> None:
+        curr_radius = max(2, round(5 * self.pixel_scale))
+        target_radius = max(2, round(6 * self.pixel_scale))
+        cv2.circle(bgr, (int(curr_xy[0]), int(curr_xy[1])), curr_radius, (0, 0, 255), -1)
+        cv2.circle(bgr, (int(target_xy[0]), int(target_xy[1])), target_radius, (0, 200, 0), -1)
 
     def _plan_path(
         self, walkable: np.ndarray, curr_xy: Point, target_xy: Point

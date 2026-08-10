@@ -27,6 +27,12 @@
 #       Sensor modalities to save. Default: ego,minimap,depth.
 #   EGO_WIDTH / EGO_HEIGHT
 #       Egocentric RGB/depth sensor resolution. Defaults: 512 / 512.
+#   MINIMAP_WIDTH / MINIMAP_HEIGHT
+#       Minimap sensor resolution. Set either value and the other is derived to
+#       preserve 862:512. Both omitted defaults to 862x512.
+#   DYNAMIC_OBJECTS
+#       moving | static. Controls environment motion without freezing the
+#       navigation agent. Default: moving.
 #   MARKER_SOURCE
 #       vector | red. Default: vector. vector draws the Python-side red
 #       dot/arrow from Unity vector observations; red uses legacy HSV detection.
@@ -158,6 +164,16 @@ REACH_PX="${REACH_PX:-20}"
 MODALITIES="${MODALITIES:-ego,minimap,depth}"
 EGO_WIDTH="${EGO_WIDTH:-512}"
 EGO_HEIGHT="${EGO_HEIGHT:-512}"
+MINIMAP_WIDTH="${MINIMAP_WIDTH:-}"
+MINIMAP_HEIGHT="${MINIMAP_HEIGHT:-}"
+DYNAMIC_OBJECTS="${DYNAMIC_OBJECTS:-moving}"
+if [[ "$DYNAMIC_OBJECTS" != "moving" && "$DYNAMIC_OBJECTS" != "static" ]]; then
+  echo "DYNAMIC_OBJECTS must be 'moving' or 'static', got: $DYNAMIC_OBJECTS"
+  exit 1
+fi
+if [[ -z "$MINIMAP_WIDTH" && -z "$MINIMAP_HEIGHT" ]]; then
+  MINIMAP_WIDTH=862
+fi
 MARKER_SOURCE="${MARKER_SOURCE:-vector}"
 HIDE_UNITY_RED_MARKER="${HIDE_UNITY_RED_MARKER:-1}"
 RUN_NAME="${RUN_NAME:-astar}"
@@ -183,7 +199,7 @@ echo "[astar] scenes=${SCENES[*]}"
 if [[ -n "$POINT_FILTER" ]]; then
   echo "[astar] point_filter=${POINT_FILTER}"
 fi
-echo "[astar] max_steps=${MAX_STEPS} sim_steps_per_decision=${SIM_STEPS_PER_DECISION} reach_px=${REACH_PX} ego=${EGO_WIDTH}x${EGO_HEIGHT}"
+echo "[astar] max_steps=${MAX_STEPS} sim_steps_per_decision=${SIM_STEPS_PER_DECISION} reach_px=${REACH_PX} ego=${EGO_WIDTH}x${EGO_HEIGHT} minimap=${MINIMAP_WIDTH:-auto}x${MINIMAP_HEIGHT:-auto} dynamic_objects=${DYNAMIC_OBJECTS}"
 echo "[astar] marker_source=${MARKER_SOURCE}"
 echo "[astar] hide_unity_red_marker=${HIDE_UNITY_RED_MARKER}"
 
@@ -247,6 +263,7 @@ PY
          --sim_steps_per_decision "$SIM_STEPS_PER_DECISION"
          --ego_width "$EGO_WIDTH"
          --ego_height "$EGO_HEIGHT"
+         --dynamic_objects "$DYNAMIC_OBJECTS"
          --reach_px "$REACH_PX"
          --modalities "$MODALITIES"
          --marker_source "$MARKER_SOURCE"
@@ -260,6 +277,13 @@ PY
          --init_curr_direction "$init_dir"
          --target_x "$target_x"
          --target_y "$target_y")
+
+    if [[ -n "$MINIMAP_WIDTH" ]]; then
+      cmd+=(--minimap_width "$MINIMAP_WIDTH")
+    fi
+    if [[ -n "$MINIMAP_HEIGHT" ]]; then
+      cmd+=(--minimap_height "$MINIMAP_HEIGHT")
+    fi
 
     if [[ "$HIDE_UNITY_RED_MARKER" == "0" || "$HIDE_UNITY_RED_MARKER" == "false" || "$HIDE_UNITY_RED_MARKER" == "off" ]]; then
       cmd+=(--no-hide_unity_red_marker)

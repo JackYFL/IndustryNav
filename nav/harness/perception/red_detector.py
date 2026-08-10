@@ -22,6 +22,7 @@ from nav.config import (
     RED_DOT_TARGET_SAT,
     RED_DOT_TARGET_VAL,
     RED_DOT_VAL_TOL_FRAC,
+    UNITY_MAP_SIZE,
 )
 
 
@@ -61,6 +62,11 @@ def detect_red_point(
     v_low, v_high = clip255(V_t - v_tol), clip255(V_t + v_tol)
 
     img_hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+    image_h, image_w = img_bgr.shape[:2]
+    scale_x = image_w / float(UNITY_MAP_SIZE[0])
+    scale_y = image_h / float(UNITY_MAP_SIZE[1])
+    pixel_scale = (scale_x + scale_y) / 2.0
+    area_scale = scale_x * scale_y
 
     if h_low <= h_high:
         lower = np.array([h_low, s_low, v_low], dtype=np.uint8)
@@ -75,7 +81,10 @@ def detect_red_point(
         mask = cv2.inRange(img_hsv, lower1, upper1) | cv2.inRange(img_hsv, lower2, upper2)
 
     # Clean up the mask.
-    kernel = np.ones((3, 3), np.uint8)
+    kernel_size = max(1, round(3 * pixel_scale))
+    if kernel_size % 2 == 0:
+        kernel_size = max(1, kernel_size - 1)
+    kernel = np.ones((kernel_size, kernel_size), np.uint8)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=1)
 
@@ -87,15 +96,17 @@ def detect_red_point(
     if contours:
         areas = [cv2.contourArea(c) for c in contours]
         idx = int(np.argmax(areas))
-        if areas[idx] >= min_blob_area:
+        if areas[idx] >= max(1.0, min_blob_area * area_scale):
             M = cv2.moments(contours[idx])
             if M["m00"] != 0:
                 cx = int(M["m10"] / M["m00"])
                 cy = int(M["m01"] / M["m00"])
                 best_center = (cx, cy)
                 if draw:
-                    cv2.circle(result, (cx, cy), 6, (0, 255, 0), 2)
-                    cv2.drawContours(result, [contours[idx]], -1, (0, 255, 0), 1)
+                    radius = max(2, round(6 * pixel_scale))
+                    thickness = max(1, round(2 * pixel_scale))
+                    cv2.circle(result, (cx, cy), radius, (0, 255, 0), thickness)
+                    cv2.drawContours(result, [contours[idx]], -1, (0, 255, 0), thickness)
 
     # Fallback: nearest HSV pixel to the target (weighted, hue dominant).
     if best_center is None:
@@ -109,6 +120,8 @@ def detect_red_point(
         cy, cx = int(min_loc[0]), int(min_loc[1])
         best_center = (cx, cy)
         if draw:
-            cv2.circle(result, (cx, cy), 6, (0, 255, 255), 2)  # yellow = fallback
+            radius = max(2, round(6 * pixel_scale))
+            thickness = max(1, round(2 * pixel_scale))
+            cv2.circle(result, (cx, cy), radius, (0, 255, 255), thickness)
 
     return result, best_center, mask

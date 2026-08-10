@@ -25,7 +25,12 @@ from mlagents_envs.side_channel.environment_parameters_channel import (
 )
 
 from nav.config import BEHAVIOR_NAME, UNITY_ENGINE_QUALITY_LEVEL
-from nav.harness.coordinates import find_exact_map_bounds, visual_to_unity_coords
+from nav.harness.coordinates import (
+    canonical_to_minimap_coords,
+    find_exact_map_bounds,
+    resolve_minimap_resolution,
+    visual_to_unity_coords,
+)
 from nav.harness.observations import get_minimap_rgb_for_init, patch_observation_decoding
 from nav.harness.side_channels import BoundsSideChannel, TargetSideChannel
 
@@ -46,6 +51,7 @@ class PrimedEnv:
     init_world: Optional[Tuple[float, float]]
     target_world: Optional[Tuple[float, float]]
     target_xy: Tuple[int, int]
+    minimap_size: Tuple[int, int]
 
 
 def _set_world_spawn_parameters(env_params, args) -> bool:
@@ -63,6 +69,17 @@ def _set_world_spawn_parameters(env_params, args) -> bool:
     return True
 
 
+def _resolve_dynamic_objects_mode(args) -> str:
+    """Return the validated Unity environment-motion mode."""
+    mode = str(getattr(args, "dynamic_objects", "moving")).strip().lower()
+    if mode not in {"moving", "static"}:
+        raise EnvSetupError(
+            "dynamic_objects must be either 'moving' or 'static', "
+            f"got {mode!r}."
+        )
+    return mode
+
+
 def _launch_env(args, logger):
     engine = EngineConfigurationChannel()
     bounds_sc = BoundsSideChannel()
@@ -77,12 +94,23 @@ def _launch_env(args, logger):
     ego_height = int(getattr(args, "ego_height", 512))
     if ego_width <= 0 or ego_height <= 0:
         raise EnvSetupError("Egocentric RGB/depth resolution must use positive width and height values.")
+    try:
+        minimap_width, minimap_height = resolve_minimap_resolution(
+            getattr(args, "minimap_width", None),
+            getattr(args, "minimap_height", None),
+        )
+    except ValueError as exc:
+        raise EnvSetupError(str(exc)) from exc
+    args.minimap_width = minimap_width
+    args.minimap_height = minimap_height
     unity_args = [
         "-logFile", unity_log_path,
         "-screen-width", str(args.screen_width),
         "-screen-height", str(args.screen_height),
         "--ego-width", str(ego_width),
         "--ego-height", str(ego_height),
+        "--minimap-width", str(minimap_width),
+        "--minimap-height", str(minimap_height),
     ]
     if use_batchmode:
         unity_args.insert(0, "-batchmode")
@@ -112,7 +140,8 @@ def _launch_env(args, logger):
     logger.info(
         f"Engine config: quality_level={quality_level}, "
         f"screen={args.screen_width}x{args.screen_height}, "
-        f"egocentric_rgb_depth={ego_width}x{ego_height}"
+        f"egocentric_rgb_depth={ego_width}x{ego_height}, "
+        f"minimap={minimap_width}x{minimap_height}"
     )
 
     # Scene selection MUST happen before the first reset that produces obs we use.
@@ -120,9 +149,21 @@ def _launch_env(args, logger):
     # Ensure the Unity player applies ML-Agents actions even when launched
     # windowed on Linux, where Application.isBatchMode is false.
     env_params.set_float_parameter("use_ai_control", 1.0)
+    dynamic_objects = _resolve_dynamic_objects_mode(args)
+    env_params.set_float_parameter(
+        "dynamic_objects_enabled",
+        1.0 if dynamic_objects == "moving" else 0.0,
+    )
+    env_params.set_float_parameter(
+        "spline_speed_multiplier",
+        float(getattr(args, "spline_speed_multiplier", 1.0)),
+    )
     if _set_world_spawn_parameters(env_params, args):
         logger.info("Seeded world spawn parameters before the initial Unity reset.")
-    logger.info(f"Starting Unity ({args.file_name}) scene_id={args.scene_id}")
+    logger.info(
+        f"Starting Unity ({args.file_name}) scene_id={args.scene_id} "
+        f"dynamic_objects={dynamic_objects}"
+    )
     logger.info(f"Unity launch args: {unity_args}")
     env.reset()
     logger.info(f"Behaviors: {list(env.behavior_specs.keys())}")
@@ -131,16 +172,23 @@ def _launch_env(args, logger):
     return env, env_params, bounds_sc, target_sc
 
 
-def _compute_margin(env, env_params, logger):
-    minimap_rgb = get_minimap_rgb_for_init(env, BEHAVIOR_NAME)
-    if minimap_rgb is None:
+def _compute_margin(env, env_params, args, logger):
+    minimap_sensor_rgb = get_minimap_rgb_for_init(env, BEHAVIOR_NAME)
+    if minimap_sensor_rgb is None:
         raise EnvSetupError("Minimap unavailable; cannot compute coordinate margin.")
-    margin = find_exact_map_bounds(logger, minimap_rgb)
+    sensor_h, sensor_w = minimap_sensor_rgb.shape[:2]
+    expected_size = (int(args.minimap_width), int(args.minimap_height))
+    if (sensor_w, sensor_h) != expected_size:
+        raise EnvSetupError(
+            "Unity minimap observation has unexpected resolution: "
+            f"expected {expected_size[0]}x{expected_size[1]}, got {sensor_w}x{sensor_h}. "
+            "Rebuild the Unity client with runtime minimap resolution support."
+        )
+    margin = find_exact_map_bounds(logger, minimap_sensor_rgb)
     if margin is None:
         raise EnvSetupError("Failed to detect minimap margin.")
-    h, w = minimap_rgb.shape[:2]
-    env_params.set_float_parameter("minimap_px_width", float(w))
-    env_params.set_float_parameter("minimap_px_height", float(h))
+    env_params.set_float_parameter("minimap_px_width", float(sensor_w))
+    env_params.set_float_parameter("minimap_px_height", float(sensor_h))
     return margin
 
 
@@ -168,7 +216,16 @@ def _prime_spawn(env, env_params, target_sc, margin, args, logger) -> Optional[T
         return init_world
 
     if args.init_curr_x is not None and args.init_curr_y is not None:
-        spawn_upx, spawn_upy = visual_to_unity_coords(margin, args.init_curr_x, args.init_curr_y)
+        spawn_xy = canonical_to_minimap_coords(
+            (args.init_curr_x, args.init_curr_y),
+            (args.minimap_width, args.minimap_height),
+        )
+        spawn_upx, spawn_upy = visual_to_unity_coords(
+            margin,
+            spawn_xy[0],
+            spawn_xy[1],
+            map_size=(args.minimap_width, args.minimap_height),
+        )
         env_params.set_float_parameter("spawn_px", float(spawn_upx))
         env_params.set_float_parameter("spawn_py", float(spawn_upy))
         env_params.set_float_parameter("spawn_wy", 0.5)
@@ -177,7 +234,8 @@ def _prime_spawn(env, env_params, target_sc, margin, args, logger) -> Optional[T
         if target_sc.last_spawn_world is not None:
             init_world = target_sc.last_spawn_world
             logger.info(
-                f"Spawn visual({args.init_curr_x},{args.init_curr_y}) -> "
+                f"Spawn canonical({args.init_curr_x},{args.init_curr_y}) -> "
+                f"visual{spawn_xy} -> "
                 f"unity{target_sc.last_spawn_pixel} -> world({init_world[0]:.2f},{init_world[1]:.2f}) "
                 f"yaw={args.init_curr_direction}"
             )
@@ -191,15 +249,29 @@ def _prime_spawn(env, env_params, target_sc, margin, args, logger) -> Optional[T
     )
 
 
-def _prime_target(env, env_params, target_sc, margin, args, logger) -> Optional[Tuple[float, float]]:
-    tgt_upx, tgt_upy = visual_to_unity_coords(margin, args.target_x, args.target_y)
+def _prime_target(
+    env,
+    env_params,
+    target_sc,
+    margin,
+    target_xy,
+    args,
+    logger,
+) -> Optional[Tuple[float, float]]:
+    tgt_upx, tgt_upy = visual_to_unity_coords(
+        margin,
+        target_xy[0],
+        target_xy[1],
+        map_size=(args.minimap_width, args.minimap_height),
+    )
     env_params.set_float_parameter("target_px", float(tgt_upx))
     env_params.set_float_parameter("target_py", float(tgt_upy))
     env.reset()
     if target_sc.last_target_world is not None:
         target_world = target_sc.last_target_world
         logger.info(
-            f"Target visual({args.target_x},{args.target_y}) -> "
+            f"Target canonical({args.target_x},{args.target_y}) -> "
+            f"visual{target_xy} -> "
             f"unity{target_sc.last_target_pixel} -> world({target_world[0]:.2f},{target_world[1]:.2f})"
         )
         return target_world
@@ -218,9 +290,21 @@ def setup_and_prime(args, logger) -> PrimedEnv:
     patch_observation_decoding()
     env, env_params, bounds_sc, target_sc = _launch_env(args, logger)
     try:
-        margin = _compute_margin(env, env_params, logger)
+        margin = _compute_margin(env, env_params, args, logger)
         init_world = _prime_spawn(env, env_params, target_sc, margin, args, logger)
-        target_world = _prime_target(env, env_params, target_sc, margin, args, logger)
+        target_xy = canonical_to_minimap_coords(
+            (args.target_x, args.target_y),
+            (args.minimap_width, args.minimap_height),
+        )
+        target_world = _prime_target(
+            env,
+            env_params,
+            target_sc,
+            margin,
+            target_xy,
+            args,
+            logger,
+        )
     except EnvSetupError:
         env.close()
         raise
@@ -233,5 +317,6 @@ def setup_and_prime(args, logger) -> PrimedEnv:
         margin=margin,
         init_world=init_world,
         target_world=target_world,
-        target_xy=(int(args.target_x), int(args.target_y)),
+        target_xy=target_xy,
+        minimap_size=(int(args.minimap_width), int(args.minimap_height)),
     )

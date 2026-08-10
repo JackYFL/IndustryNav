@@ -64,7 +64,7 @@ The benchmark startup sequence is implemented in `nav/harness/env_setup.py`:
 3. Set `scene_id` before the first useful `env.reset()`.
 4. Set `use_ai_control=1` so the Unity `WarehouseAgent` accepts ML-Agents continuous actions even when the player is launched windowed.
 5. Read a minimap observation and detect the rendered minimap bounds.
-6. Send the minimap resolution to Unity as `minimap_px_width` / `minimap_px_height`.
+6. Set Unity's world/pixel mapper to the selected runtime minimap size via `minimap_px_width` / `minimap_px_height`.
 7. Prime spawn and target through environment parameters.
 8. Read Unity's side-channel acknowledgements for pixel/world mappings.
 
@@ -84,7 +84,9 @@ Python sends these values through ML-Agents `EnvironmentParametersChannel`; Unit
 |---|---|---|
 | `scene_id` | Python -> Unity | Selects which scene inside `scene_all` to load. Must be set before the reset whose observations are used. |
 | `use_ai_control` | Python -> Unity | Enables action-driven locomotion in `WarehouseAgent`. This is required for windowed Linux launches because `Application.isBatchMode` is false. |
-| `minimap_px_width`, `minimap_px_height` | Python -> Unity | Tells Unity the minimap resolution detected from the current observation. |
+| `dynamic_objects_enabled` | Python -> Unity | `1` runs environment motion; `0` freezes environment splines, animations, non-agent physics, NavMesh agents, particles, and timelines. The navigation agent is excluded. |
+| `spline_speed_multiplier` | Python -> Unity | Scales `SplineAnimate` speed when dynamic objects are enabled. |
+| `minimap_px_width`, `minimap_px_height` | Python -> Unity | Keeps Unity world/pixel mapping aligned with the selected sensor output size. |
 | `spawn_x`, `spawn_y`, `spawn_z` | Python -> Unity | Preferred spawn path: direct Unity world coordinates. |
 | `spawn_px`, `spawn_py`, `spawn_wy` | Python -> Unity | Legacy spawn path: Unity minimap pixel coordinates converted to world by Unity. |
 | `spawn_rot` | Python -> Unity | Initial yaw in degrees. |
@@ -98,7 +100,7 @@ spawn_x/spawn_y/spawn_z/spawn_rot
 target_px/target_py
 ```
 
-## Egocentric Sensor Resolution
+## Camera Sensor Resolution
 
 Egocentric resolution is passed as Unity process arguments before ML-Agents
 creates the behavior specification. It is not sent through an environment
@@ -120,6 +122,26 @@ depth observation: (1, ego_height, ego_width)
 saved RGB/depth:   ego_width x ego_height
 ```
 
+The minimap sensor uses the same startup mechanism, but its aspect ratio is
+fixed to the canonical `862:512` map:
+
+| Layer | Width | Height | Default |
+|---|---|---|---:|
+| Python CLI | `--minimap_width` (optional) | `--minimap_height` (optional) | `862 x 512` |
+| Shell wrappers | `MINIMAP_WIDTH` (optional) | `MINIMAP_HEIGHT` (optional) | `862 x 512` |
+| Unity launch arguments | `--minimap-width` | `--minimap-height` | `862 x 512` |
+
+Passing only one dimension derives the other to the nearest integer. Width
+`431` or height `256` therefore produces `431 x 256`. If both dimensions are
+supplied, Python and Unity reject the configuration unless they match the
+canonical aspect ratio.
+
+Python runs coordinate mapping, success checks, and A* planning directly on the
+selected sensor size. Existing `input_points.json` targets and pixel parameters
+remain defined in the canonical `862 x 512` space and are scaled automatically
+at runtime. Actions and result CSV files are converted back to canonical pixels
+so evaluations remain comparable across resolutions.
+
 Examples:
 
 ```bash
@@ -129,17 +151,24 @@ EGO_WIDTH=768 EGO_HEIGHT=432 bash shs/run_headless_benchmark.sh scene1
 # A* wrapper
 EGO_WIDTH=768 EGO_HEIGHT=432 bash shs/run_Astar.sh scene1 point1
 
+# Smaller minimap while preserving the benchmark coordinate space
+MINIMAP_WIDTH=431 bash shs/run_Astar.sh scene1 point1
+
+# Freeze environment motion without freezing the navigation agent
+DYNAMIC_OBJECTS=static bash shs/run_Astar.sh scene1 point1
+
 # Direct benchmark, grid, or collector invocation
 python -m nav.scripts.run_benchmark_cell --ego_width 768 --ego_height 432 ...
 python -m nav.scripts.run_benchmark_grid --ego_width 768 --ego_height 432 ...
 python -m nav.scripts.collect_data --ego_width 768 --ego_height 432 ...
+python -m nav.scripts.run_benchmark_cell --minimap_width 431 ...
+python -m nav.scripts.run_benchmark_cell --dynamic_objects static ...
 ```
 
 `--screen_width` / `--screen_height` configure the Unity Player window, not the
-camera observations. The minimap also keeps its native dimensions, so changing
-egocentric resolution does not rescale targets, spawn pixels, or A* paths. The
-feature requires a Unity client built after runtime resolution support was added;
-older clients ignore the launch arguments.
+camera observations. These features require a Unity client built after the
+corresponding runtime resolution support was added; older clients ignore the
+launch arguments.
 
 ## Side Channels
 

@@ -167,6 +167,7 @@ RESULTS_CSV_FIELDS: List[str] = [
     "sim_steps_per_decision",
     "marker_source",
     "spline_speed_multiplier",
+    "dynamic_objects",
 ]
 
 ACTIONS_CSV_FIELDS: List[str] = [
@@ -204,6 +205,7 @@ GRID_CSV_FIELDS: List[str] = [
     "seed_id",
     "vision_input",
     "history_size",
+    "dynamic_objects",
     "ok",
     "returncode",
     "duration_sec",
@@ -244,6 +246,7 @@ STATS_REPORT_OPTIONAL_METRICS: Dict[str, Tuple[str, str, str]] = {
 
 SCENE_ALL_BUILDS: Dict[str, List[str]] = {
     "Darwin": [
+        str(REPO_ROOT / "unity_clients" / "scene_all_24scenes_dynamic_flag_v8.app"),
         str(REPO_ROOT / "unity_clients" / "scene_all_resizable.app"),
         str(REPO_ROOT / "unity_clients" / "scene_all_rebuilt.app"),
         str(REPO_ROOT / "unity_clients" / "scene_all.app"),

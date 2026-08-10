@@ -185,6 +185,7 @@ Useful environment variables:
 MAX_STEPS=70
 BASELINE=llm
 MODEL_ID=google/gemini-3-flash-preview
+DYNAMIC_OBJECTS=moving
 ```
 
 Example:
@@ -207,6 +208,8 @@ python -m nav.scripts.run_benchmark_cell \
   --max_steps 70 \
   --ego_width 512 \
   --ego_height 512 \
+  --minimap_width 431 \
+  --dynamic_objects static \
   --frame_save_dir outputs/scene1/point1/gemini-3-flash-preview \
   --model_id google/gemini-3-flash-preview \
   --init_world_x 31 \
@@ -216,9 +219,20 @@ python -m nav.scripts.run_benchmark_cell \
   --target_y 450
 ```
 
+Use `--dynamic_objects moving` (default) to keep environment motion active.
+Use `--dynamic_objects static` to freeze workers, vehicles, spline objects,
+physics objects, particles, and timelines while leaving the navigation agent
+controllable. The shell wrappers expose the same option as
+`DYNAMIC_OBJECTS=static`.
+
 Use `--ego_width` and `--ego_height` to change both the egocentric RGB and depth
-observations and their saved frame sizes. The minimap resolution stays
-unchanged.
+observations and their saved frame sizes. Set either `--minimap_width` or
+`--minimap_height` to resize the minimap; the missing dimension is derived
+automatically from the canonical `862:512` aspect ratio. For example,
+`--minimap_width 431` or `--minimap_height 256` produces `431 x 256` minimap
+observations and saved images. Canonical target coordinates and pixel
+parameters are automatically scaled for runtime processing; CSV evaluation
+output is converted back to the `862 x 512` benchmark space.
 
 Supported scenes:
 

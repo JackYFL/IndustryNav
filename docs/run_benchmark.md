@@ -96,6 +96,7 @@ This is the general benchmark wrapper for `llm`, `astar`, `bc`, and `random`.
 | `MAX_STEPS` | `70` | Per-point decision-step budget. |
 | `EGO_WIDTH` | `512` | Width of the egocentric RGB and depth observations and saved frames. |
 | `EGO_HEIGHT` | `512` | Height of the egocentric RGB and depth observations and saved frames. |
+| `DYNAMIC_OBJECTS` | `moving` | `moving` runs environment motion; `static` freezes environment objects while leaving the navigation agent controllable. |
 | `PYTHON_BIN` | `<repo>/.venv/bin/python` | Python interpreter used by the wrapper. |
 | `USE_XVFB` | `1` on Linux | Whether to wrap Unity with `xvfb-run` on Linux. |
 | `XVFB_SCREEN` | `1724x1024x24` | Virtual display size/depth passed to `xvfb-run`. |
@@ -118,7 +119,9 @@ This is a convenience wrapper around `run_benchmark_cell --baseline astar`. It s
 | `SIM_STEPS_PER_DECISION` | `2` | Unity simulation steps per A* action. |
 | `REACH_PX` | `20` | Success radius in visual minimap pixels. |
 | `MODALITIES` | `ego,minimap,depth` | Saved sensor streams. |
-| `EGO_WIDTH`, `EGO_HEIGHT` | `512`, `512` | Egocentric RGB and depth observation size. Minimap is not resized. |
+| `EGO_WIDTH`, `EGO_HEIGHT` | `512`, `512` | Egocentric RGB and depth observation size. |
+| `MINIMAP_WIDTH`, `MINIMAP_HEIGHT` | `862`, derived | Set either minimap dimension; the other is derived using `862:512`. |
+| `DYNAMIC_OBJECTS` | `moving` | `moving` or `static`; forwarded to `--dynamic_objects`. |
 | `MARKER_SOURCE` | `vector` | `vector` projects Unity position/heading; `red` uses legacy red-marker detection. |
 | `HIDE_UNITY_RED_MARKER` | `1` | Hide old Unity red marker when drawing Python-side vector marker. |
 | `RUN_NAME` | `astar` | Output directory name under `outputs/<scene_code>/<point_id>/`. |
@@ -131,6 +134,14 @@ This is a convenience wrapper around `run_benchmark_cell --baseline astar`. It s
 | `BASE_PORT_START` | `5507` | Fallback base port if automatic free-port probing fails. |
 
 Common A* examples:
+
+```bash
+# Freeze workers, spline vehicles, animations, and environment physics.
+DYNAMIC_OBJECTS=static bash shs/run_Astar.sh scene1 point1
+
+# Equivalent direct Python flag.
+python -m nav.scripts.run_benchmark_cell --dynamic_objects static ...
+```
 
 ```bash
 ASTAR_DEBUG_VIZ=1 bash shs/run_Astar.sh scene1 point1
@@ -185,7 +196,7 @@ xvfb-run -a -s "-screen 0 1724x1024x24" .venv/bin/python -m nav.scripts.run_benc
   --target_x 550 --target_y 450
 ```
 
-### Egocentric resolution
+### Camera sensor resolution
 
 `--screen_width` and `--screen_height` control the Unity Player window (and are
 normally matched by `XVFB_SCREEN` on Linux). They do not change ML-Agents camera
@@ -197,20 +208,43 @@ and the `DepthSensor` observation:
 |---|---|
 | `run_benchmark_cell`, `run_benchmark_grid`, `collect_data` | `--ego_width <W> --ego_height <H>` |
 | `run_headless_benchmark.sh`, `run_Astar.sh` | `EGO_WIDTH=<W> EGO_HEIGHT=<H>` |
+| `run_benchmark_cell`, `run_benchmark_grid`, `collect_data` | `--minimap_width <W>` or `--minimap_height <H>` |
+| `run_headless_benchmark.sh`, `run_Astar.sh` | `MINIMAP_WIDTH=<W>` or `MINIMAP_HEIGHT=<H>` |
 
 ```bash
 EGO_WIDTH=768 EGO_HEIGHT=432 bash shs/run_headless_benchmark.sh scene1
+MINIMAP_WIDTH=431 bash shs/run_headless_benchmark.sh scene1
 
 python -m nav.scripts.run_benchmark_cell \
-  --ego_width 768 --ego_height 432 \
+  --ego_width 768 --ego_height 432 --minimap_width 431 \
   ...
+```
+
+### Environment motion
+
+The benchmark, grid runner, and data collector accept
+`--dynamic_objects moving|static`; the default is `moving`. Static mode pauses
+non-agent spline motion, animation, worker/traffic scripts, physics, NavMesh
+agents, particles, and timelines. The controlled `WarehouseAgent` and its
+cameras remain active.
+
+```bash
+DYNAMIC_OBJECTS=static bash shs/run_headless_benchmark.sh scene1
+DYNAMIC_OBJECTS=static bash shs/run_Astar.sh scene1 point1
+python -m nav.scripts.collect_data --dynamic_objects static ...
+python -m nav.scripts.run_benchmark_grid --dynamic_objects static ...
 ```
 
 The selected dimensions become part of the ML-Agents behavior specification at
 startup and must be positive integers. Egocentric RGB/depth PNGs and depth NPY
-maps are saved at that size. The minimap
-dimensions remain unchanged, so minimap target coordinates and A* planning are
-not rescaled. This feature requires a Unity client rebuilt after the runtime
+maps are saved at that size. Either minimap dimension is derived from the
+canonical `862:512` aspect ratio when omitted; mismatched explicit dimensions
+are rejected.
+Python scales canonical target coordinates, the 20 px success threshold, and
+all A* pixel parameters into the selected runtime size. Saved images and runtime
+planning use that size; actions/results CSV coordinates are converted back to
+canonical pixels for resolution-independent evaluation.
+These features require a Unity client rebuilt after the corresponding runtime
 resolution support was added to `WarehouseAgent.cs`; older clients ignore the
 new launch arguments.
 
