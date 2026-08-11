@@ -34,6 +34,10 @@
 <a id="news"></a>
 ## 📰 News
 
+- **2026-08-11**
+  - Added an interactive benchmark-point editor for all 24 scenes with draggable start/target markers, highlighted pair selection, initial-heading arrows, cardinal-direction keyboard controls, undo, append, delete, and atomic saving via `Ctrl/Cmd+S`.
+  - Added one-time minimap and pixel/world projection caching. After the initial 24-scene cache is built, scene switching and point editing no longer relaunch Unity.
+  - Updated the 96 benchmark start-target pairs and added a reproducible 4×6 top-down overview of all scenes and tasks.
 - **2026-08-10**
   - **Scenes and runtime**
     - Expanded the unified Unity workflow to 24 warehouse scenes and added full-scene RGB, depth, and minimap validation.
@@ -93,11 +97,21 @@
 <a id="preview"></a>
 ## 🎬 Navigation Preview
 
+<p align="center"><strong>Original A* preview</strong></p>
+
 <p align="center">
   <img src="docs/assets/industrynav_navigation_example.gif" alt="IndustryNav A-star navigation with RGB, depth, and planned minimap path" width="640">
 </p>
 
 <p align="center"><em>A* navigation in Scene 1, Point 3. The top row shows egocentric RGB and an edge-preserving smoothed depth preview; the minimap shows the planned route, current waypoint, agent, and target.</em></p>
+
+<p align="center"><strong>Dynamic-environment A* preview</strong></p>
+
+<p align="center">
+  <img src="docs/assets/industrynav_navigation_scene22_point2_dynamic.gif" alt="IndustryNav A-star navigation in a moving Scene 22 environment" width="640">
+</p>
+
+<p align="center"><em>A Scene 22, Point 2 run with moving workers, vehicles, and robots. A* reaches the target in 91 steps with a final world-space distance of 1.40 m.</em></p>
 
 ## 📄 About the Paper
 
@@ -150,7 +164,7 @@ Main entry points:
 
 Scene/client maintenance docs:
 
-- [`docs/scene_list.md`](docs/scene_list.md): all 24 scene codes, zero-based `scene_id` mapping, and benchmark task definitions.
+- [`docs/scene_list.md`](docs/scene_list.md): all 24 scene codes, benchmark task definitions, cached point editing, and overview rendering.
 - [`docs/scene_files_and_interfaces.md`](docs/scene_files_and_interfaces.md): runtime scene codes, environment parameters, side channels, and spawn/target mapping.
 - [`docs/astar_workflow.md`](docs/astar_workflow.md): A* commands plus the shared baseline extension interface.
 - [`docs/bc_workflow.md`](docs/bc_workflow.md): behavior-cloning data collection, training, and inference.
@@ -201,15 +215,15 @@ Place the compiled `scene_all` client under one of the auto-discovery folders (`
 
 macOS scene runtime:
 
-- [Download `scene_all.app` from Google Drive](https://drive.google.com/file/d/1K3k5qIg2mO84C_-h7ihe7sFA9XJT2hLJ/view?usp=share_link)
+- [Download `scene_all.app` from Google Drive](https://drive.google.com/file/d/1cXPMzZKMsKAtiJgEWT4DbbTMBZ9d8aqk/view?usp=share_link)
 
 Windows scene runtime:
 
-- [Download `IndustryNav.exe` from Google Drive](https://drive.google.com/file/d/1hVYb95Oky0nExPM5vknzjfQrCJ2lYajy/view?usp=share_link)
+- [Download `IndustryNav.exe` from Google Drive](https://drive.google.com/file/d/1aYzw3o37jG4pHMVZnUfbUliaSrG-Lj0H/view?usp=share_link)
 
 Linux scene runtime:
 
-- [Download `scene_all.x86_64` from Google Drive](https://drive.google.com/file/d/1P-5UERNZOpPjsz2plnldLCTpANjW86ix/view?usp=share_link)
+- [Download `scene_all.x86_64` from Google Drive](https://drive.google.com/file/d/1upKROW5BI7wIsp_n6d_2us67Sny8WjpG/view?usp=share_link)
 
 Expected default locations:
 

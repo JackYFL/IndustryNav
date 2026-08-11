@@ -14,7 +14,6 @@ from nav.prompts import PromptName, path_of as _prompt_path_of
 
 REPO_ROOT: Path = Path(__file__).resolve().parents[1]
 UNITY_CLIENT_DIR: Path = REPO_ROOT / "unity_client"
-UNITY_PROJECT_DIR: Path = REPO_ROOT / "unity_project"
 
 
 # Action spaces
@@ -84,6 +83,34 @@ LLM_REQUEST_TIMEOUT_SEC: int = 120
 LLM_DEFAULT_HISTORY_SIZE: int = 5
 
 
+# Environment runtime defaults
+
+MOTION_CATEGORIES: Tuple[str, ...] = ("human", "vehicle", "robot")
+
+
+@dataclass(frozen=True)
+class MotionParams:
+    """Absolute-speed defaults for dynamic Unity objects."""
+
+    human_speed_mps: float = 1.2
+    vehicle_speed_mps: float = 2.5
+    robot_speed_mps: float = 1.5
+    random_seed: int = 0
+
+
+@dataclass(frozen=True)
+class LightingParams:
+    """Defaults for deterministic runtime lighting overrides."""
+
+    intensity_multiplier: float = 1.0
+    random_seed: int = 0
+    fixed_exposure: float = 9.0
+
+
+MOTION_DEFAULTS = MotionParams()
+LIGHTING_DEFAULTS = LightingParams()
+
+
 # Baseline defaults
 
 @dataclass(frozen=True)
@@ -136,7 +163,7 @@ MOTION_SPEED_CSV_FIELDS: List[str] = [
     "motion_random_seed",
     *[
         f"{category}_speed_{suffix}"
-        for category in ("human", "vehicle", "robot")
+        for category in MOTION_CATEGORIES
         for suffix in ("mode", "mps", "min_mps", "max_mps")
     ],
 ]
@@ -201,6 +228,7 @@ ACTIONS_CSV_FIELDS: List[str] = [
     "target_py",
     "target_world_x",
     "target_world_z",
+    "marker_source",
     "distance_px",
     "distance_world",
 ]

@@ -68,6 +68,7 @@ agent_qa.txt
 *.npz
 *.gif
 !docs/assets/industrynav_navigation_example.gif
+!docs/assets/industrynav_navigation_scene22_point2_dynamic.gif
 
 # Large local archives or downloaded bundles
 *.zip

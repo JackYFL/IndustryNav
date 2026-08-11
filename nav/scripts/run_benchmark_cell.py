@@ -25,6 +25,7 @@ from mlagents_envs.base_env import ActionTuple
 
 from nav.baselines.astar import AStarBaseline
 from nav.config import (
+    ACTIONS_CSV_FIELDS,
     ACTION_SPACE_AGENTS,
     ACTION_SPACE_ANNOTATION,
     ASTAR_DEFAULTS,
@@ -661,21 +662,11 @@ def main():
         else os.path.join(args.frame_save_dir, f"{args.baseline}_actions.csv")
     )
     os.makedirs(os.path.dirname(os.path.abspath(actions_csv_path)), exist_ok=True)
-    _action_csv_header = [
-        "step", "action", "move", "strafe", "look",
-        "init_px", "init_py", "init_world_x", "init_world_z", "init_direction",
-        "curr_px", "curr_py", "curr_world_x", "curr_world_y", "curr_world_z",
-        # All three rotation axes are recorded so a downstream audit can verify
-        # that pitch (rot_x) and roll (rot_z) stay near zero — i.e. the agent
-        # only rotates on the horizontal plane. The action space exposes a single
-        # `look` (yaw) channel from Python, and these columns make the Unity-side
-        # invariant grep-able rather than only inferred.
-        "curr_direction_x", "curr_direction_y", "curr_direction_z",
-        "target_px", "target_py", "target_world_x", "target_world_z",
-        "marker_source", "distance_px", "distance_world",
-    ]
     _action_csv_file = open(actions_csv_path, "w", newline="")
-    _action_csv_writer = csv.DictWriter(_action_csv_file, fieldnames=_action_csv_header)
+    _action_csv_writer = csv.DictWriter(
+        _action_csv_file,
+        fieldnames=ACTIONS_CSV_FIELDS,
+    )
     _action_csv_writer.writeheader()
     _action_csv_file.flush()
     action_log = []

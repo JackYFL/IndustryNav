@@ -8,6 +8,8 @@ import math
 import random
 from dataclasses import dataclass
 
+from nav.config import LIGHTING_DEFAULTS
+
 
 @dataclass(frozen=True)
 class LightingConfig:
@@ -56,14 +58,14 @@ def add_lighting_args(parser: argparse.ArgumentParser) -> None:
         "--light_random_seed",
         "--light-random-seed",
         type=int,
-        default=0,
+        default=LIGHTING_DEFAULTS.random_seed,
         help="Base seed used when sampling a light multiplier range.",
     )
     parser.add_argument(
         "--light_fixed_exposure",
         "--light-fixed-exposure",
         type=float,
-        default=9.0,
+        default=LIGHTING_DEFAULTS.fixed_exposure,
         help="HDRP fixed exposure EV used whenever runtime lighting is enabled.",
     )
 
@@ -96,7 +98,9 @@ def resolve_lighting_config(args) -> LightingConfig:
     fixed_alias = getattr(args, "light_intensity_multiplier", None)
     minimum = getattr(args, "light_intensity_min", None)
     maximum = getattr(args, "light_intensity_max", None)
-    base_seed = int(getattr(args, "light_random_seed", 0))
+    base_seed = int(
+        getattr(args, "light_random_seed", LIGHTING_DEFAULTS.random_seed)
+    )
 
     if fixed is not None and fixed_alias is not None:
         raise ValueError(
@@ -119,14 +123,16 @@ def resolve_lighting_config(args) -> LightingConfig:
         config = LightingConfig(
             enabled=False,
             mode="disabled",
-            multiplier=1.0,
+            multiplier=LIGHTING_DEFAULTS.intensity_multiplier,
             minimum=None,
             maximum=None,
             random_seed=base_seed,
             fixed_exposure=None,
         )
     else:
-        exposure = float(getattr(args, "light_fixed_exposure", 9.0))
+        exposure = float(
+            getattr(args, "light_fixed_exposure", LIGHTING_DEFAULTS.fixed_exposure)
+        )
         if not math.isfinite(exposure):
             raise ValueError("--light_fixed_exposure must be finite.")
 

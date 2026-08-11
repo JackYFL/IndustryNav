@@ -135,12 +135,12 @@ VEHICLE_SPEED_MAX_MPS="${VEHICLE_SPEED_MAX_MPS:-}"
 ROBOT_SPEED_MPS="${ROBOT_SPEED_MPS:-}"
 ROBOT_SPEED_MIN_MPS="${ROBOT_SPEED_MIN_MPS:-}"
 ROBOT_SPEED_MAX_MPS="${ROBOT_SPEED_MAX_MPS:-}"
-MOTION_RANDOM_SEED="${MOTION_RANDOM_SEED:-0}"
+MOTION_RANDOM_SEED="${MOTION_RANDOM_SEED:-}"
 LIGHT_INTENSITY_MULTIPLIER="${LIGHT_INTENSITY_MULTIPLIER:-${GLOBAL_LIGHT_INTENSITY:-}}"
 LIGHT_INTENSITY_MIN="${LIGHT_INTENSITY_MIN:-}"
 LIGHT_INTENSITY_MAX="${LIGHT_INTENSITY_MAX:-}"
-LIGHT_RANDOM_SEED="${LIGHT_RANDOM_SEED:-0}"
-LIGHT_FIXED_EXPOSURE="${LIGHT_FIXED_EXPOSURE:-9.0}"
+LIGHT_RANDOM_SEED="${LIGHT_RANDOM_SEED:-}"
+LIGHT_FIXED_EXPOSURE="${LIGHT_FIXED_EXPOSURE:-}"
 if [[ "$DYNAMIC_OBJECTS" != "moving" && "$DYNAMIC_OBJECTS" != "static" ]]; then
   echo "DYNAMIC_OBJECTS must be 'moving' or 'static', got: $DYNAMIC_OBJECTS"
   exit 1
@@ -242,7 +242,7 @@ PY
   elif [[ -n "$ROBOT_SPEED_MIN_MPS" ]]; then
     CMD+=(--robot_speed_min_mps "$ROBOT_SPEED_MIN_MPS" --robot_speed_max_mps "$ROBOT_SPEED_MAX_MPS"); motion_speed_configured=1
   fi
-  if [[ "$motion_speed_configured" == "1" ]]; then
+  if [[ "$motion_speed_configured" == "1" && -n "$MOTION_RANDOM_SEED" ]]; then
     CMD+=(--motion_random_seed "$MOTION_RANDOM_SEED")
   fi
   if [[ -n "$LIGHT_INTENSITY_MULTIPLIER" ]]; then
@@ -251,7 +251,12 @@ PY
     CMD+=(--light_intensity_min "$LIGHT_INTENSITY_MIN" --light_intensity_max "$LIGHT_INTENSITY_MAX")
   fi
   if [[ -n "$LIGHT_INTENSITY_MULTIPLIER" || -n "$LIGHT_INTENSITY_MIN" ]]; then
-    CMD+=(--light_random_seed "$LIGHT_RANDOM_SEED" --light_fixed_exposure "$LIGHT_FIXED_EXPOSURE")
+    if [[ -n "$LIGHT_RANDOM_SEED" ]]; then
+      CMD+=(--light_random_seed "$LIGHT_RANDOM_SEED")
+    fi
+    if [[ -n "$LIGHT_FIXED_EXPOSURE" ]]; then
+      CMD+=(--light_fixed_exposure "$LIGHT_FIXED_EXPOSURE")
+    fi
   fi
   # Prepend the xvfb prefix only when non-empty (safe under `set -u` on bash 3.2).
   if [[ ${#XVFB_PREFIX[@]} -gt 0 ]]; then

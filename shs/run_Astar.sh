@@ -199,12 +199,12 @@ VEHICLE_SPEED_MAX_MPS="${VEHICLE_SPEED_MAX_MPS:-}"
 ROBOT_SPEED_MPS="${ROBOT_SPEED_MPS:-}"
 ROBOT_SPEED_MIN_MPS="${ROBOT_SPEED_MIN_MPS:-}"
 ROBOT_SPEED_MAX_MPS="${ROBOT_SPEED_MAX_MPS:-}"
-MOTION_RANDOM_SEED="${MOTION_RANDOM_SEED:-0}"
+MOTION_RANDOM_SEED="${MOTION_RANDOM_SEED:-}"
 LIGHT_INTENSITY_MULTIPLIER="${LIGHT_INTENSITY_MULTIPLIER:-${GLOBAL_LIGHT_INTENSITY:-}}"
 LIGHT_INTENSITY_MIN="${LIGHT_INTENSITY_MIN:-}"
 LIGHT_INTENSITY_MAX="${LIGHT_INTENSITY_MAX:-}"
-LIGHT_RANDOM_SEED="${LIGHT_RANDOM_SEED:-0}"
-LIGHT_FIXED_EXPOSURE="${LIGHT_FIXED_EXPOSURE:-9.0}"
+LIGHT_RANDOM_SEED="${LIGHT_RANDOM_SEED:-}"
+LIGHT_FIXED_EXPOSURE="${LIGHT_FIXED_EXPOSURE:-}"
 if [[ "$DYNAMIC_OBJECTS" != "moving" && "$DYNAMIC_OBJECTS" != "static" ]]; then
   echo "DYNAMIC_OBJECTS must be 'moving' or 'static', got: $DYNAMIC_OBJECTS"
   exit 1
@@ -260,8 +260,8 @@ if [[ -n "$POINT_FILTER" ]]; then
   echo "[astar] point_filter=${POINT_FILTER}"
 fi
 echo "[astar] max_steps=${MAX_STEPS} sim_steps_per_decision=${SIM_STEPS_PER_DECISION} reach_m=${REACH_M} ego=${EGO_WIDTH}x${EGO_HEIGHT} minimap=${MINIMAP_WIDTH:-auto}x${MINIMAP_HEIGHT:-auto} dynamic_objects=${DYNAMIC_OBJECTS}"
-echo "[astar] absolute_speed_mps=human:${HUMAN_SPEED_MPS:-1.2}[${HUMAN_SPEED_MIN_MPS:-}-${HUMAN_SPEED_MAX_MPS:-}] vehicle:${VEHICLE_SPEED_MPS:-2.5}[${VEHICLE_SPEED_MIN_MPS:-}-${VEHICLE_SPEED_MAX_MPS:-}] robot:${ROBOT_SPEED_MPS:-1.5}[${ROBOT_SPEED_MIN_MPS:-}-${ROBOT_SPEED_MAX_MPS:-}] seed=${MOTION_RANDOM_SEED}"
-echo "[astar] lighting=fixed:${LIGHT_INTENSITY_MULTIPLIER:-none} range:${LIGHT_INTENSITY_MIN:-none}-${LIGHT_INTENSITY_MAX:-none} seed=${LIGHT_RANDOM_SEED} exposure=${LIGHT_FIXED_EXPOSURE}"
+echo "[astar] absolute_speed_mps=human:${HUMAN_SPEED_MPS:-default}[${HUMAN_SPEED_MIN_MPS:-}-${HUMAN_SPEED_MAX_MPS:-}] vehicle:${VEHICLE_SPEED_MPS:-default}[${VEHICLE_SPEED_MIN_MPS:-}-${VEHICLE_SPEED_MAX_MPS:-}] robot:${ROBOT_SPEED_MPS:-default}[${ROBOT_SPEED_MIN_MPS:-}-${ROBOT_SPEED_MAX_MPS:-}] seed=${MOTION_RANDOM_SEED:-default}"
+echo "[astar] lighting=fixed:${LIGHT_INTENSITY_MULTIPLIER:-none} range:${LIGHT_INTENSITY_MIN:-none}-${LIGHT_INTENSITY_MAX:-none} seed=${LIGHT_RANDOM_SEED:-default} exposure=${LIGHT_FIXED_EXPOSURE:-default}"
 echo "[astar] marker_source=${MARKER_SOURCE}"
 echo "[astar] hide_unity_red_marker=${HIDE_UNITY_RED_MARKER}"
 
@@ -356,7 +356,7 @@ PY
     elif [[ -n "$ROBOT_SPEED_MIN_MPS" ]]; then
       cmd+=(--robot_speed_min_mps "$ROBOT_SPEED_MIN_MPS" --robot_speed_max_mps "$ROBOT_SPEED_MAX_MPS"); motion_speed_configured=1
     fi
-    if [[ "$motion_speed_configured" == "1" ]]; then
+    if [[ "$motion_speed_configured" == "1" && -n "$MOTION_RANDOM_SEED" ]]; then
       cmd+=(--motion_random_seed "$MOTION_RANDOM_SEED")
     fi
     if [[ -n "$LIGHT_INTENSITY_MULTIPLIER" ]]; then
@@ -365,7 +365,12 @@ PY
       cmd+=(--light_intensity_min "$LIGHT_INTENSITY_MIN" --light_intensity_max "$LIGHT_INTENSITY_MAX")
     fi
     if [[ -n "$LIGHT_INTENSITY_MULTIPLIER" || -n "$LIGHT_INTENSITY_MIN" ]]; then
-      cmd+=(--light_random_seed "$LIGHT_RANDOM_SEED" --light_fixed_exposure "$LIGHT_FIXED_EXPOSURE")
+      if [[ -n "$LIGHT_RANDOM_SEED" ]]; then
+        cmd+=(--light_random_seed "$LIGHT_RANDOM_SEED")
+      fi
+      if [[ -n "$LIGHT_FIXED_EXPOSURE" ]]; then
+        cmd+=(--light_fixed_exposure "$LIGHT_FIXED_EXPOSURE")
+      fi
     fi
 
     if [[ "$HIDE_UNITY_RED_MARKER" == "0" || "$HIDE_UNITY_RED_MARKER" == "false" || "$HIDE_UNITY_RED_MARKER" == "off" ]]; then

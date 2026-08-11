@@ -43,12 +43,12 @@ VEHICLE_SPEED_MAX_MPS="${VEHICLE_SPEED_MAX_MPS:-}"
 ROBOT_SPEED_MPS="${ROBOT_SPEED_MPS:-}"
 ROBOT_SPEED_MIN_MPS="${ROBOT_SPEED_MIN_MPS:-}"
 ROBOT_SPEED_MAX_MPS="${ROBOT_SPEED_MAX_MPS:-}"
-MOTION_RANDOM_SEED="${MOTION_RANDOM_SEED:-0}"
+MOTION_RANDOM_SEED="${MOTION_RANDOM_SEED:-}"
 LIGHT_INTENSITY_MULTIPLIER="${LIGHT_INTENSITY_MULTIPLIER:-${GLOBAL_LIGHT_INTENSITY:-}}"
 LIGHT_INTENSITY_MIN="${LIGHT_INTENSITY_MIN:-}"
 LIGHT_INTENSITY_MAX="${LIGHT_INTENSITY_MAX:-}"
-LIGHT_RANDOM_SEED="${LIGHT_RANDOM_SEED:-0}"
-LIGHT_FIXED_EXPOSURE="${LIGHT_FIXED_EXPOSURE:-9.0}"
+LIGHT_RANDOM_SEED="${LIGHT_RANDOM_SEED:-}"
+LIGHT_FIXED_EXPOSURE="${LIGHT_FIXED_EXPOSURE:-}"
 DRY_RUN="${DRY_RUN:-0}"
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
@@ -129,7 +129,7 @@ if [[ -n "$ROBOT_SPEED_MPS" ]]; then
 elif [[ -n "$ROBOT_SPEED_MIN_MPS" ]]; then
   CMD+=(--robot-speed-min-mps "$ROBOT_SPEED_MIN_MPS" --robot-speed-max-mps "$ROBOT_SPEED_MAX_MPS"); motion_speed_configured=1
 fi
-if [[ "$motion_speed_configured" == "1" ]]; then
+if [[ "$motion_speed_configured" == "1" && -n "$MOTION_RANDOM_SEED" ]]; then
   CMD+=(--motion-random-seed "$MOTION_RANDOM_SEED")
 fi
 if [[ -n "$LIGHT_INTENSITY_MULTIPLIER" ]]; then
@@ -138,7 +138,12 @@ elif [[ -n "$LIGHT_INTENSITY_MIN" ]]; then
   CMD+=(--light-intensity-min "$LIGHT_INTENSITY_MIN" --light-intensity-max "$LIGHT_INTENSITY_MAX")
 fi
 if [[ -n "$LIGHT_INTENSITY_MULTIPLIER" || -n "$LIGHT_INTENSITY_MIN" ]]; then
-  CMD+=(--light-random-seed "$LIGHT_RANDOM_SEED" --light-fixed-exposure "$LIGHT_FIXED_EXPOSURE")
+  if [[ -n "$LIGHT_RANDOM_SEED" ]]; then
+    CMD+=(--light-random-seed "$LIGHT_RANDOM_SEED")
+  fi
+  if [[ -n "$LIGHT_FIXED_EXPOSURE" ]]; then
+    CMD+=(--light-fixed-exposure "$LIGHT_FIXED_EXPOSURE")
+  fi
 fi
 
 echo "[scene-gifs] target=(${TARGET_X},${TARGET_Y}) frames=${FRAMES} output=${OUTPUT_DIR}"

@@ -111,6 +111,72 @@ The initial scene and pair count can also be supplied on the command line:
 python -m nav.scripts.edit_input_points --scene 17 --pairs 4 --auto-load
 ```
 
+### Point Editor Options
+
+| Argument | Default | Purpose |
+|---|---:|---|
+| `--scene` | `scene1` | Initial scene code or number (`1` through `24`). |
+| `--pairs` | `4` | Exact replacement count, or maximum append count. |
+| `--mode` | `replace` | Use `replace` to rewrite a scene or `append` to add points. |
+| `--direction` | `180` | Default initial Unity yaw for a new start. |
+| `--auto-load` | disabled | Open the selected cached scene after cache preparation. |
+| `--cache-dir` | `.cache/input_point_editor` | Minimap PNG and pixel/world projection cache. |
+| `--refresh-cache` | disabled | Rebuild all 24 caches after client or scene changes. |
+| `--file-name` | `auto` | Unified Unity client used only when caches must be generated. |
+| `--input-file` | `input_points.json` | Point database to read and update. |
+
+Examples:
+
+```bash
+# Append at most two pairs to scene8 and open it immediately
+python -m nav.scripts.edit_input_points \
+  --scene scene8 --pairs 2 --mode append --auto-load
+
+# Rebuild all minimaps and projection metadata after rebuilding the client
+python -m nav.scripts.edit_input_points --refresh-cache --auto-load
+```
+
+### Rendering the 24-Scene Point Overview
+
+`nav.scripts.render_input_points_overview` reads the cached minimaps and
+`input_points.json`, projects every world-space start back onto its scene, and
+renders all scenes in row-major order. Each panel shows colored task lines,
+green start markers, red target markers, `S1..S4` / `T1..T4` labels, and the
+initial-heading arrows. It does not launch Unity.
+
+Generate the default 4-column × 6-row, full-resolution overview:
+
+```bash
+python -m nav.scripts.render_input_points_overview
+```
+
+The default output is:
+
+```text
+outputs/input_points_overview_4x6.png
+```
+
+The output directory is ignored by Git. To regenerate the smaller image used
+by the repository README:
+
+```bash
+python -m nav.scripts.render_input_points_overview \
+  --panel-width 500 \
+  --output docs/assets/industrynav_24_scene_points_overview.png
+```
+
+| Argument | Default | Purpose |
+|---|---:|---|
+| `--input-file` | `input_points.json` | Point database rendered into every panel. |
+| `--cache-dir` | `.cache/input_point_editor` | Source minimap PNGs and projection metadata. |
+| `--output` | `outputs/input_points_overview_4x6.png` | Destination PNG. |
+| `--columns` | `4` | Grid column count; it must divide 24 evenly. |
+| `--panel-width` | `862` | Width of each scene panel; minimum `320`. |
+
+Regenerate the overview whenever `input_points.json` changes. Rebuild the
+minimap cache first only when the Unity client, scene camera, lighting, or
+minimap resolution changes.
+
 When replacing the initial task templates with manually curated routes:
 
 1. Keep point IDs sequential (`point1..pointN`); the official checked-in setup

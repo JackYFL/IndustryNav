@@ -8,12 +8,11 @@ import math
 import random
 from dataclasses import dataclass
 
+from nav.config import MOTION_CATEGORIES, MOTION_DEFAULTS
 
-MOTION_CATEGORIES = ("human", "vehicle", "robot")
 DEFAULT_SPEED_MPS = {
-    "human": 1.2,
-    "vehicle": 2.5,
-    "robot": 1.5,
+    category: getattr(MOTION_DEFAULTS, f"{category}_speed_mps")
+    for category in MOTION_CATEGORIES
 }
 
 
@@ -71,7 +70,7 @@ def add_motion_speed_args(parser: argparse.ArgumentParser) -> None:
         "--motion_random_seed",
         "--motion-random-seed",
         type=int,
-        default=0,
+        default=MOTION_DEFAULTS.random_seed,
         help="Base seed used when sampling category speed ranges.",
     )
 
@@ -145,7 +144,9 @@ def resolve_motion_speed_config(args) -> MotionSpeedConfig:
     if cached is not None:
         return cached
 
-    base_seed = int(getattr(args, "motion_random_seed", 0))
+    base_seed = int(
+        getattr(args, "motion_random_seed", MOTION_DEFAULTS.random_seed)
+    )
     config = MotionSpeedConfig(
         human=_resolve_category(args, "human", base_seed),
         vehicle=_resolve_category(args, "vehicle", base_seed),
