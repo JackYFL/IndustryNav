@@ -24,6 +24,7 @@
   <a href="#news">News</a> |
   <a href="#overview">Overview</a> |
   <a href="#preview">Preview</a> |
+  <a href="#features">Features</a> |
   <a href="#setup">Setup</a> |
   <a href="#benchmark">Benchmark</a> |
   <a href="#astar">A*</a>
@@ -35,40 +36,18 @@
 ## 📰 News
 
 - **2026-08-11**
-  - Added an interactive benchmark-point editor for all 24 scenes with draggable start/target markers, highlighted pair selection, initial-heading arrows, cardinal-direction keyboard controls, undo, append, delete, and atomic saving via `Ctrl/Cmd+S`.
-  - Added one-time minimap and pixel/world projection caching. After the initial 24-scene cache is built, scene switching and point editing no longer relaunch Unity.
-  - Updated the 96 benchmark start-target pairs and added a reproducible 4×6 top-down overview of all scenes and tasks.
+  - Added a cached interactive benchmark-point editor and a 24-scene task overview.
+  - Updated the 96 benchmark start-target pairs and added a dynamic A* preview.
+  - Centralized motion, lighting, and action-CSV runtime configuration.
 - **2026-08-10**
-  - **Scenes and runtime**
-    - Expanded the unified Unity workflow to 24 warehouse scenes and added full-scene RGB, depth, and minimap validation.
-    - Added a single runtime flag for moving or freezing animations, splines, physics objects, NavMesh agents, particles, and timelines while keeping the navigation agent controllable.
-    - Added separate absolute speed controls for humans, vehicles, and robots, including deterministic per-category range sampling.
-    - Added fixed and deterministic range-based scene-light multipliers, reproducible seeds, and fixed HDRP exposure; resolved lighting settings are recorded in run results.
-    - Aligned scene-code selection with the unified client's zero-based scene IDs.
-  - **Sensors and visualization**
-    - Added shared runtime resolution controls for egocentric RGB and depth, plus aspect-ratio-preserving minimap resizing when either width or height is supplied.
-    - Added vector-based agent position and heading markers, optional removal of the legacy Unity marker, and configurable minimap targets.
-    - Added fixed-scale depth PNGs with corresponding float32 metric-depth `.npy` files for training and safety evaluation.
-    - Added edge-preserving depth previews, 24-scene GIF export tooling, and a combined RGB/depth/A* navigation preview.
-  - **Navigation and baselines**
-    - Reworked A* path following to use Unity world X/Z distances for waypoint spacing, lookahead, off-path replanning, terminal approach, proxy handling, and target reach.
-    - Removed the pixel-based reach interface; runtime success now uses `reach_m=2.0` by default, while minimap pixels remain limited to image-space planning and diagnostics.
-    - Improved A* turning, terminal alignment, stuck recovery, virtual-obstacle handling, and debug path overlays.
-    - Updated LLM prompts and movement history to use world positions and meter distances, account for moving obstacles, and route learned/LLM agents through the agent action space.
-  - **Evaluation and outputs**
-    - Unified runtime, data-collection, post-hoc evaluation, and aggregate statistics around final Unity world distance, with no pixel-distance success fallback.
-    - Added world target coordinates, metric distance, dynamic-object state, and lighting configuration to result records while retaining canonical pixel distance for diagnostics.
-    - Added automatic `results.csv` schema migration and deduplicated frame saving in the asynchronous benchmark loop.
-  - **Stability, documentation, and tools**
-    - Seeded world spawn parameters before the first reset, required Unity target-world acknowledgements, and fail fast when world pose or mapping data is unavailable.
-    - Improved Linux launch compatibility with Xvfb, configurable `-batchmode`, explicit AI control, and camera-rendering-safe defaults.
-    - Expanded benchmark, A*, BC, scene-interface, sensor-resolution, lighting, evaluation, and baseline-extension documentation.
+  - Expanded the unified Unity client to 24 dynamic warehouse scenes.
+  - Added runtime motion, lighting, sensor-resolution, depth, and GIF controls.
+  - Improved world-coordinate A*/LLM navigation and metric evaluation.
+  - Improved result recording and macOS/Linux/Windows launch stability.
 - **2026-08-06**
-  - Improved Unity reset and Linux launch stability.
-  - Aligned runtime success thresholds with post-hoc evaluation.
+  - Improved Unity reset, Linux launch, and success-threshold consistency.
 - **2026-07-03**
-  - Added unified LLM, A*, BC, and random baseline workflows.
-  - Added an extension interface for integrating additional baselines.
+  - Added unified LLM, A*, BC, random, and extensible baseline workflows.
 
 ## ✨ Highlights
 
@@ -130,6 +109,20 @@ The Python side provides:
 - telemetry output for frames, actions, per-run results, and downstream analysis.
 
 The current benchmark uses one compiled Unity client, `scene_all`, which contains all supported scenes. The scene is selected at runtime by `scene_id`.
+
+<a id="features"></a>
+## 🧰 Current Features
+
+| Area | Available functionality |
+|---|---|
+| Scenes and tasks | 24 warehouse scenes, 96 PointGoal tasks, and an interactive point editor. |
+| Observations | RGB, metric depth, minimap, pose, heading, target, and action history. |
+| Runtime controls | Adjustable sensor resolution, object motion, category speeds, and lighting. |
+| Baselines | LLM, A*, BC, random, and an extension interface for new baselines. |
+| Data and training | Data collection, trajectory recording, BC training, and inference. |
+| Evaluation | Success, distance, efficiency, collision, warning, trajectory, and aggregate metrics. |
+| Visualization | Sensor GIFs, A* path overlays, scene validation, and a 24-scene task overview. |
+| Platforms | Unified clients for macOS, Linux, and Windows. |
 
 ## 🗂️ Repository Structure
 
