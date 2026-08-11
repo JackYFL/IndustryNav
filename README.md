@@ -1,5 +1,7 @@
 <div align="center">
-  <h1>IndustryNav</h1>
+  <h1>
+    <img src="docs/assets/industrynav_logo.png" alt="IndustryNav" width="520">
+  </h1>
   <h3>Exploring Spatial Reasoning of Embodied Agents in Dynamic Industrial Navigation</h3>
 
   <p>
@@ -36,6 +38,7 @@
   - **Scenes and runtime**
     - Expanded the unified Unity workflow to 24 warehouse scenes and added full-scene RGB, depth, and minimap validation.
     - Added a single runtime flag for moving or freezing animations, splines, physics objects, NavMesh agents, particles, and timelines while keeping the navigation agent controllable.
+    - Added separate absolute speed controls for humans, vehicles, and robots, including deterministic per-category range sampling.
     - Added fixed and deterministic range-based scene-light multipliers, reproducible seeds, and fixed HDRP exposure; resolved lighting settings are recorded in run results.
     - Aligned scene-code selection with the unified client's zero-based scene IDs.
   - **Sensors and visualization**
@@ -139,7 +142,7 @@ Main entry points:
 
 Scene/client maintenance docs:
 
-- [`docs/scene_list.md`](docs/scene_list.md): supported `scene1`-`scene12` codes and `scene_id` mapping.
+- [`docs/scene_list.md`](docs/scene_list.md): all 24 scene codes, zero-based `scene_id` mapping, and benchmark task definitions.
 - [`docs/scene_files_and_interfaces.md`](docs/scene_files_and_interfaces.md): runtime scene codes, environment parameters, side channels, and spawn/target mapping.
 - [`docs/astar_workflow.md`](docs/astar_workflow.md): A* commands plus the shared baseline extension interface.
 - [`docs/bc_workflow.md`](docs/bc_workflow.md): behavior-cloning data collection, training, and inference.
@@ -267,6 +270,10 @@ MAX_STEPS=70
 BASELINE=llm
 MODEL_ID=google/gemini-3-flash-preview
 DYNAMIC_OBJECTS=moving
+HUMAN_SPEED_MPS=1.2
+VEHICLE_SPEED_MPS=2.5
+ROBOT_SPEED_MPS=1.5
+MOTION_RANDOM_SEED=0
 GLOBAL_LIGHT_INTENSITY=1.0
 LIGHT_INTENSITY_MIN=0.7
 LIGHT_INTENSITY_MAX=1.3
@@ -287,7 +294,7 @@ To run one explicit benchmark cell:
 python -m nav.scripts.run_benchmark_cell \
   --baseline llm \
   --file_name auto \
-  --scene_id 1 \
+  --scene_id 0 \
   --scene_name scene1 \
   --point_id point1 \
   --max_steps 70 \
@@ -295,6 +302,9 @@ python -m nav.scripts.run_benchmark_cell \
   --ego_height 512 \
   --minimap_width 431 \
   --dynamic_objects moving \
+  --human_speed_mps 1.2 \
+  --vehicle_speed_mps 2.5 \
+  --robot_speed_mps 1.5 \
   --light_intensity_min 0.7 \
   --light_intensity_max 1.3 \
   --frame_save_dir outputs/scene1/point1/gemini-3-flash-preview \
@@ -311,6 +321,16 @@ Use `--dynamic_objects static` to freeze workers, vehicles, spline objects,
 physics objects, particles, and timelines while leaving the navigation agent
 controllable. The shell wrappers expose the same option as
 `DYNAMIC_OBJECTS=static`.
+
+Human, vehicle, and robot motion use separate absolute speeds. Their defaults
+are `1.2`, `2.5`, and `1.5 m/s`. Override them with `--human_speed_mps`,
+`--vehicle_speed_mps`, and `--robot_speed_mps`, or sample each category from an
+independent deterministic range such as `--human_speed_min_mps 0.9
+--human_speed_max_mps 1.4`. Range sampling uses `--motion_random_seed` plus the
+scene, point, and benchmark seed identifiers. Resolved values are recorded in
+`results.csv`. Shell wrappers expose the equivalent `HUMAN_SPEED_MPS`,
+`VEHICLE_SPEED_MPS`, `ROBOT_SPEED_MPS`, and category `*_MIN_MPS`/`*_MAX_MPS`
+variables.
 
 Use `--global_light_intensity 0.8` for a fixed global light multiplier, or
 `--light_intensity_min 0.7 --light_intensity_max 1.3` to sample one multiplier
@@ -330,11 +350,14 @@ observations and saved images. Canonical target coordinates and pixel
 parameters are automatically scaled for runtime processing; CSV evaluation
 output is converted back to the `862 x 512` benchmark space.
 
-Supported scenes:
+The unified client and all benchmark wrappers support 24 scenes with zero-based
+`scene_id` values from `0` through `23`. Every scene has four benchmark points:
 
 ```text
-scene1 scene2 scene3 scene4 scene5 scene6 scene7 scene8 scene9 scene10 scene11 scene12
+scene1 scene2 ... scene24
 ```
+
+See [`docs/scene_list.md`](docs/scene_list.md) for the full mapping.
 
 <a id="astar"></a>
 ## 🧭 Run A*

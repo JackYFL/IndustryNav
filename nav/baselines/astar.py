@@ -23,14 +23,15 @@ class AStarBaseline:
     any subset per-run.
     """
 
+    _MARKER_RADIUS_CANONICAL_PX = 6.0
+    _MARKER_CLEAR_RADIUS_FACTOR = 8.0 / 3.0
+
     def __init__(
         self,
-        grid_step: int = ASTAR_DEFAULTS.grid_step,
+        grid_cell_m: float = ASTAR_DEFAULTS.grid_cell_m,
         obstacle_threshold: int = ASTAR_DEFAULTS.obstacle_threshold,
         min_free_ratio: float = ASTAR_DEFAULTS.min_free_ratio,
-        obstacle_inflate_px: int = ASTAR_DEFAULTS.obstacle_inflate_px,
-        marker_clear_px: int = ASTAR_DEFAULTS.marker_clear_px,
-        target_change_replan_px: float = ASTAR_DEFAULTS.target_change_replan_px,
+        obstacle_clearance_m: float = ASTAR_DEFAULTS.obstacle_clearance_m,
         turn_tolerance_deg: float = ASTAR_DEFAULTS.turn_tolerance_deg,
         forward_priority_tolerance_deg: float = ASTAR_DEFAULTS.forward_priority_tolerance_deg,
         drive_turn_tolerance_deg: float = ASTAR_DEFAULTS.drive_turn_tolerance_deg,
@@ -42,14 +43,13 @@ class AStarBaseline:
         front_cone_deg: float = ASTAR_DEFAULTS.front_cone_deg,
         hysteresis_reset_deg: float = ASTAR_DEFAULTS.hysteresis_reset_deg,
         hysteresis_lock_deg: float = ASTAR_DEFAULTS.hysteresis_lock_deg,
-        stuck_world_epsilon: float = ASTAR_DEFAULTS.stuck_world_epsilon,
-        stuck_px_epsilon: float = ASTAR_DEFAULTS.stuck_px_epsilon,
+        stuck_distance_m: float = ASTAR_DEFAULTS.stuck_distance_m,
         stuck_steps: int = ASTAR_DEFAULTS.stuck_steps,
         recovery_turn_steps: int = ASTAR_DEFAULTS.recovery_turn_steps,
-        stuck_block_ahead_px: float = ASTAR_DEFAULTS.stuck_block_ahead_px,
-        stuck_block_radius_px: float = ASTAR_DEFAULTS.stuck_block_radius_px,
+        stuck_block_ahead_m: float = ASTAR_DEFAULTS.stuck_block_ahead_m,
+        stuck_block_radius_m: float = ASTAR_DEFAULTS.stuck_block_radius_m,
         stuck_block_ttl_steps: int = ASTAR_DEFAULTS.stuck_block_ttl_steps,
-        proxy_stop_real_dist_m: float = ASTAR_DEFAULTS.proxy_stop_real_dist_m,
+        proxy_stop_distance_m: float = ASTAR_DEFAULTS.proxy_stop_distance_m,
         pixel_scale: float = 1.0,
         debug_viz: bool = False,
         debug_dir: Optional[str] = None,
@@ -61,12 +61,15 @@ class AStarBaseline:
         def scaled_int(value: float, minimum: int = 1) -> int:
             return max(minimum, int(round(float(value) * self.pixel_scale)))
 
-        self.grid_step = scaled_int(grid_step)
+        self.grid_cell_m = self._positive(grid_cell_m, "grid_cell_m")
         self.obstacle_threshold = int(obstacle_threshold)
         self.min_free_ratio = float(min_free_ratio)
-        self.obstacle_inflate_px = scaled_int(obstacle_inflate_px, minimum=0)
-        self.marker_clear_px = scaled_int(marker_clear_px)
-        self.target_change_replan_px = float(target_change_replan_px) * self.pixel_scale
+        self.obstacle_clearance_m = self._nonnegative(
+            obstacle_clearance_m, "obstacle_clearance_m"
+        )
+        self.marker_clear_px = scaled_int(
+            self._MARKER_RADIUS_CANONICAL_PX * self._MARKER_CLEAR_RADIUS_FACTOR
+        )
         self.turn_tolerance_deg = float(turn_tolerance_deg)
         self.forward_priority_tolerance_deg = float(forward_priority_tolerance_deg)
         self.drive_turn_tolerance_deg = float(drive_turn_tolerance_deg)
@@ -78,31 +81,105 @@ class AStarBaseline:
         self.front_cone_deg = float(front_cone_deg)
         self.hysteresis_reset_deg = float(hysteresis_reset_deg)
         self.hysteresis_lock_deg = float(hysteresis_lock_deg)
-        self.stuck_world_epsilon = float(stuck_world_epsilon)
-        self.stuck_px_epsilon = float(stuck_px_epsilon) * self.pixel_scale
+        self.stuck_distance_m = self._nonnegative(
+            stuck_distance_m, "stuck_distance_m"
+        )
         self.stuck_steps = int(stuck_steps)
         self.recovery_turn_steps = int(recovery_turn_steps)
-        self.stuck_block_ahead_px = float(stuck_block_ahead_px) * self.pixel_scale
-        self.stuck_block_radius_px = float(stuck_block_radius_px) * self.pixel_scale
+        self.stuck_block_ahead_m = self._nonnegative(
+            stuck_block_ahead_m, "stuck_block_ahead_m"
+        )
+        self.stuck_block_radius_m = self._positive(
+            stuck_block_radius_m, "stuck_block_radius_m"
+        )
         self.stuck_block_ttl_steps = int(stuck_block_ttl_steps)
-        self.proxy_stop_real_dist_m = float(proxy_stop_real_dist_m)
+        self.proxy_stop_distance_m = self._positive(
+            proxy_stop_distance_m, "proxy_stop_distance_m"
+        )
         self.debug_viz = bool(debug_viz)
         self.debug_dir = debug_dir
+        self.grid_step_x_px = 1
+        self.grid_step_y_px = 1
+        self.obstacle_clearance_x_px = 0
+        self.obstacle_clearance_y_px = 0
+        self.stuck_block_radius_x_px = 1
+        self.stuck_block_radius_y_px = 1
+        self.world_per_pixel = np.eye(2, dtype=np.float64)
         self.last_path: List[Point] = []
         self.follow_waypoints: List[Point] = []
         self.follow_waypoint_index = 0
         self.last_turn_sign = 0
         self.last_action_was_move = False
-        self.prev_curr_xy: Optional[Point] = None
         self.prev_world_xz: Optional[Tuple[float, float]] = None
         self.stuck_count = 0
         self.recovery_count = 0
         self.recovery_turn_sign = 1
-        self.last_target_xy: Optional[Point] = None
         self.last_effective_target_xy: Optional[Point] = None
         self.last_debug = {}
         self.last_plan_status = "not_planned"
-        self.virtual_obstacles: List[Tuple[int, int, float, int]] = []
+        self.virtual_obstacles: List[Tuple[int, int, int, int, int]] = []
+
+    @staticmethod
+    def _positive(value: float, name: str) -> float:
+        value = float(value)
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"{name} must be finite and positive.")
+        return value
+
+    @staticmethod
+    def _nonnegative(value: float, name: str) -> float:
+        value = float(value)
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"{name} must be finite and nonnegative.")
+        return value
+
+    def _update_pixel_geometry(
+        self,
+        reference_xy: Point,
+        point_to_world: PointToWorld,
+    ) -> None:
+        """Resolve physical planner dimensions into runtime minimap pixels."""
+        x, y = int(reference_xy[0]), int(reference_xy[1])
+        origin = point_to_world((x, y))
+        x_neighbor = point_to_world((x + 1, y))
+        y_neighbor = point_to_world((x, y + 1))
+        if origin is None or x_neighbor is None or y_neighbor is None:
+            raise ValueError("A* could not resolve minimap meters-per-pixel.")
+
+        world_per_pixel = np.array(
+            [
+                [x_neighbor[0] - origin[0], y_neighbor[0] - origin[0]],
+                [x_neighbor[1] - origin[1], y_neighbor[1] - origin[1]],
+            ],
+            dtype=np.float64,
+        )
+        if abs(float(np.linalg.det(world_per_pixel))) <= 1e-12:
+            raise ValueError("A* minimap-to-world projection is degenerate.")
+
+        meters_per_pixel_x = float(np.linalg.norm(world_per_pixel[:, 0]))
+        meters_per_pixel_y = float(np.linalg.norm(world_per_pixel[:, 1]))
+        if meters_per_pixel_x <= 1e-9 or meters_per_pixel_y <= 1e-9:
+            raise ValueError("A* minimap pixel scale must be positive.")
+
+        self.world_per_pixel = world_per_pixel
+        self.grid_step_x_px = max(
+            1, int(round(self.grid_cell_m / meters_per_pixel_x))
+        )
+        self.grid_step_y_px = max(
+            1, int(round(self.grid_cell_m / meters_per_pixel_y))
+        )
+        self.obstacle_clearance_x_px = max(
+            0, int(math.ceil(self.obstacle_clearance_m / meters_per_pixel_x))
+        )
+        self.obstacle_clearance_y_px = max(
+            0, int(math.ceil(self.obstacle_clearance_m / meters_per_pixel_y))
+        )
+        self.stuck_block_radius_x_px = max(
+            1, int(math.ceil(self.stuck_block_radius_m / meters_per_pixel_x))
+        )
+        self.stuck_block_radius_y_px = max(
+            1, int(math.ceil(self.stuck_block_radius_m / meters_per_pixel_y))
+        )
 
     def decide(
         self,
@@ -127,6 +204,8 @@ class AStarBaseline:
             raise ValueError(
                 "A* requires a minimap-to-world projection for path tracking."
             )
+        if point_to_world is not None:
+            self._update_pixel_geometry(curr_xy, point_to_world)
         if distance_m <= reach_m:
             self.last_path = [curr_xy, target_xy]
             self.last_action_was_move = False
@@ -137,7 +216,12 @@ class AStarBaseline:
             )
 
         self._decay_virtual_obstacles()
-        stuck_reason = self._update_stuck_state(curr_xy, curr_world_xz, agent_theta)
+        stuck_reason = self._update_stuck_state(
+            curr_xy,
+            curr_world_xz,
+            agent_theta,
+            point_to_world=point_to_world,
+        )
         if self.recovery_count > 0:
             action = self._recovery_action()
             self._record_action(action)
@@ -163,7 +247,6 @@ class AStarBaseline:
         walkable = self._build_walkable_grid(minimap_rgb, curr_xy, target_xy)
         should_replan, replan_reason = self._should_replan(
             curr_xy,
-            target_xy,
             curr_world_xz=curr_world_xz,
             point_to_world=point_to_world,
         )
@@ -192,7 +275,6 @@ class AStarBaseline:
             self.last_path = []
             self.follow_waypoints = []
             self.follow_waypoint_index = 0
-            self.last_target_xy = None
             self.last_effective_target_xy = None
             self._save_debug_visualization(
                 minimap_rgb, curr_xy, target_xy, fallback_path, None, step
@@ -201,7 +283,6 @@ class AStarBaseline:
             return action, f"Astar found no path, fallback: {reasoning}", fallback_path
 
         self.last_path = path
-        self.last_target_xy = target_xy
         if self._using_unreachable_proxy() and self.last_effective_target_xy is not None:
             proxy_distance, proxy_unit = self._point_distance(
                 curr_xy,
@@ -211,7 +292,7 @@ class AStarBaseline:
             )
             if (
                 proxy_distance <= reach_m
-                and distance_m <= self.proxy_stop_real_dist_m
+                and distance_m <= self.proxy_stop_distance_m
             ):
                 action, relative = self._terminal_action_toward(
                     curr_xy,
@@ -319,9 +400,14 @@ class AStarBaseline:
             cv2.circle(free_u8, (int(point[0]), int(point[1])), self.marker_clear_px, 1, -1)
         free = free_u8.astype(bool)
 
-        if self.obstacle_inflate_px > 0:
-            kernel_size = self.obstacle_inflate_px * 2 + 1
-            kernel = np.ones((kernel_size, kernel_size), dtype=np.uint8)
+        if self.obstacle_clearance_x_px > 0 or self.obstacle_clearance_y_px > 0:
+            kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE,
+                (
+                    self.obstacle_clearance_x_px * 2 + 1,
+                    self.obstacle_clearance_y_px * 2 + 1,
+                ),
+            )
             obstacles = cv2.dilate((~free).astype(np.uint8), kernel, iterations=1)
             free = obstacles == 0
             free_u8 = free.astype(np.uint8)
@@ -331,20 +417,29 @@ class AStarBaseline:
 
         if self.virtual_obstacles:
             free_u8 = free.astype(np.uint8)
-            for ox, oy, radius, _ttl in self.virtual_obstacles:
-                cv2.circle(free_u8, (int(ox), int(oy)), int(radius), 0, -1)
+            for ox, oy, radius_x, radius_y, _ttl in self.virtual_obstacles:
+                cv2.ellipse(
+                    free_u8,
+                    (int(ox), int(oy)),
+                    (int(radius_x), int(radius_y)),
+                    0,
+                    0,
+                    360,
+                    0,
+                    -1,
+                )
             free = free_u8.astype(bool)
 
         h, w = free.shape
-        gh = int(math.ceil(h / self.grid_step))
-        gw = int(math.ceil(w / self.grid_step))
+        gh = int(math.ceil(h / self.grid_step_y_px))
+        gw = int(math.ceil(w / self.grid_step_x_px))
         walkable = np.zeros((gh, gw), dtype=bool)
         for gy in range(gh):
-            y0 = gy * self.grid_step
-            y1 = min(h, y0 + self.grid_step)
+            y0 = gy * self.grid_step_y_px
+            y1 = min(h, y0 + self.grid_step_y_px)
             for gx in range(gw):
-                x0 = gx * self.grid_step
-                x1 = min(w, x0 + self.grid_step)
+                x0 = gx * self.grid_step_x_px
+                x1 = min(w, x0 + self.grid_step_x_px)
                 walkable[gy, gx] = free[y0:y1, x0:x1].mean() >= self.min_free_ratio
 
         self.last_debug = {
@@ -352,6 +447,11 @@ class AStarBaseline:
             "threshold_free": threshold_free,
             "inflated_free": free,
             "walkable": walkable,
+            "grid_step_px": (self.grid_step_x_px, self.grid_step_y_px),
+            "obstacle_clearance_px": (
+                self.obstacle_clearance_x_px,
+                self.obstacle_clearance_y_px,
+            ),
         }
         return walkable
 
@@ -567,20 +667,12 @@ class AStarBaseline:
     def _should_replan(
         self,
         curr_xy: Point,
-        target_xy: Point,
         *,
         curr_world_xz: Optional[WorldPoint] = None,
         point_to_world: Optional[PointToWorld] = None,
     ) -> Tuple[bool, str]:
         if not self.last_path:
             return True, "no_cached_path"
-        if self.last_target_xy is None:
-            return True, "no_cached_target"
-        if math.hypot(
-            target_xy[0] - self.last_target_xy[0],
-            target_xy[1] - self.last_target_xy[1],
-        ) > self.target_change_replan_px:
-            return True, "target_changed"
 
         closest_idx, closest_dist, unit = self._closest_path_index(
             self.last_path,
@@ -881,25 +973,20 @@ class AStarBaseline:
     def _update_stuck_state(
         self,
         curr_xy: Point,
-        curr_world_xz: Optional[Tuple[float, float]],
+        curr_world_xz: WorldPoint,
         agent_theta: float,
+        *,
+        point_to_world: Optional[PointToWorld] = None,
     ) -> str:
         reason = "last_action_not_move"
         if self.last_action_was_move:
-            if curr_world_xz is not None and self.prev_world_xz is not None:
+            if self.prev_world_xz is not None:
                 motion = math.hypot(
                     float(curr_world_xz[0]) - self.prev_world_xz[0],
                     float(curr_world_xz[1]) - self.prev_world_xz[1],
                 )
-                threshold = self.stuck_world_epsilon
-                unit = "world"
-            elif self.prev_curr_xy is not None:
-                motion = math.hypot(
-                    float(curr_xy[0]) - self.prev_curr_xy[0],
-                    float(curr_xy[1]) - self.prev_curr_xy[1],
-                )
-                threshold = self.stuck_px_epsilon
-                unit = "px"
+                threshold = self.stuck_distance_m
+                unit = "m"
             else:
                 motion = float("inf")
                 threshold = 0.0
@@ -912,12 +999,14 @@ class AStarBaseline:
                 self.stuck_count = 0
                 reason = f"moved_{motion:.3f}{unit}"
 
-        self.prev_curr_xy = (int(curr_xy[0]), int(curr_xy[1]))
-        if curr_world_xz is not None:
-            self.prev_world_xz = (float(curr_world_xz[0]), float(curr_world_xz[1]))
+        self.prev_world_xz = (float(curr_world_xz[0]), float(curr_world_xz[1]))
 
         if self.stuck_count >= self.stuck_steps:
-            self._add_stuck_obstacle(curr_xy, agent_theta)
+            if point_to_world is not None:
+                self._add_stuck_obstacle(
+                    curr_xy,
+                    agent_theta,
+                )
             self.recovery_count = self.recovery_turn_steps
             self.recovery_turn_sign = -self.last_turn_sign if self.last_turn_sign else 1
             self.stuck_count = 0
@@ -929,12 +1018,30 @@ class AStarBaseline:
 
         return reason
 
-    def _add_stuck_obstacle(self, curr_xy: Point, agent_theta: float) -> None:
-        bearing = math.radians((float(agent_theta) - 180.0) % 360.0)
-        ox = int(round(curr_xy[0] + math.cos(bearing) * self.stuck_block_ahead_px))
-        oy = int(round(curr_xy[1] + math.sin(bearing) * self.stuck_block_ahead_px))
+    def _add_stuck_obstacle(
+        self,
+        curr_xy: Point,
+        agent_theta: float,
+    ) -> None:
+        yaw = math.radians(float(agent_theta) % 360.0)
+        world_offset = np.array(
+            [
+                math.sin(yaw) * self.stuck_block_ahead_m,
+                math.cos(yaw) * self.stuck_block_ahead_m,
+            ],
+            dtype=np.float64,
+        )
+        pixel_offset = np.linalg.solve(self.world_per_pixel, world_offset)
+        ox = int(round(float(curr_xy[0]) + float(pixel_offset[0])))
+        oy = int(round(float(curr_xy[1]) + float(pixel_offset[1])))
         self.virtual_obstacles.append(
-            (ox, oy, self.stuck_block_radius_px, self.stuck_block_ttl_steps)
+            (
+                ox,
+                oy,
+                self.stuck_block_radius_x_px,
+                self.stuck_block_radius_y_px,
+                self.stuck_block_ttl_steps,
+            )
         )
         self.virtual_obstacles = self.virtual_obstacles[-12:]
 
@@ -942,9 +1049,9 @@ class AStarBaseline:
         if not self.virtual_obstacles:
             return
         kept = []
-        for ox, oy, radius, ttl in self.virtual_obstacles:
+        for ox, oy, radius_x, radius_y, ttl in self.virtual_obstacles:
             if ttl > 1:
-                kept.append((ox, oy, radius, ttl - 1))
+                kept.append((ox, oy, radius_x, radius_y, ttl - 1))
         self.virtual_obstacles = kept
 
     def _recovery_action(self) -> str:
@@ -961,13 +1068,16 @@ class AStarBaseline:
         }
 
     def _point_to_cell(self, point: Point) -> Tuple[int, int]:
-        return int(point[1]) // self.grid_step, int(point[0]) // self.grid_step
+        return (
+            int(point[1]) // self.grid_step_y_px,
+            int(point[0]) // self.grid_step_x_px,
+        )
 
     def _cell_to_point(self, cell: Tuple[int, int]) -> Point:
         y, x = cell
         return (
-            int(x * self.grid_step + self.grid_step / 2),
-            int(y * self.grid_step + self.grid_step / 2),
+            int(x * self.grid_step_x_px + self.grid_step_x_px / 2),
+            int(y * self.grid_step_y_px + self.grid_step_y_px / 2),
         )
 
     @staticmethod

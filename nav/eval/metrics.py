@@ -152,15 +152,10 @@ def evaluate_run(
     # the CSV-derived final distance + steps_taken with those authoritative
     # values (the CSV may include extra logged-but-not-acted-on frames).
     results_row = read_latest_results_row(input_dir / "results.csv")
-    final_distance_px: Optional[float] = None
     final_distance_world: Optional[float] = None
     stop_reason = ""
     steps_taken: Optional[int] = None
     if results_row:
-        try:
-            final_distance_px = float(results_row.get("distance_px", ""))
-        except (ValueError, TypeError):
-            final_distance_px = None
         try:
             final_distance_world = float(results_row.get("distance_world", ""))
         except (ValueError, TypeError):
@@ -187,7 +182,6 @@ def evaluate_run(
         "efficiency_steps": efficiency_steps,
         "distance_ratio": distance_ratio,
         "final_distance_world": final_distance_world,
-        "final_distance_px": final_distance_px,
         "stop_reason": stop_reason,
         "warning_steps": warning_steps,
         "warning_rate": warning_rate,

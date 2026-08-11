@@ -1,6 +1,6 @@
 """Headless async benchmarking entry point for the unified Unity client.
 
-Targets the new `scene_all.app` (12 scenes bundled, scene chosen at runtime via
+Targets the unified `scene_all` client (24 scenes bundled, selected at runtime via
 the `scene_id` env parameter). Borrows the side-channel + spawn/target priming
 pipeline from `run_headless_collect_data_assign_points_v2.py`, and the async
 decision state machine + LLM/BC controller plumbing from `run_async.py`.
@@ -34,11 +34,13 @@ from nav.config import (
     DEFAULT_PROMPT_VISION,
     LLM_DEFAULT_HISTORY_SIZE,
     LLM_DEFAULT_MAX_TOKENS,
+    UNITY_SCENE_COUNT,
     UNITY_MAP_SIZE,
     resolve_scene_all_path,
 )
 from nav.harness.env_setup import EnvSetupError, setup_and_prime
 from nav.harness.lighting import add_lighting_args, lighting_result_fields
+from nav.harness.motion import add_motion_speed_args, motion_speed_result_fields
 from nav.harness.coordinates import (
     canonical_to_minimap_coords,
     minimap_pixel_scale,
@@ -106,7 +108,8 @@ def parse_args():
                         "current OS and use the first build that exists locally. Pass "
                         "an explicit path to override.")
     p.add_argument("--scene_id", type=int, required=True,
-                   help="Scene id baked into the unified client (1..12).")
+                   help=f"Zero-based scene id baked into the unified client "
+                        f"(0..{UNITY_SCENE_COUNT - 1}).")
     p.add_argument("--scene_name", type=str, default="",
                    help="Scene code (e.g. 'scene1'). Recorded in results.csv as both "
                         "scene_name and the legacy exp_name column. Optional; the wrappers "
@@ -144,12 +147,7 @@ def parse_args():
         help="Run environment objects normally or freeze them in place. "
              "The navigation agent remains controllable.",
     )
-    p.add_argument(
-        "--spline_speed_multiplier",
-        type=float,
-        default=1.0,
-        help="Spline-object speed multiplier when --dynamic_objects=moving.",
-    )
+    add_motion_speed_args(p)
     add_lighting_args(p)
 
     # Spawn. Two mutually-exclusive ways to specify position:
@@ -198,16 +196,18 @@ def parse_args():
     p.add_argument("--bc_seq_len", type=int, default=0)
 
     # A* baseline (no LLM, no API key).
-    p.add_argument("--astar_obstacle_inflate_px", type=int,
-                   default=ASTAR_DEFAULTS.obstacle_inflate_px,
-                   help="Dilate minimap obstacles by this many pixels before A*.")
-    p.add_argument("--astar_marker_clear_px", type=int,
-                   default=ASTAR_DEFAULTS.marker_clear_px,
-                   help="Radius cleared around current/target marker pixels.")
     p.add_argument(
-        "--astar_proxy_stop_real_dist_m",
+        "--astar_obstacle_clearance_m",
         type=float,
-        default=ASTAR_DEFAULTS.proxy_stop_real_dist_m,
+        default=ASTAR_DEFAULTS.obstacle_clearance_m,
+        help="Physical clearance around minimap obstacles in Unity world meters.",
+    )
+    p.add_argument(
+        "--astar_proxy_stop_distance_m",
+        "--astar_proxy_stop_real_dist_m",
+        dest="astar_proxy_stop_distance_m",
+        type=float,
+        default=ASTAR_DEFAULTS.proxy_stop_distance_m,
         help="Blocked-target proxy threshold in Unity world meters.",
     )
     p.add_argument("--astar_debug_viz", action="store_true",
@@ -325,7 +325,12 @@ def unity_to_world_coords(projector, unity_px, unity_py):
     return float(world_x), float(world_z)
 
 
-def visual_to_world_coords(margin, visual_xy, projector):
+def visual_to_world_coords(
+    margin,
+    visual_xy,
+    projector,
+    map_size=UNITY_MAP_SIZE,
+):
     """Convert a runtime minimap point to Unity world X/Z coordinates."""
     if projector is None:
         return None
@@ -333,6 +338,7 @@ def visual_to_world_coords(margin, visual_xy, projector):
         margin,
         float(visual_xy[0]),
         float(visual_xy[1]),
+        map_size=map_size,
     )
     return unity_to_world_coords(projector, unity_px, unity_py)
 
@@ -581,18 +587,17 @@ def main():
             else os.path.join(args.frame_save_dir, "astar_debug")
         )
         astar_planner = AStarBaseline(
-            obstacle_inflate_px=args.astar_obstacle_inflate_px,
-            marker_clear_px=args.astar_marker_clear_px,
-            proxy_stop_real_dist_m=args.astar_proxy_stop_real_dist_m,
+            obstacle_clearance_m=args.astar_obstacle_clearance_m,
+            proxy_stop_distance_m=args.astar_proxy_stop_distance_m,
             pixel_scale=pixel_scale,
             debug_viz=args.astar_debug_viz,
             debug_dir=astar_debug_dir,
         )
         logger.info(
             "A* baseline ready | "
-            f"obstacle_inflate_px={args.astar_obstacle_inflate_px} | "
-            f"marker_clear_px={args.astar_marker_clear_px} | "
-            f"proxy_stop_real_dist_m={args.astar_proxy_stop_real_dist_m} | "
+            f"grid_cell_m={ASTAR_DEFAULTS.grid_cell_m:g} | "
+            f"obstacle_clearance_m={args.astar_obstacle_clearance_m:g} | "
+            f"proxy_stop_distance_m={args.astar_proxy_stop_distance_m:g} | "
             f"pixel_scale={pixel_scale:.4f} | "
             f"debug_viz={args.astar_debug_viz} | debug_dir={astar_debug_dir}"
         )
@@ -632,7 +637,12 @@ def main():
     )
 
     def astar_point_to_world(point):
-        return visual_to_world_coords(primed.margin, point, minimap_projector)
+        return visual_to_world_coords(
+            primed.margin,
+            point,
+            minimap_projector,
+            map_size=minimap_size,
+        )
 
     # ---- Per-modality save dirs (prefixed by the baseline token) ----
     subdirs = {}
@@ -1052,16 +1062,6 @@ def main():
     finally:
         # ---- Final summary (always runs, even on exception) ----
         try:
-            final_xy = last_curr_xy
-            distance_px = (
-                runtime_minimap_distance_to_canonical(final_xy, target_xy, minimap_size)
-                if final_xy is not None else float("nan")
-            )
-            final_xy_canonical = (
-                minimap_to_canonical_coords(final_xy, minimap_size)
-                if final_xy is not None
-                else None
-            )
             distance_world = (
                 float(
                     np.hypot(
@@ -1090,14 +1090,13 @@ def main():
                 "vision_input": bool(args.vision_input),
                 "max_steps": int(args.max_steps),
                 "reach_m": args.reach_m,
-                "target_x": int(args.target_x),
-                "target_y": int(args.target_y),
+                "init_world_x": init_world_x,
+                "init_world_z": init_world_z,
                 "target_world_x": target_world_x,
                 "target_world_z": target_world_z,
                 "init_direction": float(args.init_curr_direction),
-                "final_x": round(final_xy_canonical[0]) if final_xy_canonical is not None else None,
-                "final_y": round(final_xy_canonical[1]) if final_xy_canonical is not None else None,
-                "distance_px": distance_px,
+                "final_world_x": last_world_xz[0] if last_world_xz is not None else None,
+                "final_world_z": last_world_xz[1] if last_world_xz is not None else None,
                 "distance_world": distance_world,
                 "stop_reason": stop_reason or "loop_end",
                 "steps_taken": step_count,
@@ -1105,8 +1104,8 @@ def main():
                 "modalities": ",".join(sorted(enabled_modalities)),
                 "sim_steps_per_decision": int(args.sim_steps_per_decision),
                 "marker_source": args.marker_source,
-                "spline_speed_multiplier": float(args.spline_speed_multiplier),
                 "dynamic_objects": args.dynamic_objects,
+                **motion_speed_result_fields(args),
                 **lighting_result_fields(args),
             }
             world_distance_label = (
@@ -1116,8 +1115,8 @@ def main():
             )
             logger.info(
                 f"[FINAL] stop={result['stop_reason']} steps={result['steps_taken']} "
-                f"runtime_final={final_xy} runtime_target={target_xy} "
-                f"canonical_dist={distance_px:.2f}px "
+                f"world_final={last_world_xz} "
+                f"world_target={(target_world_x, target_world_z)} "
                 f"world_dist={world_distance_label}"
             )
             results_csv_path = (

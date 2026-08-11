@@ -31,6 +31,7 @@ from mlagents_envs.side_channel.environment_parameters_channel import (
 from nav.config import (
     ACTION_SPACE_AGENTS,
     BEHAVIOR_NAME,
+    SCENE_ID_MAP,
     UNITY_DEPTH_MAX_DISTANCE_M,
     UNITY_ENGINE_QUALITY_LEVEL,
 )
@@ -50,6 +51,11 @@ from nav.harness.lighting import (
     configure_unity_lighting,
     resolve_lighting_config,
 )
+from nav.harness.motion import (
+    add_motion_speed_args,
+    configure_unity_motion_speed,
+    resolve_motion_speed_config,
+)
 from nav.harness.side_channels import BoundsSideChannel, TargetSideChannel
 from nav.scripts.run_benchmark_cell import (
     build_axis_aligned_projector,
@@ -65,32 +71,7 @@ from nav.utils import (
 )
 
 
-ALL_SCENES = (
-    ("yifan1", 0),
-    ("yifan2", 1),
-    ("yifan3", 2),
-    ("yifan4", 3),
-    ("yifan5", 4),
-    ("yifan6", 5),
-    ("yicheng", 6),
-    ("lichi1", 7),
-    ("lichi2", 8),
-    ("lichi3", 9),
-    ("lichi4", 10),
-    ("xinyu1", 11),
-    ("xinyu2", 12),
-    ("anh1", 13),
-    ("anh2", 14),
-    ("anh3", 15),
-    ("anh4", 16),
-    ("anh5", 17),
-    ("tianyi1", 18),
-    ("tianyi2", 19),
-    ("yang1", 20),
-    ("yang2", 21),
-    ("wenjun1", 22),
-    ("wenjun2", 23),
-)
+ALL_SCENES = tuple(SCENE_ID_MAP.items())
 
 RANDOM_ACTIONS = ("forward", "turn right", "turn left", "stop")
 RANDOM_ACTION_PROBABILITIES = (0.45, 0.25, 0.25, 0.05)
@@ -130,13 +111,16 @@ class SceneResult:
     light_randomization_mode: str = "disabled"
     light_intensity_multiplier: float = 1.0
     light_fixed_exposure: float | None = None
+    human_speed_mps: float | None = None
+    vehicle_speed_mps: float | None = None
+    robot_speed_mps: float | None = None
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--file-name",
-        default="unity_clients/scene_all_24scenes_dynamic_flag_v8.app",
+        default="unity_clients/scene_all_24scenes_absolute_speed_v10.app",
         help="Path to the unified macOS Unity client.",
     )
     parser.add_argument(
@@ -187,6 +171,7 @@ def parse_args() -> argparse.Namespace:
         default="moving",
         help="Run non-agent Unity objects normally or keep them frozen.",
     )
+    add_motion_speed_args(parser)
     add_lighting_args(parser)
     parser.add_argument("--screen-width", type=int, default=1724)
     parser.add_argument("--screen-height", type=int, default=1024)
@@ -399,6 +384,24 @@ def validate_scene(
             "dynamic_objects_enabled",
             1.0 if args.dynamic_objects == "moving" else 0.0,
         )
+        motion_args = argparse.Namespace(
+            scene_id=scene_id,
+            scene_name=scene_name,
+            point_id="scene_validation",
+            seed_id=str(args.random_seed),
+            motion_random_seed=args.motion_random_seed,
+            **{
+                f"{category}_speed_{suffix}": getattr(
+                    args, f"{category}_speed_{suffix}"
+                )
+                for category in ("human", "vehicle", "robot")
+                for suffix in ("mps", "min_mps", "max_mps")
+            },
+        )
+        motion = configure_unity_motion_speed(env_params, motion_args, logger)
+        result.human_speed_mps = motion.human.speed_mps
+        result.vehicle_speed_mps = motion.vehicle.speed_mps
+        result.robot_speed_mps = motion.robot.speed_mps
         lighting_args = argparse.Namespace(
             scene_id=scene_id,
             scene_name=scene_name,
@@ -612,6 +615,7 @@ def save_summary(output_dir: Path, results: list[SceneResult]) -> None:
 def main() -> int:
     args = parse_args()
     try:
+        resolve_motion_speed_config(args)
         resolve_lighting_config(args)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc

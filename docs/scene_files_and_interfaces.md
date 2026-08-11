@@ -9,23 +9,24 @@ The current benchmark uses one unified Unity runtime. Python selects the active 
 User-facing commands use anonymized scene codes:
 
 ```text
-scene1 scene2 scene3 scene4 scene5 scene6 scene7 scene8 scene9 scene10 scene11 scene12
+scene1 scene2 ... scene24
 ```
 
-The mapping is:
+The unified client uses zero-based Unity build indices:
 
 ```text
-scene1  -> scene_id 1
-scene2  -> scene_id 2
+scene1  -> scene_id 0
+scene2  -> scene_id 1
 ...
-scene12 -> scene_id 12
+scene24 -> scene_id 23
 ```
 
-This mapping appears in three places and should be updated together:
+The full table is in [`scene_list.md`](scene_list.md). The canonical mapping is
+`nav.config.SCENE_ID_MAP`; Python and both benchmark shell wrappers read it
+directly.
 
-- `input_points.json`: top-level keys and per-scene benchmark points.
-- `nav/config.py`: `SCENE_ID_MAP`, used by grid runs and shared Python utilities.
-- `shs/run_headless_benchmark.sh` and `shs/run_Astar.sh`: shell wrapper validation and `scene_id` lookup.
+`input_points.json` is separate task data and supplies four benchmark points for
+every code from `scene1` through `scene24`.
 
 ## Benchmark Point Format
 
@@ -85,7 +86,9 @@ Python sends these values through ML-Agents `EnvironmentParametersChannel`; Unit
 | `scene_id` | Python -> Unity | Selects which scene inside `scene_all` to load. Must be set before the reset whose observations are used. |
 | `use_ai_control` | Python -> Unity | Enables action-driven locomotion in `WarehouseAgent`. This is required for windowed Linux launches because `Application.isBatchMode` is false. |
 | `dynamic_objects_enabled` | Python -> Unity | `1` runs environment motion; `0` freezes environment splines, animations, non-agent physics, NavMesh agents, particles, and timelines. The navigation agent is excluded. |
-| `spline_speed_multiplier` | Python -> Unity | Scales `SplineAnimate` speed when dynamic objects are enabled. |
+| `human_speed_mps` | Python -> Unity | Absolute speed for workers and Gley pedestrians. Default benchmark value: `1.2 m/s`. |
+| `vehicle_speed_mps` | Python -> Unity | Absolute speed for forklifts and other vehicles. Default benchmark value: `2.5 m/s`. |
+| `robot_speed_mps` | Python -> Unity | Absolute speed for robots, AGVs, and AMRs. Default benchmark value: `1.5 m/s`. |
 | `light_intensity_multiplier` | Python -> Unity | Non-negative global multiplier applied to each Light's authored intensity. `global_light_intensity` is accepted as a legacy alias. |
 | `light_fixed_exposure` | Python -> Unity | Switches enabled global HDRP volumes to Fixed exposure at this EV while runtime lighting is active. |
 | `minimap_px_width`, `minimap_px_height` | Python -> Unity | Keeps Unity world/pixel mapping aligned with the selected sensor output size. |
@@ -159,12 +162,24 @@ MINIMAP_WIDTH=431 bash shs/run_Astar.sh scene1 point1
 # Freeze environment motion without freezing the navigation agent
 DYNAMIC_OBJECTS=static bash shs/run_Astar.sh scene1 point1
 
+# Set distinct fixed speeds in meters/second
+HUMAN_SPEED_MPS=1.0 VEHICLE_SPEED_MPS=3.0 ROBOT_SPEED_MPS=1.4 \
+  bash shs/run_Astar.sh scene1 point1
+
+# Sample reproducible category-specific speeds
+HUMAN_SPEED_MIN_MPS=0.9 HUMAN_SPEED_MAX_MPS=1.4 \
+VEHICLE_SPEED_MIN_MPS=2.0 VEHICLE_SPEED_MAX_MPS=3.5 \
+ROBOT_SPEED_MIN_MPS=1.0 ROBOT_SPEED_MAX_MPS=2.0 MOTION_RANDOM_SEED=42 \
+  bash shs/run_Astar.sh scene1 point1
+
 # Direct benchmark, grid, or collector invocation
 python -m nav.scripts.run_benchmark_cell --ego_width 768 --ego_height 432 ...
 python -m nav.scripts.run_benchmark_grid --ego_width 768 --ego_height 432 ...
 python -m nav.scripts.collect_data --ego_width 768 --ego_height 432 ...
 python -m nav.scripts.run_benchmark_cell --minimap_width 431 ...
 python -m nav.scripts.run_benchmark_cell --dynamic_objects static ...
+python -m nav.scripts.run_benchmark_cell \
+  --human_speed_mps 1.0 --vehicle_speed_mps 3.0 --robot_speed_mps 1.4 ...
 ```
 
 `--screen_width` / `--screen_height` configure the Unity Player window, not the
@@ -251,11 +266,11 @@ When adding or rebuilding a scene, verify that the scene contains:
 ### Add a New Scene
 
 1. Add the scene to the Unity build and assign it the next `scene_id`.
-2. Rebuild `scene_all`.
-3. Add a new `sceneN` key to `input_points.json`.
-4. Add `sceneN -> scene_id` to `SCENE_ID_MAP`.
-5. Add the same mapping to both shell wrappers.
-6. Run a cheap dry boot before launching full benchmarks:
+2. Extend `SCENE_ID_MAP` if the new ID is outside its current `0..23` range.
+3. Add a new `sceneN` key to `input_points.json` when benchmark wrappers
+   should run it.
+4. Rebuild `scene_all`.
+5. Run a cheap dry boot before launching full benchmarks:
 
 ```bash
 BASELINE=random MAX_STEPS=2 bash shs/run_headless_benchmark.sh sceneN

@@ -59,6 +59,11 @@ from nav.harness.lighting import (
     configure_unity_lighting,
     lighting_result_fields,
 )
+from nav.harness.motion import (
+    add_motion_speed_args,
+    configure_unity_motion_speed,
+    motion_speed_result_fields,
+)
 from nav.harness.perception import detect_red_point
 from nav.harness.side_channels import BoundsSideChannel, TargetSideChannel
 from nav.utils import (
@@ -151,13 +156,7 @@ def parse_args():
     p.add_argument("--pixel_y", type=int, default=None, help="Preset init y in canonical 862x512 pixels")
     p.add_argument("--init_curr_direction", type=float, help="Initial direction of the agent")
     p.add_argument("--scene_id", type=int, default=3, help="Unity scene_id environment parameter.")
-    p.add_argument(
-        "--spline_speed_multiplier",
-        type=float,
-        default=2.0,
-        help="Runtime multiplier for Unity SplineAnimate environment-object speed. "
-             "1.0 uses the speed serialized in the scene.",
-    )
+    add_motion_speed_args(p)
     p.add_argument(
         "--dynamic_objects",
         choices=("moving", "static"),
@@ -837,8 +836,8 @@ def main():
         "dynamic_objects_enabled",
         1.0 if args.dynamic_objects == "moving" else 0.0,
     )
-    env_params.set_float_parameter("spline_speed_multiplier", float(args.spline_speed_multiplier))
     try:
+        configure_unity_motion_speed(env_params, args, logger)
         configure_unity_lighting(env_params, args, logger)
     except ValueError as exc:
         env.close()
@@ -1441,25 +1440,6 @@ def main():
                     break
 
         # ===== End of loop: compute final distance & log =====
-        final_xy = last_curr_xy
-        if final_xy is not None and state["target_xy"] is not None:
-            distance_px = runtime_minimap_distance_to_canonical(
-                final_xy,
-                state["target_xy"],
-                minimap_size,
-            )
-        else:
-            distance_px = float("nan")
-        final_xy_canonical = (
-            minimap_to_canonical_coords(final_xy, minimap_size)
-            if final_xy is not None
-            else None
-        )
-        target_xy_canonical = (
-            minimap_to_canonical_coords(state["target_xy"], minimap_size)
-            if state["target_xy"] is not None
-            else None
-        )
         distance_world = (
             float(
                 np.hypot(
@@ -1480,16 +1460,15 @@ def main():
             "model": args.model_id,
             "max_steps": int(args.max_steps),
             "reach_m": float(args.reach_m),
+            "init_world_x": init_world_x,
+            "init_world_z": init_world_z,
             "init_direction": float(args.init_curr_direction)
             if args.init_curr_direction is not None
             else None,
-            "target_x": round(target_xy_canonical[0]) if target_xy_canonical is not None else None,
-            "target_y": round(target_xy_canonical[1]) if target_xy_canonical is not None else None,
             "target_world_x": state["target_world_x"],
             "target_world_z": state["target_world_z"],
-            "final_x": round(final_xy_canonical[0]) if final_xy_canonical is not None else None,
-            "final_y": round(final_xy_canonical[1]) if final_xy_canonical is not None else None,
-            "distance_px": distance_px,
+            "final_world_x": last_world_xz[0] if last_world_xz is not None else None,
+            "final_world_z": last_world_xz[1] if last_world_xz is not None else None,
             "distance_world": distance_world,
             "stop_reason": stop_reason or "loop_end",
             "steps_taken": forward_count,
@@ -1497,8 +1476,8 @@ def main():
             "modalities": ",".join(sorted(enabled_modalities)),
             "sim_steps_per_decision": int(SIM_STEPS_PER_DECISION),
             "marker_source": args.marker_source,
-            "spline_speed_multiplier": float(args.spline_speed_multiplier),
             "dynamic_objects": args.dynamic_objects,
+            **motion_speed_result_fields(args),
             **lighting_result_fields(args),
         }
 
@@ -1509,7 +1488,8 @@ def main():
         )
         logger.info(
             f"[FINAL RESULT] Stop={result['stop_reason']} | Steps={result['steps_taken']} | "
-            f"FinalPos={final_xy} | Target={state['target_xy']} | "
+            f"FinalWorld={last_world_xz} | "
+            f"TargetWorld={(state['target_world_x'], state['target_world_z'])} | "
             f"Distance={distance_label}"
         )
         append_results_csv(args.results_csv, result)

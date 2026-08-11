@@ -40,7 +40,7 @@ def _active_metrics(rows: Sequence[dict]) -> List[Tuple[str, str, str]]:
     """Pick which metrics are computable for this source.
 
     Always returns the base triplet (SR/DR/CR). WR is only present in
-    xlsx-derived data (grid runs don't save raw depth). ``distance_px``
+    xlsx-derived data (grid runs don't save raw depth). ``distance_world``
     is only present for grid-tree-walked rows (xlsx leaves it as NaN).
     """
     metrics = list(STATS_REPORT_BASE_METRICS)
@@ -315,7 +315,7 @@ def _render_report(
     else:
         md.append("- **WR** (warning rate): **DEFERRED** — grid runs did not save raw depth NPYs. Re-enable NPY saving to recover this.\n")
     if has_dist:
-        md.append("- **Mean dist (px)**: average final `distance_px` per run.\n")
+        md.append("- **Mean dist (m)**: average final `distance_world` per run.\n")
     md.append("\n")
     md.append("> **CR caveat.** With the `eval_metrics.py` collision-rate definition, "
               "CR can sit near ceiling for some model/condition combos — the 34 px "

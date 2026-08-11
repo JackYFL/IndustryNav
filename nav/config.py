@@ -42,20 +42,11 @@ UNITY_MAP_SIZE: Tuple[float, float] = (862.0, 512.0)
 UNITY_DEPTH_MAX_DISTANCE_M: float = 20.0
 MODALITY_TO_IDX: Dict[str, int] = {"ego": 0, "depth": 1, "minimap": 2}
 
+UNITY_SCENE_COUNT: int = 24
 SCENE_ID_MAP: Dict[str, int] = {
-    "scene1": 0,
-    "scene2": 1,
-    "scene3": 2,
-    "scene4": 3,
-    "scene5": 4,
-    "scene6": 5,
-    "scene7": 6,
-    "scene8": 7,
-    "scene9": 8,
-    "scene10": 9,
-    "scene11": 10,
-    "scene12": 11,
+    f"scene{scene_id + 1}": scene_id for scene_id in range(UNITY_SCENE_COUNT)
 }
+SCENE_CODES: Tuple[str, ...] = tuple(SCENE_ID_MAP)
 
 # UUIDs/opcodes must match the Unity C# side-channel registration.
 SIDE_CHANNEL_BOUNDS_UUID: str = "591d9d3a-8a1f-4e9d-8a3b-5e6c7d8e9f0a"
@@ -99,12 +90,10 @@ LLM_DEFAULT_HISTORY_SIZE: int = 5
 class AStarParams:
     """A* minimap planner defaults."""
 
-    grid_step: int = 8
+    grid_cell_m: float = 0.6
     obstacle_threshold: int = 55
     min_free_ratio: float = 0.55
-    obstacle_inflate_px: int = 8
-    marker_clear_px: int = 16
-    target_change_replan_px: float = 8.0
+    obstacle_clearance_m: float = 0.6
     turn_tolerance_deg: float = 25.0
     forward_priority_tolerance_deg: float = 20.0
     drive_turn_tolerance_deg: float = 30.0
@@ -116,14 +105,13 @@ class AStarParams:
     front_cone_deg: float = 140.0
     hysteresis_reset_deg: float = 45.0
     hysteresis_lock_deg: float = 165.0
-    stuck_world_epsilon: float = 0.05
-    stuck_px_epsilon: float = 3.0
+    stuck_distance_m: float = 0.05
     stuck_steps: int = 4
     recovery_turn_steps: int = 3
-    stuck_block_ahead_px: float = 28.0
-    stuck_block_radius_px: float = 18.0
+    stuck_block_ahead_m: float = 2.1
+    stuck_block_radius_m: float = 1.35
     stuck_block_ttl_steps: int = 24
-    proxy_stop_real_dist_m: float = 4.9
+    proxy_stop_distance_m: float = 4.9
 
 
 ASTAR_DEFAULTS = AStarParams()
@@ -144,6 +132,15 @@ EVAL_ROI_PARAMS: Dict[str, float] = {
 EVAL_AGGREGATE_DEFAULT_OUT: str = "analysis/aggregate_eval.xlsx"
 EVAL_DEFAULT_LOG_DIR: str = "logs/eval"
 
+MOTION_SPEED_CSV_FIELDS: List[str] = [
+    "motion_random_seed",
+    *[
+        f"{category}_speed_{suffix}"
+        for category in ("human", "vehicle", "robot")
+        for suffix in ("mode", "mps", "min_mps", "max_mps")
+    ],
+]
+
 RESULTS_CSV_FIELDS: List[str] = [
     "timestamp",
     "exp_name",
@@ -156,14 +153,13 @@ RESULTS_CSV_FIELDS: List[str] = [
     "vision_input",
     "max_steps",
     "reach_m",
-    "target_x",
-    "target_y",
+    "init_world_x",
+    "init_world_z",
+    "init_direction",
     "target_world_x",
     "target_world_z",
-    "init_direction",
-    "final_x",
-    "final_y",
-    "distance_px",
+    "final_world_x",
+    "final_world_z",
     "distance_world",
     "stop_reason",
     "steps_taken",
@@ -171,8 +167,8 @@ RESULTS_CSV_FIELDS: List[str] = [
     "modalities",
     "sim_steps_per_decision",
     "marker_source",
-    "spline_speed_multiplier",
     "dynamic_objects",
+    *MOTION_SPEED_CSV_FIELDS,
     "global_light_intensity",
     "light_randomization_mode",
     "light_intensity_multiplier",
@@ -218,6 +214,7 @@ GRID_CSV_FIELDS: List[str] = [
     "vision_input",
     "history_size",
     "dynamic_objects",
+    *MOTION_SPEED_CSV_FIELDS,
     "global_light_intensity",
     "light_randomization_mode",
     "light_intensity_multiplier",
@@ -243,7 +240,7 @@ ANALYSIS_ROOT: Path = Path("analysis")
 DEFAULT_ANALYSIS_SUBDIR: str = "nav1"
 STATS_METRIC_FIELDS: Tuple[str, ...] = (
     "success",
-    "distance_px",
+    "distance_world",
     "distance_ratio",
     "collision_rate",
     "warning_rate",
@@ -257,7 +254,7 @@ STATS_REPORT_BASE_METRICS: Tuple[Tuple[str, str, str], ...] = (
 )
 STATS_REPORT_OPTIONAL_METRICS: Dict[str, Tuple[str, str, str]] = {
     "warning_rate": ("wr", "warning_rate", "WR"),
-    "distance_px": ("dist", "distance_px", "Mean dist (px)"),
+    "distance_world": ("dist", "distance_world", "Mean dist (m)"),
 }
 
 
@@ -265,6 +262,8 @@ STATS_REPORT_OPTIONAL_METRICS: Dict[str, Tuple[str, str, str]] = {
 
 SCENE_ALL_BUILDS: Dict[str, List[str]] = {
     "Darwin": [
+        str(REPO_ROOT / "unity_clients" / "scene_all_24scenes_absolute_speed_v10.app"),
+        str(REPO_ROOT / "unity_clients" / "scene_all_24scenes_motion_speed_v9.app"),
         str(REPO_ROOT / "unity_clients" / "scene_all_24scenes_dynamic_flag_v8.app"),
         str(REPO_ROOT / "unity_clients" / "scene_all_resizable.app"),
         str(REPO_ROOT / "unity_clients" / "scene_all_rebuilt.app"),
@@ -312,6 +311,7 @@ BC_ACTION_TO_LABEL: Dict[str, int] = {
     "turn right": 2,
     "turn left": 3,
 }
+
 BC_LABEL_TO_ACTION: Dict[int, str] = {v: k for k, v in BC_ACTION_TO_LABEL.items()}
 
 BC_EPISODE_CSV: str = "keyboard_actions.csv"

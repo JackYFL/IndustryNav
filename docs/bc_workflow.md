@@ -32,13 +32,20 @@ BC training consumes human-controlled episodes saved by:
 # Set SCENE_ALL_APP to the local Unity runtime executable before running.
 python -m nav.scripts.collect_data \
   --file_name "$SCENE_ALL_APP" \
-  --scene_id 1 \
+  --scene_id 0 \
   --frame_save_dir collect_data/scene1/point1 \
   --max_steps 100 \
   --ego_width 512 \
   --ego_height 512 \
   --minimap_width 862 \
   --dynamic_objects moving \
+  --human_speed_min_mps 0.9 \
+  --human_speed_max_mps 1.4 \
+  --vehicle_speed_min_mps 2.0 \
+  --vehicle_speed_max_mps 3.5 \
+  --robot_speed_min_mps 1.0 \
+  --robot_speed_max_mps 2.0 \
+  --motion_random_seed 42 \
   --light_intensity_min 0.7 \
   --light_intensity_max 1.3 \
   --light_random_seed 42 \
@@ -57,6 +64,12 @@ to take effect.
 Use `--dynamic_objects static` to collect or evaluate a static-environment
 variant. The navigation agent remains controllable; only environment motion is
 frozen. Keep this value consistent between data collection and BC inference.
+
+Human, vehicle, and robot speeds are controlled independently in meters/second.
+Use `--human_speed_mps`, `--vehicle_speed_mps`, and `--robot_speed_mps` for fixed
+values, or the corresponding `--*_speed_min_mps`/`--*_speed_max_mps` pairs for
+reproducible variation. Use the same policy during collection and inference
+when evaluating BC under matched dynamics.
 
 During collection, use the OpenCV control window to drive the agent. The collector writes per-frame observations and the action log when the episode exits.
 
@@ -196,7 +209,7 @@ For a locally trained checkpoint, pass `--bc_ckpt` through the Python entry dire
 python -m nav.scripts.run_benchmark_cell \
   --baseline bc \
   --file_name auto \
-  --scene_id 1 \
+  --scene_id 0 \
   --scene_name scene1 \
   --point_id point1 \
   --max_steps 70 \

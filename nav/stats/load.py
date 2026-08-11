@@ -174,7 +174,7 @@ def _rows_from_seed_dir(
             model = r.get("model") or ""
             if models_filter and model not in models_filter:
                 continue
-            dist = _to_float_or_nan(r.get("distance_px"))
+            dist = _to_float_or_nan(r.get("distance_world"))
             if not math.isfinite(dist):
                 continue
             out.append({
@@ -186,7 +186,7 @@ def _rows_from_seed_dir(
                 "seed_id": r.get("seed_id") or seed_dir.name.replace("seed", ""),
                 # Canonical SR comes from the world-distance evaluation helper.
                 "success": int(sr_canon),
-                "distance_px": dist,
+                "distance_world": dist,
                 "distance_ratio": dr,
                 "collision_rate": cr,
                 "warning_rate": float("nan"),  # grid runs don't preserve raw depth
@@ -203,7 +203,8 @@ def _rows_from_seed_dir(
 def xlsx_to_per_run_rows(xlsx_path: Path) -> List[dict]:
     """Parse the archived xlsx sweep into per-run rows in the canonical schema.
 
-    Sheet layout: one sheet per scene (12 total). Each sheet has a header
+    Sheet layout: one sheet per scene. Current sweeps may contain up to 24
+    scene sheets. Each sheet has a header
     row (``Model | Success ratio | Distance Ratio | Efficiency | Collision
     Ratio | Warning Ratio``) and data rows where the first column carries
     a "Point N" label on the row that starts each (scene, point) section.
@@ -272,7 +273,7 @@ def _parse_xlsx_sheet(ws, scene_name: str) -> List[dict]:
             "vision_input": True,        # xlsx is single-condition vision-on
             "seed_id": "0",              # one run per cell, no replicates
             "success": success,
-            "distance_px": float("nan"),  # not recorded in the xlsx
+            "distance_world": float("nan"),  # not recorded in the xlsx
             "distance_ratio": _normalize_ratio(dr),
             "collision_rate": _normalize_ratio(cr),
             "warning_rate": _normalize_ratio(wr),
@@ -315,7 +316,7 @@ def load_per_run_csv(csv_path: Path) -> List[dict]:
                 "vision_input": _vision_input_bool(r.get("vision_input", "True")),
                 "seed_id": r.get("seed_id") or "0",
                 "success": success,
-                "distance_px": _to_float_or_nan(r.get("distance_px")),
+                "distance_world": _to_float_or_nan(r.get("distance_world")),
                 "distance_ratio": _to_float_or_nan(r.get("distance_ratio")),
                 "collision_rate": _to_float_or_nan(r.get("collision_rate")),
                 "warning_rate": _to_float_or_nan(r.get("warning_rate")),

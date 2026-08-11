@@ -78,7 +78,7 @@ def collapse_grid_to_cells(
             "vision_input": True if vision_filter == "on" else False,
             "seed_id": "merged",
             "success": _avg("success"),
-            "distance_px": _avg("distance_px"),
+            "distance_world": _avg("distance_world"),
             "distance_ratio": _avg("distance_ratio"),
             "collision_rate": _avg("collision_rate"),
             "warning_rate": _avg("warning_rate"),

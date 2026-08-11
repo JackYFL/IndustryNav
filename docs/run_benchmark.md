@@ -1,6 +1,6 @@
 # Running benchmarks (macOS / Ubuntu Linux, unified Unity client)
 
-This is the canonical guide for running AI navigation benchmarks against the **unified** Unity client (`scene_all`, 12 scenes bundled, scene chosen at runtime). Legacy per-scene clients and the older `run_sync.py` / `run_async.py` / `shs/run_agent.sh` flow are **not** the latest; treat them as reference only.
+This is the canonical guide for running AI navigation benchmarks against the **unified** Unity client (`scene_all`, 24 scenes bundled, scene chosen at runtime with zero-based `scene_id` values `0..23`). Legacy per-scene clients and the older `run_sync.py` / `run_async.py` / `shs/run_agent.sh` flow are **not** the latest; treat them as reference only.
 
 The current entry point is `nav/scripts/run_benchmark_cell.py` (run via `python -m nav.scripts.run_benchmark_cell`), driven by:
 
@@ -53,6 +53,11 @@ outputs/<scene_code>/<point_id>/<model_short_name>/
 └── unity_log.txt     # Unity-side log
 ```
 
+`results.csv` stores navigation coordinates and final distance only in Unity
+world units: `init_world_x/z`, `target_world_x/z`, `final_world_x/z`, and
+`distance_world` (meters). Minimap pixels remain in the per-step action CSV for
+trajectory visualization and image-based diagnostics.
+
 The wrapper reads spawn + target from `input_points.json`, picks a free TCP base port for each
 point (so multiple scenes can run in parallel from different terminals), and dispatches one
 `python -m nav.scripts.run_benchmark_cell` per point.
@@ -98,6 +103,11 @@ This is the general benchmark wrapper for `llm`, `astar`, `bc`, and `random`.
 | `EGO_WIDTH` | `512` | Width of the egocentric RGB and depth observations and saved frames. |
 | `EGO_HEIGHT` | `512` | Height of the egocentric RGB and depth observations and saved frames. |
 | `DYNAMIC_OBJECTS` | `moving` | `moving` runs environment motion; `static` freezes environment objects while leaving the navigation agent controllable. |
+| `HUMAN_SPEED_MPS` | `1.2` | Absolute worker and pedestrian speed in meters/second. |
+| `VEHICLE_SPEED_MPS` | `2.5` | Absolute forklift and vehicle speed in meters/second. |
+| `ROBOT_SPEED_MPS` | `1.5` | Absolute robot, AGV, and AMR speed in meters/second. |
+| `<CATEGORY>_SPEED_MIN_MPS`, `<CATEGORY>_SPEED_MAX_MPS` | unset | Optional deterministic range for one category; both values are required. |
+| `MOTION_RANDOM_SEED` | `0` | Base seed for independent category-speed sampling. |
 | `GLOBAL_LIGHT_INTENSITY` | unset | Optional fixed global multiplier for Unity scene lighting. `LIGHT_INTENSITY_MULTIPLIER` is an equivalent alias. |
 | `LIGHT_INTENSITY_MIN`, `LIGHT_INTENSITY_MAX` | unset | Optional deterministic per-run multiplier range. Both values are required. |
 | `LIGHT_RANDOM_SEED` | `0` | Base seed for range sampling. |
@@ -127,6 +137,11 @@ This is a convenience wrapper around `run_benchmark_cell --baseline astar`. It s
 | `EGO_WIDTH`, `EGO_HEIGHT` | `512`, `512` | Egocentric RGB and depth observation size. |
 | `MINIMAP_WIDTH`, `MINIMAP_HEIGHT` | `862`, derived | Set either minimap dimension; the other is derived using `862:512`. |
 | `DYNAMIC_OBJECTS` | `moving` | `moving` or `static`; forwarded to `--dynamic_objects`. |
+| `HUMAN_SPEED_MPS` | `1.2` | Absolute worker and pedestrian speed in meters/second. |
+| `VEHICLE_SPEED_MPS` | `2.5` | Absolute forklift and vehicle speed in meters/second. |
+| `ROBOT_SPEED_MPS` | `1.5` | Absolute robot, AGV, and AMR speed in meters/second. |
+| `<CATEGORY>_SPEED_MIN_MPS`, `<CATEGORY>_SPEED_MAX_MPS` | unset | Deterministic per-run range for one category. |
+| `MOTION_RANDOM_SEED` | `0` | Category-speed sampling seed. |
 | `LIGHT_INTENSITY_MULTIPLIER` | unset | Fixed global light multiplier. |
 | `LIGHT_INTENSITY_MIN`, `LIGHT_INTENSITY_MAX` | unset | Deterministic per-run multiplier range. |
 | `LIGHT_RANDOM_SEED`, `LIGHT_FIXED_EXPOSURE` | `0`, `9.0` | Sampling seed and fixed HDRP exposure EV. |
@@ -135,16 +150,16 @@ This is a convenience wrapper around `run_benchmark_cell --baseline astar`. It s
 | `RUN_NAME` | `astar` | Output directory name under `outputs/<scene_code>/<point_id>/`. |
 | `ASTAR_DEBUG_VIZ` | `0` | Save A* walkable-grid/path debug frames. |
 | `ASTAR_DEBUG_DIR` | `<frame_save_dir>/astar_debug` | Explicit debug frame directory. |
-| `ASTAR_OBSTACLE_INFLATE_PX` | `8` | Obstacle dilation in minimap pixels. |
-| `ASTAR_MARKER_CLEAR_PX` | `16` | Radius cleared around current/target marker artifacts. |
-| `ASTAR_PROXY_STOP_REAL_DIST_M` | `4.9` | World-distance threshold for switching from a reached proxy to direct terminal approach. |
+| `ASTAR_OBSTACLE_CLEARANCE_M` | `0.6` | Physical obstacle clearance in Unity world meters. |
+| `ASTAR_PROXY_STOP_DISTANCE_M` | `4.9` | World-distance threshold for switching from a reached proxy to direct terminal approach. |
 | `DRY_RUN` | `0` | Print the generated command without launching Unity. |
 | `BASE_PORT_START` | `5507` | Fallback base port if automatic free-port probing fails. |
 
 Common A* examples:
 
-World coordinates are required for all navigation distance thresholds. Pixel
-parameters remain only for minimap mask and marker operations.
+World coordinates are required for all navigation distance thresholds. A*
+converts metric grid and clearance settings to pixels internally; marker pixels
+remain an internal image-processing detail.
 
 ```bash
 # Freeze workers, spline vehicles, animations, and environment physics.
@@ -156,7 +171,7 @@ python -m nav.scripts.run_benchmark_cell --dynamic_objects static ...
 
 ```bash
 ASTAR_DEBUG_VIZ=1 bash shs/run_Astar.sh scene1 point1
-ASTAR_OBSTACLE_INFLATE_PX=12 RUN_NAME=astar_inflate12 bash shs/run_Astar.sh scene1 point1
+ASTAR_OBSTACLE_CLEARANCE_M=0.9 RUN_NAME=astar_clearance09 bash shs/run_Astar.sh scene1 point1
 MAX_STEPS=120 bash shs/run_Astar.sh all
 ```
 
@@ -185,7 +200,7 @@ SCENE_ALL_APP=/home/liyifa11/MyCodes/IndustryNav/scene_files/Linux/scene_all/sce
 .venv/bin/python -m nav.scripts.run_benchmark_cell \
   --baseline llm \
   --file_name "$SCENE_ALL_APP" \
-  --scene_id 1 --base_port 5520 --max_steps 70 \
+  --scene_id 0 --base_port 5520 --max_steps 70 \
   --ego_width 512 --ego_height 512 \
   --frame_save_dir outputs/scene1/point1/gemini-3-flash-preview \
   --model_id google/gemini-3-flash-preview \
@@ -199,7 +214,7 @@ Ubuntu Linux (note the `xvfb-run` prefix and the ELF path):
 xvfb-run -a -s "-screen 0 1724x1024x24" .venv/bin/python -m nav.scripts.run_benchmark_cell \
   --baseline llm \
   --file_name /mnt/ss2/devops/sandbox/industrynav2/client/scene_all/scene_all.x86_64 \
-  --scene_id 1 --base_port 5520 --max_steps 70 \
+  --scene_id 0 --base_port 5520 --max_steps 70 \
   --ego_width 512 --ego_height 512 \
   --frame_save_dir outputs/scene1/point1/gemini-3-flash-preview \
   --model_id google/gemini-3-flash-preview \
@@ -245,6 +260,33 @@ DYNAMIC_OBJECTS=static bash shs/run_Astar.sh scene1 point1
 python -m nav.scripts.collect_data --dynamic_objects static ...
 python -m nav.scripts.run_benchmark_grid --dynamic_objects static ...
 ```
+
+Human, vehicle, and robot movers use separate absolute speeds in Unity world
+meters/second. The defaults are `1.2`, `2.5`, and `1.5 m/s`. Use fixed values
+or independent ranges:
+
+```bash
+HUMAN_SPEED_MPS=1.0 VEHICLE_SPEED_MPS=3.0 ROBOT_SPEED_MPS=1.4 \
+  bash shs/run_headless_benchmark.sh scene1
+HUMAN_SPEED_MIN_MPS=0.9 HUMAN_SPEED_MAX_MPS=1.4 \
+VEHICLE_SPEED_MIN_MPS=2.0 VEHICLE_SPEED_MAX_MPS=3.5 \
+ROBOT_SPEED_MIN_MPS=1.0 ROBOT_SPEED_MAX_MPS=2.0 MOTION_RANDOM_SEED=42 \
+  bash shs/run_Astar.sh scene1 point1
+python -m nav.scripts.collect_data \
+  --human_speed_mps 1.0 --vehicle_speed_mps 3.0 --robot_speed_mps 1.4 ...
+python -m nav.scripts.run_benchmark_grid \
+  --human_speed_min_mps 0.9 --human_speed_max_mps 1.4 \
+  --vehicle_speed_min_mps 2.0 --vehicle_speed_max_mps 3.5 \
+  --robot_speed_min_mps 1.0 --robot_speed_max_mps 2.0 \
+  --motion_random_seed 42 ...
+```
+
+Each configured range is sampled independently from the base seed plus category,
+scene, point, and benchmark seed identifiers. Unity applies absolute speed to
+classified Spline and NavMesh movement and synchronizes child Animator playback.
+The Gley pedestrian system reads the human speed directly. The controlled
+`WarehouseAgent` is excluded. Use `--dynamic_objects static` when all
+environment motion must be frozen.
 
 ### Global lighting
 
@@ -292,7 +334,7 @@ SCENE_ALL_APP=/home/liyifa11/MyCodes/IndustryNav/scene_files/Linux/scene_all/sce
 .venv/bin/python -m nav.scripts.run_benchmark_cell \
   --baseline random \
   --file_name "$SCENE_ALL_APP" \
-  --scene_id 1 --max_steps 2 \
+  --scene_id 0 --max_steps 2 \
   --frame_save_dir outputs/_dryboot/scene1 \
   --init_world_x 31.0 --init_world_z 49.63 --init_curr_direction 180 \
   --target_x 550 --target_y 450
@@ -304,7 +346,7 @@ Ubuntu Linux:
 xvfb-run -a -s "-screen 0 1724x1024x24" .venv/bin/python -m nav.scripts.run_benchmark_cell \
   --baseline random \
   --file_name /mnt/ss2/devops/sandbox/industrynav2/client/scene_all/scene_all.x86_64 \
-  --scene_id 1 --max_steps 2 \
+  --scene_id 0 --max_steps 2 \
   --frame_save_dir outputs/_dryboot/scene1 \
   --init_world_x 31.0 --init_world_z 49.63 --init_curr_direction 180 \
   --target_x 550 --target_y 450

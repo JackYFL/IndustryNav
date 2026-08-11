@@ -23,6 +23,12 @@
 #   MINIMAP_WIDTH / MINIMAP_HEIGHT  minimap size; set either value and derive
 #                                  the other using 862:512 (default: 862x512)
 #   DYNAMIC_OBJECTS  moving | static                       (default: moving)
+#   HUMAN_SPEED_MPS / VEHICLE_SPEED_MPS / ROBOT_SPEED_MPS
+#       Category-wide absolute speeds in meters/second. Defaults applied by
+#       Python: human 1.2, vehicle 2.5, robot 1.5.
+#   <CATEGORY>_SPEED_MIN_MPS / <CATEGORY>_SPEED_MAX_MPS
+#       Optional deterministic per-run ranges.
+#   MOTION_RANDOM_SEED  range-sampling seed                 (default: 0)
 #   LIGHT_INTENSITY_MULTIPLIER  optional fixed global light multiplier
 #   LIGHT_INTENSITY_MIN / LIGHT_INTENSITY_MAX  optional per-run range
 #   LIGHT_RANDOM_SEED / LIGHT_FIXED_EXPOSURE    defaults: 0 / 9.0 EV
@@ -35,8 +41,17 @@ set -euo pipefail
 SCENE_CODE="${1:-}"
 if [[ -z "$SCENE_CODE" ]]; then
   echo "Usage: $0 <scene_code> [model_id]"
-  echo "scene_code must be one of: scene1 scene2 scene3 scene4 scene5 scene6 scene7 scene8 scene9 scene10 scene11 scene12"
+  echo "scene_code must be in the range scene1..scene24"
   echo "Set BASELINE={llm,astar,bc,random} (default llm)."
+  exit 1
+fi
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+PYTHON_BIN="${PYTHON_BIN:-${REPO_ROOT}/.venv/bin/python}"
+export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:$PYTHONPATH}"
+if [[ ! -x "$PYTHON_BIN" ]]; then
+  echo "Python interpreter not found at: $PYTHON_BIN"
+  echo "Run 'uv sync' from the repo root, or set PYTHON_BIN."
   exit 1
 fi
 
@@ -49,33 +64,22 @@ else
   RUN_NAME="$BASELINE"
 fi
 
-# scene_code -> scene_id baked into the unified client. Override via SCENE_ID.
-case "$SCENE_CODE" in
-  scene1)  SCENE_ID_DEFAULT=0  ;;
-  scene2)  SCENE_ID_DEFAULT=1  ;;
-  scene3)  SCENE_ID_DEFAULT=2  ;;
-  scene4)  SCENE_ID_DEFAULT=3  ;;
-  scene5)  SCENE_ID_DEFAULT=4  ;;
-  scene6)  SCENE_ID_DEFAULT=5  ;;
-  scene7)  SCENE_ID_DEFAULT=6  ;;
-  scene8)  SCENE_ID_DEFAULT=7  ;;
-  scene9)  SCENE_ID_DEFAULT=8  ;;
-  scene10) SCENE_ID_DEFAULT=9  ;;
-  scene11) SCENE_ID_DEFAULT=10 ;;
-  scene12) SCENE_ID_DEFAULT=11 ;;
-  *)       echo "Unknown scene_code: $SCENE_CODE"; exit 1 ;;
-esac
-SCENE_ID="${SCENE_ID:-$SCENE_ID_DEFAULT}"
+# scene_code -> zero-based Unity build index. Override via SCENE_ID.
+if ! SCENE_ID_DEFAULT="$("$PYTHON_BIN" - "$SCENE_CODE" <<'PY'
+import sys
 
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PYTHON_BIN="${PYTHON_BIN:-${REPO_ROOT}/.venv/bin/python}"
-# Make `python -m nav.scripts.run_benchmark_cell` resolve regardless of CWD.
-export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:$PYTHONPATH}"
-if [[ ! -x "$PYTHON_BIN" ]]; then
-  echo "Python interpreter not found at: $PYTHON_BIN"
-  echo "Run 'uv sync' from the repo root, or set PYTHON_BIN."
+from nav.config import SCENE_ID_MAP
+
+scene_code = sys.argv[1]
+if scene_code not in SCENE_ID_MAP:
+    raise SystemExit(1)
+print(SCENE_ID_MAP[scene_code])
+PY
+)"; then
+  echo "Unknown scene_code: $SCENE_CODE"
   exit 1
 fi
+SCENE_ID="${SCENE_ID:-$SCENE_ID_DEFAULT}"
 
 # OS branch: client path default + (Linux) xvfb prefix.
 OS="$(uname -s)"
@@ -122,6 +126,16 @@ EGO_HEIGHT="${EGO_HEIGHT:-512}"
 MINIMAP_WIDTH="${MINIMAP_WIDTH:-}"
 MINIMAP_HEIGHT="${MINIMAP_HEIGHT:-}"
 DYNAMIC_OBJECTS="${DYNAMIC_OBJECTS:-moving}"
+HUMAN_SPEED_MPS="${HUMAN_SPEED_MPS:-}"
+HUMAN_SPEED_MIN_MPS="${HUMAN_SPEED_MIN_MPS:-}"
+HUMAN_SPEED_MAX_MPS="${HUMAN_SPEED_MAX_MPS:-}"
+VEHICLE_SPEED_MPS="${VEHICLE_SPEED_MPS:-}"
+VEHICLE_SPEED_MIN_MPS="${VEHICLE_SPEED_MIN_MPS:-}"
+VEHICLE_SPEED_MAX_MPS="${VEHICLE_SPEED_MAX_MPS:-}"
+ROBOT_SPEED_MPS="${ROBOT_SPEED_MPS:-}"
+ROBOT_SPEED_MIN_MPS="${ROBOT_SPEED_MIN_MPS:-}"
+ROBOT_SPEED_MAX_MPS="${ROBOT_SPEED_MAX_MPS:-}"
+MOTION_RANDOM_SEED="${MOTION_RANDOM_SEED:-0}"
 LIGHT_INTENSITY_MULTIPLIER="${LIGHT_INTENSITY_MULTIPLIER:-${GLOBAL_LIGHT_INTENSITY:-}}"
 LIGHT_INTENSITY_MIN="${LIGHT_INTENSITY_MIN:-}"
 LIGHT_INTENSITY_MAX="${LIGHT_INTENSITY_MAX:-}"
@@ -131,6 +145,20 @@ if [[ "$DYNAMIC_OBJECTS" != "moving" && "$DYNAMIC_OBJECTS" != "static" ]]; then
   echo "DYNAMIC_OBJECTS must be 'moving' or 'static', got: $DYNAMIC_OBJECTS"
   exit 1
 fi
+validate_category_speed() {
+  local label="$1" fixed="$2" minimum="$3" maximum="$4"
+  if [[ -n "$fixed" && ( -n "$minimum" || -n "$maximum" ) ]]; then
+    echo "${label}_SPEED_MPS cannot be combined with ${label}_SPEED_MIN_MPS/MAX_MPS."
+    exit 1
+  fi
+  if [[ -n "$minimum" && -z "$maximum" ]] || [[ -z "$minimum" && -n "$maximum" ]]; then
+    echo "${label}_SPEED_MIN_MPS and ${label}_SPEED_MAX_MPS must be set together."
+    exit 1
+  fi
+}
+validate_category_speed HUMAN "$HUMAN_SPEED_MPS" "$HUMAN_SPEED_MIN_MPS" "$HUMAN_SPEED_MAX_MPS"
+validate_category_speed VEHICLE "$VEHICLE_SPEED_MPS" "$VEHICLE_SPEED_MIN_MPS" "$VEHICLE_SPEED_MAX_MPS"
+validate_category_speed ROBOT "$ROBOT_SPEED_MPS" "$ROBOT_SPEED_MIN_MPS" "$ROBOT_SPEED_MAX_MPS"
 if [[ -n "$LIGHT_INTENSITY_MULTIPLIER" && ( -n "$LIGHT_INTENSITY_MIN" || -n "$LIGHT_INTENSITY_MAX" ) ]]; then
   echo "LIGHT_INTENSITY_MULTIPLIER cannot be combined with LIGHT_INTENSITY_MIN/MAX."
   exit 1
@@ -150,7 +178,10 @@ from pathlib import Path
 
 path, scene = sys.argv[1], sys.argv[2]
 data = json.loads(Path(path).read_text(encoding="utf-8"))
-for entry in data.get(scene, []):
+entries = data.get(scene)
+if not entries:
+    raise SystemExit(f"No input points found for scene: {scene}")
+for entry in entries:
     pid = entry["point_id"]
     # input_points.json start.{x,z} are Unity WORLD coords (not pixels) — pass
     # them straight through as --init_world_x/--init_world_z so the client spawns
@@ -194,6 +225,25 @@ PY
   fi
   if [[ -n "$MINIMAP_HEIGHT" ]]; then
     CMD+=(--minimap_height "$MINIMAP_HEIGHT")
+  fi
+  motion_speed_configured=0
+  if [[ -n "$HUMAN_SPEED_MPS" ]]; then
+    CMD+=(--human_speed_mps "$HUMAN_SPEED_MPS"); motion_speed_configured=1
+  elif [[ -n "$HUMAN_SPEED_MIN_MPS" ]]; then
+    CMD+=(--human_speed_min_mps "$HUMAN_SPEED_MIN_MPS" --human_speed_max_mps "$HUMAN_SPEED_MAX_MPS"); motion_speed_configured=1
+  fi
+  if [[ -n "$VEHICLE_SPEED_MPS" ]]; then
+    CMD+=(--vehicle_speed_mps "$VEHICLE_SPEED_MPS"); motion_speed_configured=1
+  elif [[ -n "$VEHICLE_SPEED_MIN_MPS" ]]; then
+    CMD+=(--vehicle_speed_min_mps "$VEHICLE_SPEED_MIN_MPS" --vehicle_speed_max_mps "$VEHICLE_SPEED_MAX_MPS"); motion_speed_configured=1
+  fi
+  if [[ -n "$ROBOT_SPEED_MPS" ]]; then
+    CMD+=(--robot_speed_mps "$ROBOT_SPEED_MPS"); motion_speed_configured=1
+  elif [[ -n "$ROBOT_SPEED_MIN_MPS" ]]; then
+    CMD+=(--robot_speed_min_mps "$ROBOT_SPEED_MIN_MPS" --robot_speed_max_mps "$ROBOT_SPEED_MAX_MPS"); motion_speed_configured=1
+  fi
+  if [[ "$motion_speed_configured" == "1" ]]; then
+    CMD+=(--motion_random_seed "$MOTION_RANDOM_SEED")
   fi
   if [[ -n "$LIGHT_INTENSITY_MULTIPLIER" ]]; then
     CMD+=(--light_intensity_multiplier "$LIGHT_INTENSITY_MULTIPLIER")

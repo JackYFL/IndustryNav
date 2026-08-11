@@ -33,6 +33,7 @@ from nav.harness.coordinates import (
 )
 from nav.harness.observations import get_minimap_rgb_for_init, patch_observation_decoding
 from nav.harness.lighting import configure_unity_lighting
+from nav.harness.motion import configure_unity_motion_speed
 from nav.harness.side_channels import BoundsSideChannel, TargetSideChannel
 
 
@@ -155,11 +156,8 @@ def _launch_env(args, logger):
         "dynamic_objects_enabled",
         1.0 if dynamic_objects == "moving" else 0.0,
     )
-    env_params.set_float_parameter(
-        "spline_speed_multiplier",
-        float(getattr(args, "spline_speed_multiplier", 1.0)),
-    )
     try:
+        motion_speed = configure_unity_motion_speed(env_params, args, logger)
         lighting = configure_unity_lighting(env_params, args, logger)
     except ValueError as exc:
         env.close()
@@ -168,7 +166,11 @@ def _launch_env(args, logger):
         logger.info("Seeded world spawn parameters before the initial Unity reset.")
     logger.info(
         f"Starting Unity ({args.file_name}) scene_id={args.scene_id} "
-        f"dynamic_objects={dynamic_objects} lighting={lighting.mode}"
+        f"dynamic_objects={dynamic_objects} "
+        f"human_speed={motion_speed.human.speed_mps:.3f}m/s "
+        f"vehicle_speed={motion_speed.vehicle.speed_mps:.3f}m/s "
+        f"robot_speed={motion_speed.robot.speed_mps:.3f}m/s "
+        f"lighting={lighting.mode}"
     )
     logger.info(f"Unity launch args: {unity_args}")
     env.reset()

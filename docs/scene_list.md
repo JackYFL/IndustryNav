@@ -1,44 +1,69 @@
-# Supported scenes
+# Supported Scenes
 
-The unified Unity client `scene_all.app` bundles 12 warehouse scenes. The Python side selects which scene to load at runtime via the `scene_id` env parameter (1..12). User-facing tools (`shs/run_headless_benchmark.sh`, `input_points.json`) refer to scenes by anonymized **scene code**, and the wrapper maps code → id.
+The unified Unity client bundles 24 warehouse scenes. Unity uses a zero-based
+build index, so the runtime `scene_id` range is `0..23`. User-facing commands
+use anonymized scene codes and resolve them through `nav.config.SCENE_ID_MAP`.
 
-For runtime environment parameters and the Python/Unity side-channel handshake, see [`scene_files_and_interfaces.md`](scene_files_and_interfaces.md).
+For runtime environment parameters and the Python/Unity side-channel handshake,
+see [`scene_files_and_interfaces.md`](scene_files_and_interfaces.md).
 
-| `scene_code` | `scene_id` |
-|---|---:|
-| `scene1`  | 1  |
-| `scene2`  | 2  |
-| `scene3`  | 3  |
-| `scene4`  | 4  |
-| `scene5`  | 5  |
-| `scene6`  | 6  |
-| `scene7`  | 7  |
-| `scene8`  | 8  |
-| `scene9`  | 9  |
-| `scene10` | 10 |
-| `scene11` | 11 |
-| `scene12` | 12 |
+| `scene_code` | `scene_id` | `scene_code` | `scene_id` |
+|---|---:|---|---:|
+| `scene1`  | 0  | `scene13` | 12 |
+| `scene2`  | 1  | `scene14` | 13 |
+| `scene3`  | 2  | `scene15` | 14 |
+| `scene4`  | 3  | `scene16` | 15 |
+| `scene5`  | 4  | `scene17` | 16 |
+| `scene6`  | 5  | `scene18` | 17 |
+| `scene7`  | 6  | `scene19` | 18 |
+| `scene8`  | 7  | `scene20` | 19 |
+| `scene9`  | 8  | `scene21` | 20 |
+| `scene10` | 9  | `scene22` | 21 |
+| `scene11` | 10 | `scene23` | 22 |
+| `scene12` | 11 | `scene24` | 23 |
 
-## Where these codes show up
+## Benchmark Points
 
-- **`input_points.json`** — top-level keys must be one of the codes above. Each key holds 4 evaluation points (`point1..point4`) with spawn world coordinates + direction + target pixel.
-- **`shs/run_headless_benchmark.sh`** — first positional arg is `<scene_code>`. The wrapper maps to `scene_id` via a hardcoded `case` statement matching the table above.
-- **`nav.scripts.run_benchmark_cell`** — accepts `--scene_id <int>` directly (1..12).
+`input_points.json` defines four benchmark tasks (`point1` through `point4`) for
+every scene from `scene1` through `scene24`. Existing tasks from the former
+12-scene build were migrated to the scene codes matching their physical scenes
+in the new build order.
 
-## Overriding the code → id mapping
+`bash shs/run_Astar.sh all` and the grid runner's default scene selection iterate
+the canonical `SCENE_CODES` order and validate that all 24 scenes have point
+data.
 
-If your `scene_all.app` was built with a different internal ordering, override per invocation:
+## Where The Mapping Is Used
+
+- `nav/config.py`: canonical `SCENE_ID_MAP`.
+- `shs/run_headless_benchmark.sh` and `shs/run_Astar.sh`: import the canonical
+  Python mapping instead of maintaining separate shell tables.
+- `nav.scripts.run_benchmark_grid`: validates requested scene codes against the
+  canonical mapping.
+- `nav.scripts.run_benchmark_cell`: accepts `--scene_id <int>` directly
+  (`0..23`).
+
+## Overriding The Mapping
+
+If a custom Unity client was built with a different internal ordering, override
+the ID for one wrapper invocation:
 
 ```bash
 SCENE_ID=7 bash shs/run_headless_benchmark.sh scene1 google/gemini-3-flash-preview
 ```
 
-If the override turns out to be the right value for your build, update the `case` statement in `shs/run_headless_benchmark.sh` so teammates don't need the env-var workaround.
+For a permanent ordering change, update the Unity build settings and
+`SCENE_ID_MAP` together.
 
-## Adding a new scene
+## Updating Benchmark Points
 
-Add the new scene to the Unity runtime build so the new `scene_id` resolves to it, then:
+When replacing the initial task templates with manually curated routes:
 
-1. Add a new key to `input_points.json` with at least 4 points (world-space spawn + pixel-space target).
-2. Add a new branch to the `case` statement in `shs/run_headless_benchmark.sh`.
-3. Append a row to the table above.
+1. Keep exactly four `point1..point4` entries under the scene code.
+2. Store spawn positions in world X/Z coordinates and targets in canonical
+   minimap pixels.
+3. Run a dry check before launching Unity:
+
+```bash
+DRY_RUN=1 bash shs/run_Astar.sh scene13 point1
+```

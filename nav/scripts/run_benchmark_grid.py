@@ -58,12 +58,19 @@ from nav.config import (
     GRID_CSV_FIELDS,
     LLM_DEFAULT_HISTORY_SIZE,
     SCENE_ID_MAP,
+    SCENE_CODES,
 )
 from nav.harness.coordinates import resolve_minimap_resolution
 from nav.harness.lighting import (
     add_lighting_args,
     lighting_result_fields,
     resolve_lighting_config,
+)
+from nav.harness.motion import (
+    MOTION_CATEGORIES,
+    add_motion_speed_args,
+    motion_speed_result_fields,
+    resolve_motion_speed_config,
 )
 
 
@@ -135,6 +142,12 @@ def build_grid(
     points: Optional[List[str]] = None,
 ) -> List[Cell]:
     pts = load_input_points()
+    unknown_scenes = [scene for scene in scenes if scene not in SCENE_ID_MAP]
+    if unknown_scenes:
+        raise SystemExit(
+            f"Unknown scene code(s): {unknown_scenes}. "
+            f"Expected one of: {list(SCENE_ID_MAP)}"
+        )
     cells: List[Cell] = []
     for scene in scenes:
         if scene not in pts:
@@ -192,6 +205,22 @@ def run_cell(args_dict: dict) -> dict:
     minimap_width = args_dict["minimap_width"]
     minimap_height = args_dict["minimap_height"]
     dynamic_objects = args_dict["dynamic_objects"]
+    motion_args = argparse.Namespace(
+        scene_id=SCENE_ID_MAP[cell.scene_name],
+        scene_name=cell.scene_name,
+        point_id=cell.point_id,
+        seed_id=cell.seed_id,
+        motion_random_seed=args_dict["motion_random_seed"],
+        **{
+            f"{category}_speed_{suffix}": args_dict[
+                f"{category}_speed_{suffix}"
+            ]
+            for category in MOTION_CATEGORIES
+            for suffix in ("mps", "min_mps", "max_mps")
+        },
+    )
+    motion = resolve_motion_speed_config(motion_args)
+    motion_fields = motion_speed_result_fields(motion_args)
     lighting_args = argparse.Namespace(
         scene_id=SCENE_ID_MAP[cell.scene_name],
         scene_name=cell.scene_name,
@@ -244,6 +273,22 @@ def run_cell(args_dict: dict) -> dict:
         "--target_x", str(cell.target_x),
         "--target_y", str(cell.target_y),
     ]
+    motion_configured = False
+    for category in MOTION_CATEGORIES:
+        fixed = args_dict[f"{category}_speed_mps"]
+        minimum = args_dict[f"{category}_speed_min_mps"]
+        maximum = args_dict[f"{category}_speed_max_mps"]
+        if fixed is not None:
+            cmd += [f"--{category}_speed_mps", str(fixed)]
+            motion_configured = True
+        elif minimum is not None:
+            cmd += [
+                f"--{category}_speed_min_mps", str(minimum),
+                f"--{category}_speed_max_mps", str(maximum),
+            ]
+            motion_configured = True
+    if motion_configured:
+        cmd += ["--motion_random_seed", str(args_dict["motion_random_seed"])]
     if args_dict["global_light_intensity"] is not None:
         cmd += ["--global_light_intensity", str(args_dict["global_light_intensity"])]
     if args_dict["light_intensity_multiplier"] is not None:
@@ -286,6 +331,7 @@ def run_cell(args_dict: dict) -> dict:
             "log_path": str(log_path),
             "cell": asdict(cell),
             "dynamic_objects": dynamic_objects,
+            "motion": motion_fields,
             "lighting": lighting_fields,
         }
     except subprocess.TimeoutExpired:
@@ -298,6 +344,7 @@ def run_cell(args_dict: dict) -> dict:
             "log_path": str(log_path),
             "cell": asdict(cell),
             "dynamic_objects": dynamic_objects,
+            "motion": motion_fields,
             "lighting": lighting_fields,
             "error": "timeout",
         }
@@ -311,6 +358,7 @@ def run_cell(args_dict: dict) -> dict:
             "log_path": str(log_path),
             "cell": asdict(cell),
             "dynamic_objects": dynamic_objects,
+            "motion": motion_fields,
             "lighting": lighting_fields,
             "error": f"{type(e).__name__}: {e}",
         }
@@ -332,6 +380,7 @@ def append_grid_row(grid_csv: Path, status: dict):
         "vision_input": cell["vision_input"],
         "history_size": cell["history_size"],
         "dynamic_objects": status["dynamic_objects"],
+        **status["motion"],
         **status["lighting"],
         "ok": status["ok"],
         "returncode": status["returncode"],
@@ -360,6 +409,7 @@ def append_failure_row(failures_csv: Path, status: dict, attempts: int):
         "vision_input": cell["vision_input"],
         "history_size": cell["history_size"],
         "dynamic_objects": status.get("dynamic_objects", ""),
+        **status.get("motion", {}),
         **status.get("lighting", {}),
         "attempts": attempts,
         "returncode": status["returncode"],
@@ -381,8 +431,15 @@ def parse_args():
     p = argparse.ArgumentParser(description="Grid runner for nav.scripts.run_benchmark_cell.")
     p.add_argument("--models", nargs="+", required=True,
                    help="OpenRouter model ids to benchmark. Example: anthropic/claude-sonnet-4.6 google/gemini-3-flash-preview")
-    p.add_argument("--scenes", nargs="+", default=list(SCENE_ID_MAP.keys()),
-                   help="Scene names to run; defaults to all 12.")
+    p.add_argument(
+        "--scenes",
+        nargs="+",
+        default=None,
+        help=(
+            "Scene codes to run (scene1..scene24). Defaults to all 24 scenes "
+            "in config.SCENE_CODES."
+        ),
+    )
     p.add_argument("--points", nargs="*", default=None,
                    help="Restrict to specific point_ids (e.g. point1 point2). Default: all points per scene.")
     p.add_argument("--seeds", nargs="+", default=["0", "1", "2"],
@@ -416,6 +473,7 @@ def parse_args():
         default="moving",
         help="Run environment objects normally or freeze them for every grid cell.",
     )
+    add_motion_speed_args(p)
     add_lighting_args(p)
     p.add_argument("--max_retries", type=int, default=2,
                    help="Retry a failed cell this many times before logging it to failures.csv.")
@@ -462,6 +520,7 @@ def resolve_file_name(arg_file_name: str) -> str:
 def main():
     args = parse_args()
     try:
+        motion = resolve_motion_speed_config(args)
         lighting = resolve_lighting_config(args)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
@@ -478,9 +537,10 @@ def main():
         raise SystemExit(str(exc)) from exc
 
     vision_modes = {"on": [True], "off": [False], "both": [True, False]}[args.vision_input]
+    scenes = args.scenes if args.scenes is not None else list(SCENE_CODES)
     cells = build_grid(
         models=args.models,
-        scenes=args.scenes,
+        scenes=scenes,
         seeds=args.seeds,
         vision_modes=vision_modes,
         history_sizes=args.history_sizes,
@@ -508,12 +568,23 @@ def main():
     if use_xvfb and not shutil.which("xvfb-run"):
         raise SystemExit("xvfb-run not found on PATH. `sudo apt install xvfb` or pass --no_xvfb.")
 
+    motion_label = ",".join(
+        f"{category}="
+        + (
+            f"{setting.mode}:{setting.speed_mps:.3f}m/s"
+            if setting.speed_mps is not None
+            else "authored"
+        )
+        for category in MOTION_CATEGORIES
+        for setting in (motion.for_category(category),)
+    )
     print(f"[grid] cells={len(cells)} | concurrency={args.max_concurrency} | "
           f"max_steps={args.max_steps} | vision={args.vision_input} | "
           f"reach_m={args.reach_m:g} | "
           f"ego={args.ego_width}x{args.ego_height} | "
           f"minimap={args.minimap_width}x{args.minimap_height} | "
           f"dynamic_objects={args.dynamic_objects} | "
+          f"motion_speed={motion_label} | "
           f"lighting={lighting.mode} | "
           f"file={file_name} | xvfb={use_xvfb}", flush=True)
 
@@ -548,6 +619,14 @@ def main():
                         "minimap_width": args.minimap_width,
                         "minimap_height": args.minimap_height,
                         "dynamic_objects": args.dynamic_objects,
+                        "motion_random_seed": args.motion_random_seed,
+                        **{
+                            f"{category}_speed_{suffix}": getattr(
+                                args, f"{category}_speed_{suffix}"
+                            )
+                            for category in MOTION_CATEGORIES
+                            for suffix in ("mps", "min_mps", "max_mps")
+                        },
                         "global_light_intensity": args.global_light_intensity,
                         "light_intensity_multiplier": args.light_intensity_multiplier,
                         "light_intensity_min": args.light_intensity_min,
@@ -572,6 +651,7 @@ def main():
                         "duration_sec": 0, "frame_save_dir": str(c.frame_save_dir),
                         "log_path": str(c.frame_save_dir / "run.log"),
                         "cell": asdict(c), "dynamic_objects": args.dynamic_objects,
+                        "motion": motion_speed_result_fields(args),
                         "lighting": lighting_result_fields(args),
                         "error": f"future failed: {type(e).__name__}: {e}",
                     }

@@ -89,7 +89,8 @@ DRY_RUN=1 bash shs/run_Astar.sh scene1 point1
 
 `shs/run_Astar.sh` handles the repetitive setup:
 
-1. Validates `scene1`-`scene12` or `all`.
+1. Validates `scene1`-`scene24` or `all`; `all` iterates the canonical 24-scene
+   order and requires point data for every scene.
 2. Maps scene code to `scene_id`.
 3. Reads the selected point(s) from `input_points.json`.
 4. Passes start world coordinates and target minimap pixels into `run_benchmark_cell`.
@@ -146,6 +147,10 @@ results.csv
 unity_log.txt
 ```
 
+The run summary in `results.csv` is world-coordinate only. It records the
+initial, target, and final Unity X/Z positions plus `distance_world` in meters;
+pixel coordinates remain available in `astar_actions.csv` for visualization.
+
 When `ASTAR_DEBUG_VIZ=1`, debug images are written to:
 
 ```text
@@ -172,9 +177,8 @@ The most useful environment variables are:
 | `HIDE_UNITY_RED_MARKER` | `1` | Removes the old Unity red marker when Python draws the vector marker. |
 | `ASTAR_DEBUG_VIZ` | `0` | Saves walkable-grid/path debug frames when enabled. |
 | `ASTAR_DEBUG_DIR` | unset | Explicit debug image directory. |
-| `ASTAR_OBSTACLE_INFLATE_PX` | `8` | Dilates minimap obstacles before planning. |
-| `ASTAR_MARKER_CLEAR_PX` | `16` | Clears current/target marker pixels from the obstacle mask. |
-| `ASTAR_PROXY_STOP_REAL_DIST_M` | `4.9` | World-distance threshold for switching from a reached proxy to direct terminal approach. |
+| `ASTAR_OBSTACLE_CLEARANCE_M` | `0.6` | Physical clearance around minimap obstacles in Unity world meters. |
+| `ASTAR_PROXY_STOP_DISTANCE_M` | `4.9` | World-distance threshold for switching from a reached proxy to direct terminal approach. |
 | `RUN_NAME` | `astar` | Output subfolder name. |
 | `DRY_RUN` | `0` | Prints the command without launching Unity. |
 
@@ -182,10 +186,10 @@ There is one wrapper-level special case:
 
 - `scene1/point4` uses `MAX_STEPS=100` unless `MAX_STEPS` is explicitly set.
 
-World coordinates are required for success, waypoint spacing, waypoint arrival,
-off-path replanning, lookahead, terminal approach, and proxy approach. Pixel
-values remain only for minimap image operations such as obstacle masks and
-marker rendering.
+World coordinates are required for success, grid resolution, obstacle
+clearance, waypoint spacing, waypoint arrival, off-path replanning, lookahead,
+terminal approach, stuck recovery, and proxy approach. Pixel values remain
+internal implementation details for raster masks and marker rendering.
 
 ## Tuning Examples
 
@@ -198,7 +202,7 @@ MAX_STEPS=120 bash shs/run_Astar.sh scene1 point4
 Make obstacle avoidance more conservative:
 
 ```bash
-ASTAR_OBSTACLE_INFLATE_PX=12 bash shs/run_Astar.sh scene1 point1
+ASTAR_OBSTACLE_CLEARANCE_M=0.9 bash shs/run_Astar.sh scene1 point1
 ```
 
 Save only minimap/debug outputs:
@@ -219,9 +223,9 @@ Resize the minimap while preserving its aspect ratio:
 MINIMAP_WIDTH=431 bash shs/run_Astar.sh scene1 point1
 ```
 
-The saved minimap and A* runtime grid are `431 x 256`. Canonical target
-coordinates and pixel parameters are scaled by `0.5` at runtime, while CSV
-evaluation output remains in the canonical `862 x 512` space.
+The saved minimap is `431 x 256`. A* converts its meter-based grid and clearance
+settings to that runtime resolution using the calibrated minimap-to-world
+projection, while CSV pixel output remains in the canonical `862 x 512` space.
 
 Keep the raw Unity red marker visible:
 
@@ -232,7 +236,7 @@ HIDE_UNITY_RED_MARKER=0 bash shs/run_Astar.sh scene1 point1
 Use a custom output folder name:
 
 ```bash
-RUN_NAME=astar_inflate12 ASTAR_OBSTACLE_INFLATE_PX=12 bash shs/run_Astar.sh scene1 point1
+RUN_NAME=astar_clearance09 ASTAR_OBSTACLE_CLEARANCE_M=0.9 bash shs/run_Astar.sh scene1 point1
 ```
 
 ## Direct Python Invocation
@@ -243,7 +247,7 @@ For wrapper-free debugging, call the benchmark cell directly:
 python -m nav.scripts.run_benchmark_cell \
   --baseline astar \
   --file_name auto \
-  --scene_id 1 \
+  --scene_id 0 \
   --scene_name scene1 \
   --point_id point1 \
   --max_steps 70 \
@@ -256,9 +260,8 @@ python -m nav.scripts.run_benchmark_cell \
   --hide_unity_red_marker \
   --frame_save_dir outputs/scene1/point1/astar \
   --model_id astar \
-  --astar_obstacle_inflate_px 8 \
-  --astar_marker_clear_px 16 \
-  --astar_proxy_stop_real_dist_m 4.9 \
+  --astar_obstacle_clearance_m 0.6 \
+  --astar_proxy_stop_distance_m 4.9 \
   --init_world_x 31.0 \
   --init_world_z 49.63 \
   --init_curr_direction 180 \
@@ -283,7 +286,8 @@ The planner:
 
 1. Converts the minimap into a walkable/blocked grid.
 2. Clears marker artifacts around the current and target pixels.
-3. Inflates obstacle regions by `ASTAR_OBSTACLE_INFLATE_PX`.
+3. Converts `ASTAR_OBSTACLE_CLEARANCE_M` through the calibrated projection and
+   inflates obstacle regions with an axis-aware elliptical kernel.
 4. Finds a path to the target or a reachable proxy near the target.
 5. Converts path samples to world coordinates for metric waypoint spacing,
    lookahead, path-deviation replanning, and heading control.
@@ -309,14 +313,14 @@ If A* immediately stops:
 
 If A* drives into shelves or corners:
 
-- Increase `ASTAR_OBSTACLE_INFLATE_PX`.
+- Increase `ASTAR_OBSTACLE_CLEARANCE_M`.
 - Check whether the obstacle appears in the minimap mask.
 - Verify `MARKER_SOURCE=vector` unless you explicitly need legacy red-marker detection.
 
 If the target is unreachable:
 
 - Inspect `astar_debug/` for the reachable proxy.
-- Adjust `ASTAR_PROXY_STOP_REAL_DIST_M` only to control when the final direct approach starts. Success still requires `REACH_M`.
+- Adjust `ASTAR_PROXY_STOP_DISTANCE_M` only to control when the final direct approach starts. Success still requires `REACH_M`.
 - Confirm the target pixel in `input_points.json` is inside the intended navigable region.
 
 If the current marker appears offset:

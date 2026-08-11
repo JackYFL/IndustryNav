@@ -90,8 +90,6 @@ def _log_metrics(metrics: dict) -> None:
     logger.info(f"Distance ratio: {metrics['distance_ratio']:.4f}")
     if metrics["final_distance_world"] is not None:
         logger.info(f"Final distance world: {metrics['final_distance_world']:.2f} m")
-    if metrics["final_distance_px"] is not None:
-        logger.info(f"Final distance px: {metrics['final_distance_px']:.2f}")
     if metrics["stop_reason"]:
         logger.info(f"Stop reason: {metrics['stop_reason']}")
     logger.info(f"Warning steps: {metrics['warning_steps']}")
@@ -135,12 +133,6 @@ def main() -> None:
             ]
             if world_dists:
                 logger.info(f"Average final distance world: {np.mean(world_dists):.2f} m")
-            dists = [
-                float(r['final_distance_px'])
-                for r in ok_rows if r['final_distance_px'] is not None
-            ]
-            if dists:
-                logger.info(f"Average final distance px: {np.mean(dists):.2f}")
             logger.info(
                 f"Average warning rate: "
                 f"{np.mean([float(r['warning_rate']) for r in ok_rows]):.4f}"

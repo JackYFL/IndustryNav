@@ -27,7 +27,7 @@ from nav.eval.metrics import EvaluateOptions, evaluate_run
 AGGREGATE_ROW_FIELDS: List[str] = [
     "scene_name", "point_id", "model",
     "success_ratio", "efficiency_steps", "distance_ratio",
-    "final_distance_world", "final_distance_px", "stop_reason",
+    "final_distance_world", "stop_reason",
     "warning_rate", "warning_steps", "total_steps",
     "collision_rate", "collision_steps", "forward_steps",
     "error", "input_dir",
@@ -52,7 +52,6 @@ def _error_row(input_dir: Path, error: Exception) -> dict:
         "efficiency_steps": 0,
         "distance_ratio": 0.0,
         "final_distance_world": None,
-        "final_distance_px": None,
         "stop_reason": "",
         "warning_rate": 0.0,
         "warning_steps": 0,
