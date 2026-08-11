@@ -162,7 +162,7 @@ The most useful environment variables are:
 |---|---:|---|
 | `MAX_STEPS` | `70` | Per-point decision-step budget. |
 | `SIM_STEPS_PER_DECISION` | `2` | Unity simulation steps per A* action. |
-| `REACH_PX` | `20` | Success radius in visual minimap pixels. |
+| `REACH_M` | `2.0` | Success radius in Unity world meters. |
 | `MODALITIES` | `ego,minimap,depth` | Saved sensor modalities. |
 | `EGO_WIDTH`, `EGO_HEIGHT` | `512`, `512` | Egocentric RGB and depth sensor resolution. |
 | `MINIMAP_WIDTH` | `862` | Optional minimap width; derived from height when only height is set. |
@@ -174,14 +174,18 @@ The most useful environment variables are:
 | `ASTAR_DEBUG_DIR` | unset | Explicit debug image directory. |
 | `ASTAR_OBSTACLE_INFLATE_PX` | `8` | Dilates minimap obstacles before planning. |
 | `ASTAR_MARKER_CLEAR_PX` | `16` | Clears current/target marker pixels from the obstacle mask. |
-| `ASTAR_PROXY_STOP_REAL_DIST_PX` | `65` | Stop threshold when the target is blocked and a reachable proxy is used. |
+| `ASTAR_PROXY_STOP_REAL_DIST_M` | `4.9` | World-distance threshold for switching from a reached proxy to direct terminal approach. |
 | `RUN_NAME` | `astar` | Output subfolder name. |
 | `DRY_RUN` | `0` | Prints the command without launching Unity. |
 
-There are two wrapper-level special cases:
+There is one wrapper-level special case:
 
 - `scene1/point4` uses `MAX_STEPS=100` unless `MAX_STEPS` is explicitly set.
-- `scene1/point2` uses `ASTAR_OBSTACLE_INFLATE_PX=24` unless that variable is explicitly set.
+
+World coordinates are required for success, waypoint spacing, waypoint arrival,
+off-path replanning, lookahead, terminal approach, and proxy approach. Pixel
+values remain only for minimap image operations such as obstacle masks and
+marker rendering.
 
 ## Tuning Examples
 
@@ -194,7 +198,7 @@ MAX_STEPS=120 bash shs/run_Astar.sh scene1 point4
 Make obstacle avoidance more conservative:
 
 ```bash
-ASTAR_OBSTACLE_INFLATE_PX=20 bash shs/run_Astar.sh scene1 point2
+ASTAR_OBSTACLE_INFLATE_PX=12 bash shs/run_Astar.sh scene1 point1
 ```
 
 Save only minimap/debug outputs:
@@ -228,7 +232,7 @@ HIDE_UNITY_RED_MARKER=0 bash shs/run_Astar.sh scene1 point1
 Use a custom output folder name:
 
 ```bash
-RUN_NAME=astar_inflate20 ASTAR_OBSTACLE_INFLATE_PX=20 bash shs/run_Astar.sh scene1 point2
+RUN_NAME=astar_inflate12 ASTAR_OBSTACLE_INFLATE_PX=12 bash shs/run_Astar.sh scene1 point1
 ```
 
 ## Direct Python Invocation
@@ -246,7 +250,7 @@ python -m nav.scripts.run_benchmark_cell \
   --sim_steps_per_decision 2 \
   --ego_width 512 \
   --ego_height 512 \
-  --reach_px 20 \
+  --reach_m 2.0 \
   --modalities ego,minimap,depth \
   --marker_source vector \
   --hide_unity_red_marker \
@@ -254,7 +258,7 @@ python -m nav.scripts.run_benchmark_cell \
   --model_id astar \
   --astar_obstacle_inflate_px 8 \
   --astar_marker_clear_px 16 \
-  --astar_proxy_stop_real_dist_px 65 \
+  --astar_proxy_stop_real_dist_m 4.9 \
   --init_world_x 31.0 \
   --init_world_z 49.63 \
   --init_curr_direction 180 \
@@ -272,6 +276,7 @@ At each decision step, the planner receives:
 - current marker pixel and heading;
 - target pixel;
 - current Unity world position;
+- target Unity world position and a minimap-pixel-to-world projection;
 - A* tuning parameters.
 
 The planner:
@@ -280,7 +285,9 @@ The planner:
 2. Clears marker artifacts around the current and target pixels.
 3. Inflates obstacle regions by `ASTAR_OBSTACLE_INFLATE_PX`.
 4. Finds a path to the target or a reachable proxy near the target.
-5. Selects a waypoint and converts it into one of:
+5. Converts path samples to world coordinates for metric waypoint spacing,
+   lookahead, path-deviation replanning, and heading control.
+6. Selects a waypoint and converts it into one of:
 
 ```text
 forward
@@ -295,7 +302,8 @@ A* intentionally uses the annotation action space in `ACTION_SPACE_ANNOTATION`, 
 
 If A* immediately stops:
 
-- Check whether the current pixel is already within `REACH_PX` of the target.
+- Check whether `distance_world` is already within `REACH_M` of the target.
+- Check the target side-channel acknowledgement if world mapping is unavailable.
 - Check `astar_actions.csv` for `stop_reason`.
 - Enable `ASTAR_DEBUG_VIZ=1` and inspect the target/proxy debug frame.
 
@@ -308,7 +316,7 @@ If A* drives into shelves or corners:
 If the target is unreachable:
 
 - Inspect `astar_debug/` for the reachable proxy.
-- Increase or decrease `ASTAR_PROXY_STOP_REAL_DIST_PX` depending on whether proxy stopping is too strict or too loose.
+- Adjust `ASTAR_PROXY_STOP_REAL_DIST_M` only to control when the final direct approach starts. Success still requires `REACH_M`.
 - Confirm the target pixel in `input_points.json` is inside the intended navigable region.
 
 If the current marker appears offset:

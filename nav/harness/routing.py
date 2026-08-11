@@ -71,9 +71,11 @@ def execute_decision(baseline: str, payload: dict, result_container: dict) -> No
                 curr_xy=payload["curr_xy"],
                 target_xy=payload["target_xy"],
                 agent_theta=payload["agent_theta"],
-                reach_px=payload["reach_px"],
+                reach_m=payload["reach_m"],
                 step=payload["step"],
                 curr_world_xz=payload["curr_world_xz"],
+                target_world_xz=payload.get("target_world_xz"),
+                point_to_world=payload.get("point_to_world"),
             )
             result_container["action"] = action
             result_container["reasoning"] = reasoning

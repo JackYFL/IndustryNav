@@ -21,8 +21,8 @@
 #       Per-point decision-step cap. Default: 70.
 #   SIM_STEPS_PER_DECISION
 #       Unity simulation steps per A* action. Default: 2.
-#   REACH_PX
-#       Success radius in minimap pixels. Default: 20.
+#   REACH_M
+#       Success radius in Unity world meters. Default: 2.0.
 #   MODALITIES
 #       Sensor modalities to save. Default: ego,minimap,depth.
 #   EGO_WIDTH / EGO_HEIGHT
@@ -33,6 +33,14 @@
 #   DYNAMIC_OBJECTS
 #       moving | static. Controls environment motion without freezing the
 #       navigation agent. Default: moving.
+#   LIGHT_INTENSITY_MULTIPLIER
+#       Optional fixed global light multiplier. GLOBAL_LIGHT_INTENSITY remains
+#       available as a compatibility alias.
+#   LIGHT_INTENSITY_MIN / LIGHT_INTENSITY_MAX
+#       Optional deterministic per-run multiplier range. Do not combine with
+#       LIGHT_INTENSITY_MULTIPLIER.
+#   LIGHT_RANDOM_SEED / LIGHT_FIXED_EXPOSURE
+#       Lighting seed and HDRP fixed exposure EV. Defaults: 0 / 9.0.
 #   MARKER_SOURCE
 #       vector | red. Default: vector. vector draws the Python-side red
 #       dot/arrow from Unity vector observations; red uses legacy HSV detection.
@@ -45,13 +53,12 @@
 #       Optional explicit debug image directory. Default:
 #       <frame_save_dir>/astar_debug when ASTAR_DEBUG_VIZ=1.
 #   ASTAR_OBSTACLE_INFLATE_PX
-#       Optional obstacle dilation in minimap pixels. Default: 8, except
-#       scene1/point2 defaults to 24 to avoid the shelf collider corner.
+#       Optional obstacle dilation in minimap pixels. Default: 8.
 #   ASTAR_MARKER_CLEAR_PX
 #       Optional marker clearing radius. Default: 16.
-#   ASTAR_PROXY_STOP_REAL_DIST_PX
-#       Optional real-target distance threshold for blocked-target proxy stop.
-#       Default: 65.
+#   ASTAR_PROXY_STOP_REAL_DIST_M
+#       Meter threshold for switching from a reached proxy to direct terminal
+#       approach. Default: 4.9.
 #   DRY_RUN
 #       Set to 1 to print commands without launching Unity.
 #   BASE_PORT_START
@@ -95,18 +102,18 @@ fi
 
 scene_id_for() {
   case "$1" in
-    scene1)  echo 1  ;;
-    scene2)  echo 2  ;;
-    scene3)  echo 3  ;;
-    scene4)  echo 4  ;;
-    scene5)  echo 5  ;;
-    scene6)  echo 6  ;;
-    scene7)  echo 7  ;;
-    scene8)  echo 8  ;;
-    scene9)  echo 9  ;;
-    scene10) echo 10 ;;
-    scene11) echo 11 ;;
-    scene12) echo 12 ;;
+    scene1)  echo 0  ;;
+    scene2)  echo 1  ;;
+    scene3)  echo 2  ;;
+    scene4)  echo 3  ;;
+    scene5)  echo 4  ;;
+    scene6)  echo 5  ;;
+    scene7)  echo 6  ;;
+    scene8)  echo 7  ;;
+    scene9)  echo 8  ;;
+    scene10) echo 9  ;;
+    scene11) echo 10 ;;
+    scene12) echo 11 ;;
     *)       return 1 ;;
   esac
 }
@@ -160,15 +167,28 @@ fi
 MAX_STEPS_WAS_SET="${MAX_STEPS+x}"
 MAX_STEPS="${MAX_STEPS:-70}"
 SIM_STEPS_PER_DECISION="${SIM_STEPS_PER_DECISION:-2}"
-REACH_PX="${REACH_PX:-20}"
+REACH_M="${REACH_M:-2.0}"
 MODALITIES="${MODALITIES:-ego,minimap,depth}"
 EGO_WIDTH="${EGO_WIDTH:-512}"
 EGO_HEIGHT="${EGO_HEIGHT:-512}"
 MINIMAP_WIDTH="${MINIMAP_WIDTH:-}"
 MINIMAP_HEIGHT="${MINIMAP_HEIGHT:-}"
 DYNAMIC_OBJECTS="${DYNAMIC_OBJECTS:-moving}"
+LIGHT_INTENSITY_MULTIPLIER="${LIGHT_INTENSITY_MULTIPLIER:-${GLOBAL_LIGHT_INTENSITY:-}}"
+LIGHT_INTENSITY_MIN="${LIGHT_INTENSITY_MIN:-}"
+LIGHT_INTENSITY_MAX="${LIGHT_INTENSITY_MAX:-}"
+LIGHT_RANDOM_SEED="${LIGHT_RANDOM_SEED:-0}"
+LIGHT_FIXED_EXPOSURE="${LIGHT_FIXED_EXPOSURE:-9.0}"
 if [[ "$DYNAMIC_OBJECTS" != "moving" && "$DYNAMIC_OBJECTS" != "static" ]]; then
   echo "DYNAMIC_OBJECTS must be 'moving' or 'static', got: $DYNAMIC_OBJECTS"
+  exit 1
+fi
+if [[ -n "$LIGHT_INTENSITY_MULTIPLIER" && ( -n "$LIGHT_INTENSITY_MIN" || -n "$LIGHT_INTENSITY_MAX" ) ]]; then
+  echo "LIGHT_INTENSITY_MULTIPLIER cannot be combined with LIGHT_INTENSITY_MIN/MAX."
+  exit 1
+fi
+if [[ -n "$LIGHT_INTENSITY_MIN" && -z "$LIGHT_INTENSITY_MAX" ]] || [[ -z "$LIGHT_INTENSITY_MIN" && -n "$LIGHT_INTENSITY_MAX" ]]; then
+  echo "LIGHT_INTENSITY_MIN and LIGHT_INTENSITY_MAX must be set together."
   exit 1
 fi
 if [[ -z "$MINIMAP_WIDTH" && -z "$MINIMAP_HEIGHT" ]]; then
@@ -179,7 +199,7 @@ HIDE_UNITY_RED_MARKER="${HIDE_UNITY_RED_MARKER:-1}"
 RUN_NAME="${RUN_NAME:-astar}"
 ASTAR_DEBUG_VIZ="${ASTAR_DEBUG_VIZ:-0}"
 ASTAR_MARKER_CLEAR_PX="${ASTAR_MARKER_CLEAR_PX:-16}"
-ASTAR_PROXY_STOP_REAL_DIST_PX="${ASTAR_PROXY_STOP_REAL_DIST_PX:-65}"
+ASTAR_PROXY_STOP_REAL_DIST_M="${ASTAR_PROXY_STOP_REAL_DIST_M:-4.9}"
 DRY_RUN="${DRY_RUN:-0}"
 BASE_PORT_START="${BASE_PORT_START:-5507}"
 
@@ -199,7 +219,8 @@ echo "[astar] scenes=${SCENES[*]}"
 if [[ -n "$POINT_FILTER" ]]; then
   echo "[astar] point_filter=${POINT_FILTER}"
 fi
-echo "[astar] max_steps=${MAX_STEPS} sim_steps_per_decision=${SIM_STEPS_PER_DECISION} reach_px=${REACH_PX} ego=${EGO_WIDTH}x${EGO_HEIGHT} minimap=${MINIMAP_WIDTH:-auto}x${MINIMAP_HEIGHT:-auto} dynamic_objects=${DYNAMIC_OBJECTS}"
+echo "[astar] max_steps=${MAX_STEPS} sim_steps_per_decision=${SIM_STEPS_PER_DECISION} reach_m=${REACH_M} ego=${EGO_WIDTH}x${EGO_HEIGHT} minimap=${MINIMAP_WIDTH:-auto}x${MINIMAP_HEIGHT:-auto} dynamic_objects=${DYNAMIC_OBJECTS}"
+echo "[astar] lighting=fixed:${LIGHT_INTENSITY_MULTIPLIER:-none} range:${LIGHT_INTENSITY_MIN:-none}-${LIGHT_INTENSITY_MAX:-none} seed=${LIGHT_RANDOM_SEED} exposure=${LIGHT_FIXED_EXPOSURE}"
 echo "[astar] marker_source=${MARKER_SOURCE}"
 echo "[astar] hide_unity_red_marker=${HIDE_UNITY_RED_MARKER}"
 
@@ -247,9 +268,6 @@ PY
       max_steps_for_point=100
     fi
     astar_obstacle_inflate_px="${ASTAR_OBSTACLE_INFLATE_PX:-8}"
-    if [[ -z "${ASTAR_OBSTACLE_INFLATE_PX:-}" && "$scene_name" == "scene1" && "$point_id" == "point2" ]]; then
-      astar_obstacle_inflate_px=24
-    fi
 
     cmd=("$PYTHON_BIN" -m nav.scripts.run_benchmark_cell
          --baseline astar
@@ -260,18 +278,18 @@ PY
          --worker_id "$worker_id"
          --base_port "$base_port"
          --max_steps "$max_steps_for_point"
+         --reach_m "$REACH_M"
          --sim_steps_per_decision "$SIM_STEPS_PER_DECISION"
          --ego_width "$EGO_WIDTH"
          --ego_height "$EGO_HEIGHT"
          --dynamic_objects "$DYNAMIC_OBJECTS"
-         --reach_px "$REACH_PX"
          --modalities "$MODALITIES"
          --marker_source "$MARKER_SOURCE"
          --frame_save_dir "$frame_save_dir"
          --model_id astar
          --astar_obstacle_inflate_px "$astar_obstacle_inflate_px"
          --astar_marker_clear_px "$ASTAR_MARKER_CLEAR_PX"
-         --astar_proxy_stop_real_dist_px "$ASTAR_PROXY_STOP_REAL_DIST_PX"
+         --astar_proxy_stop_real_dist_m "$ASTAR_PROXY_STOP_REAL_DIST_M"
          --init_world_x "$init_wx"
          --init_world_z "$init_wz"
          --init_curr_direction "$init_dir"
@@ -283,6 +301,14 @@ PY
     fi
     if [[ -n "$MINIMAP_HEIGHT" ]]; then
       cmd+=(--minimap_height "$MINIMAP_HEIGHT")
+    fi
+    if [[ -n "$LIGHT_INTENSITY_MULTIPLIER" ]]; then
+      cmd+=(--light_intensity_multiplier "$LIGHT_INTENSITY_MULTIPLIER")
+    elif [[ -n "$LIGHT_INTENSITY_MIN" ]]; then
+      cmd+=(--light_intensity_min "$LIGHT_INTENSITY_MIN" --light_intensity_max "$LIGHT_INTENSITY_MAX")
+    fi
+    if [[ -n "$LIGHT_INTENSITY_MULTIPLIER" || -n "$LIGHT_INTENSITY_MIN" ]]; then
+      cmd+=(--light_random_seed "$LIGHT_RANDOM_SEED" --light_fixed_exposure "$LIGHT_FIXED_EXPOSURE")
     fi
 
     if [[ "$HIDE_UNITY_RED_MARKER" == "0" || "$HIDE_UNITY_RED_MARKER" == "false" || "$HIDE_UNITY_RED_MARKER" == "off" ]]; then
@@ -304,7 +330,7 @@ PY
 
     echo "[astar] output=${frame_save_dir}"
     echo "[astar] max_steps_for_point=${max_steps_for_point}"
-    echo "[astar] obstacle_inflate_px=${astar_obstacle_inflate_px} marker_clear_px=${ASTAR_MARKER_CLEAR_PX} proxy_stop_real_dist_px=${ASTAR_PROXY_STOP_REAL_DIST_PX}"
+    echo "[astar] obstacle_inflate_px=${astar_obstacle_inflate_px} marker_clear_px=${ASTAR_MARKER_CLEAR_PX} proxy_terminal_dist_m=${ASTAR_PROXY_STOP_REAL_DIST_M}"
     if [[ "$DRY_RUN" == "1" || "$DRY_RUN" == "true" || "$DRY_RUN" == "on" ]]; then
       printf '[astar] dry-run command:'
       printf ' %q' "${cmd[@]}"

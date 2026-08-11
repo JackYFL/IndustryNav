@@ -110,8 +110,8 @@ class GlobalPlannerAgent:
 
     def _fallback_output(self, input_data: GlobalPlannerInput) -> GlobalPlannerOutput:
         """Provide fallback output if LLM fails."""
-        # Simple heuristic: if far, go forward; if close, stop
-        if input_data.distance_to_target > 10:
+        # Simple heuristic using the shared world-distance success threshold.
+        if input_data.distance_to_target > input_data.reach_threshold_m:
             action = "forward"
             reason = "Fallback: Moving forward toward distant target"
         else:

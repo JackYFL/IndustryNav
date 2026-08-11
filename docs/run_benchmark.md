@@ -94,9 +94,14 @@ This is the general benchmark wrapper for `llm`, `astar`, `bc`, and `random`.
 | `SCENE_ALL_BIN` | `auto` | Linux Unity runtime path override. |
 | `SCENE_ID` | derived from `scene_code` | Overrides the wrapper's `scene_code -> scene_id` mapping. Useful only if a local runtime build has a different scene order. |
 | `MAX_STEPS` | `70` | Per-point decision-step budget. |
+| `REACH_M` | `2.0` | Success radius in Unity world meters. |
 | `EGO_WIDTH` | `512` | Width of the egocentric RGB and depth observations and saved frames. |
 | `EGO_HEIGHT` | `512` | Height of the egocentric RGB and depth observations and saved frames. |
 | `DYNAMIC_OBJECTS` | `moving` | `moving` runs environment motion; `static` freezes environment objects while leaving the navigation agent controllable. |
+| `GLOBAL_LIGHT_INTENSITY` | unset | Optional fixed global multiplier for Unity scene lighting. `LIGHT_INTENSITY_MULTIPLIER` is an equivalent alias. |
+| `LIGHT_INTENSITY_MIN`, `LIGHT_INTENSITY_MAX` | unset | Optional deterministic per-run multiplier range. Both values are required. |
+| `LIGHT_RANDOM_SEED` | `0` | Base seed for range sampling. |
+| `LIGHT_FIXED_EXPOSURE` | `9.0` | HDRP fixed exposure EV used when runtime lighting is enabled. |
 | `PYTHON_BIN` | `<repo>/.venv/bin/python` | Python interpreter used by the wrapper. |
 | `USE_XVFB` | `1` on Linux | Whether to wrap Unity with `xvfb-run` on Linux. |
 | `XVFB_SCREEN` | `1724x1024x24` | Virtual display size/depth passed to `xvfb-run`. |
@@ -117,23 +122,29 @@ This is a convenience wrapper around `run_benchmark_cell --baseline astar`. It s
 | `INPUT_FILE` | `<repo>/input_points.json` | Alternate point JSON. |
 | `MAX_STEPS` | `70` | Per-point step budget. `scene1/point4` defaults to `100` unless this is explicitly set. |
 | `SIM_STEPS_PER_DECISION` | `2` | Unity simulation steps per A* action. |
-| `REACH_PX` | `20` | Success radius in visual minimap pixels. |
+| `REACH_M` | `2.0` | Success radius in Unity world meters. |
 | `MODALITIES` | `ego,minimap,depth` | Saved sensor streams. |
 | `EGO_WIDTH`, `EGO_HEIGHT` | `512`, `512` | Egocentric RGB and depth observation size. |
 | `MINIMAP_WIDTH`, `MINIMAP_HEIGHT` | `862`, derived | Set either minimap dimension; the other is derived using `862:512`. |
 | `DYNAMIC_OBJECTS` | `moving` | `moving` or `static`; forwarded to `--dynamic_objects`. |
+| `LIGHT_INTENSITY_MULTIPLIER` | unset | Fixed global light multiplier. |
+| `LIGHT_INTENSITY_MIN`, `LIGHT_INTENSITY_MAX` | unset | Deterministic per-run multiplier range. |
+| `LIGHT_RANDOM_SEED`, `LIGHT_FIXED_EXPOSURE` | `0`, `9.0` | Sampling seed and fixed HDRP exposure EV. |
 | `MARKER_SOURCE` | `vector` | `vector` projects Unity position/heading; `red` uses legacy red-marker detection. |
 | `HIDE_UNITY_RED_MARKER` | `1` | Hide old Unity red marker when drawing Python-side vector marker. |
 | `RUN_NAME` | `astar` | Output directory name under `outputs/<scene_code>/<point_id>/`. |
 | `ASTAR_DEBUG_VIZ` | `0` | Save A* walkable-grid/path debug frames. |
 | `ASTAR_DEBUG_DIR` | `<frame_save_dir>/astar_debug` | Explicit debug frame directory. |
-| `ASTAR_OBSTACLE_INFLATE_PX` | `8` | Obstacle dilation in minimap pixels. `scene1/point2` defaults to `24` unless this is explicitly set. |
+| `ASTAR_OBSTACLE_INFLATE_PX` | `8` | Obstacle dilation in minimap pixels. |
 | `ASTAR_MARKER_CLEAR_PX` | `16` | Radius cleared around current/target marker artifacts. |
-| `ASTAR_PROXY_STOP_REAL_DIST_PX` | `65` | Stop threshold for blocked-target proxy stopping. |
+| `ASTAR_PROXY_STOP_REAL_DIST_M` | `4.9` | World-distance threshold for switching from a reached proxy to direct terminal approach. |
 | `DRY_RUN` | `0` | Print the generated command without launching Unity. |
 | `BASE_PORT_START` | `5507` | Fallback base port if automatic free-port probing fails. |
 
 Common A* examples:
+
+World coordinates are required for all navigation distance thresholds. Pixel
+parameters remain only for minimap mask and marker operations.
 
 ```bash
 # Freeze workers, spline vehicles, animations, and environment physics.
@@ -145,7 +156,7 @@ python -m nav.scripts.run_benchmark_cell --dynamic_objects static ...
 
 ```bash
 ASTAR_DEBUG_VIZ=1 bash shs/run_Astar.sh scene1 point1
-ASTAR_OBSTACLE_INFLATE_PX=20 RUN_NAME=astar_inflate20 bash shs/run_Astar.sh scene1 point2
+ASTAR_OBSTACLE_INFLATE_PX=12 RUN_NAME=astar_inflate12 bash shs/run_Astar.sh scene1 point1
 MAX_STEPS=120 bash shs/run_Astar.sh all
 ```
 
@@ -235,15 +246,39 @@ python -m nav.scripts.collect_data --dynamic_objects static ...
 python -m nav.scripts.run_benchmark_grid --dynamic_objects static ...
 ```
 
+### Global lighting
+
+Use `--global_light_intensity <value>` for a fixed multiplier, or provide
+both `--light_intensity_min` and `--light_intensity_max` to sample one global
+multiplier per run. Sampling is deterministic for the base seed plus scene,
+point, and benchmark seed identifiers. Each Unity Light keeps its authored
+relative intensity; repeated episode resets do not accumulate scaling.
+
+```bash
+GLOBAL_LIGHT_INTENSITY=0.8 bash shs/run_Astar.sh scene1 point1
+LIGHT_INTENSITY_MIN=0.7 LIGHT_INTENSITY_MAX=1.3 LIGHT_RANDOM_SEED=42 \
+  bash shs/run_headless_benchmark.sh scene1
+python -m nav.scripts.collect_data \
+  --light_intensity_min 0.7 --light_intensity_max 1.3 \
+  --light_random_seed 42 ...
+```
+
+When enabled, HDRP exposure is fixed at `9.0` EV by default; override it with
+`--light_fixed_exposure`. The actual sampled multiplier is stored in each
+`results.csv`. Baked indirect lighting does not change at runtime.
+
+Runtime scaling changes realtime lights and the direct component of mixed
+lights. Indirect illumination already baked into lightmaps is unchanged.
+
 The selected dimensions become part of the ML-Agents behavior specification at
 startup and must be positive integers. Egocentric RGB/depth PNGs and depth NPY
 maps are saved at that size. Either minimap dimension is derived from the
 canonical `862:512` aspect ratio when omitted; mismatched explicit dimensions
 are rejected.
-Python scales canonical target coordinates, the 20 px success threshold, and
-all A* pixel parameters into the selected runtime size. Saved images and runtime
-planning use that size; actions/results CSV coordinates are converted back to
-canonical pixels for resolution-independent evaluation.
+Python scales canonical target coordinates and all A* image-space parameters
+into the selected runtime size. A* converts path samples back to Unity world
+coordinates for waypoint spacing, lookahead, replanning, heading, and success
+checks. CSV files retain both metric and canonical-pixel distances.
 These features require a Unity client rebuilt after the corresponding runtime
 resolution support was added to `WarehouseAgent.cs`; older clients ignore the
 new launch arguments.
@@ -327,11 +362,10 @@ Pass via `bash shs/run_headless_benchmark.sh <scene_code> <model_id>`.
 .venv/bin/python -m nav.scripts.eval_run --input-dir outputs/scene1/point1/gemini-3-flash-preview
 ```
 
-The paper's success criterion is a final minimap distance strictly below 20 px.
-The runtime `--reach_px` stopping gate and post-hoc success threshold both
-default to 20 px. To reproduce historical evaluations that used 65 px, pass
-`--success-dist-px 65` to either `nav.scripts.eval_run` or
-`nav.scripts.aggregate_eval`.
+Runtime and post-hoc evaluation use the final Unity world distance with a
+default threshold of `2.0 m`. Set `--reach_m` for runtime and
+`--success-dist-m` for post-hoc evaluation. Runs without `distance_world` are
+not assigned success from their pixel distance.
 
 Each saved depth step contains two files. `<step>.png` is a fixed-scale
 grayscale view of the Unity sensor output; `<step>.npy` is a float32 depth map

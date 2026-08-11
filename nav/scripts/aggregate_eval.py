@@ -65,10 +65,10 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--warning-threshold", type=float, default=None)
     p.add_argument("--collision-threshold", type=int, default=None)
     p.add_argument(
-        "--success-dist-px",
-        type=int,
+        "--success-dist-m",
+        type=float,
         default=None,
-        help="Success threshold in minimap pixels (paper/default: 20; legacy: 65).",
+        help="Success threshold in Unity world meters (default: 2.0).",
     )
     p.add_argument(
         "--no-use-actions",
@@ -89,8 +89,8 @@ def main() -> None:
         opts.warning_threshold_m = args.warning_threshold
     if args.collision_threshold is not None:
         opts.collision_threshold_px = args.collision_threshold
-    if args.success_dist_px is not None:
-        opts.success_dist_px = args.success_dist_px
+    if args.success_dist_m is not None:
+        opts.success_dist_m = args.success_dist_m
     if args.no_use_actions:
         opts.use_actions = False
 

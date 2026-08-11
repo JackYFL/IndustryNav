@@ -29,6 +29,7 @@ from nav.config import (
     ACTION_SPACE_ANNOTATION,
     ASTAR_DEFAULTS,
     BEHAVIOR_NAME,
+    DEFAULT_REACH_DISTANCE_M,
     BENCHMARK_BASELINES,
     DEFAULT_PROMPT_VISION,
     LLM_DEFAULT_HISTORY_SIZE,
@@ -37,8 +38,8 @@ from nav.config import (
     resolve_scene_all_path,
 )
 from nav.harness.env_setup import EnvSetupError, setup_and_prime
+from nav.harness.lighting import add_lighting_args, lighting_result_fields
 from nav.harness.coordinates import (
-    canonical_minimap_distance_to_runtime,
     canonical_to_minimap_coords,
     minimap_pixel_scale,
     minimap_to_canonical_coords,
@@ -58,7 +59,6 @@ from nav.utils import (
     load_prompt_template,
     logger_config,
     obs_to_rgb,
-    pix_dist,
     save_frame_from_obs,
     unity_rotation_to_egocentric_theta,
 )
@@ -150,6 +150,7 @@ def parse_args():
         default=1.0,
         help="Spline-object speed multiplier when --dynamic_objects=moving.",
     )
+    add_lighting_args(p)
 
     # Spawn. Two mutually-exclusive ways to specify position:
     #   (preferred) --init_world_x / --init_world_z : Unity world coords.
@@ -176,8 +177,15 @@ def parse_args():
                    help="Target x in canonical 862x512 minimap pixels.")
     p.add_argument("--target_y", type=int, required=True,
                    help="Target y in canonical 862x512 minimap pixels.")
-    p.add_argument("--reach_px", type=float, default=20.0,
-                   help="Canonical 862x512 success radius; scaled at runtime.")
+    p.add_argument(
+        "--reach_m",
+        type=float,
+        default=DEFAULT_REACH_DISTANCE_M,
+        help=(
+            "Success radius in Unity world meters (default: "
+            f"{DEFAULT_REACH_DISTANCE_M:g})."
+        ),
+    )
 
     # LLM / BC
     p.add_argument("--prompt_file", type=str, default=DEFAULT_PROMPT_VISION)
@@ -196,9 +204,12 @@ def parse_args():
     p.add_argument("--astar_marker_clear_px", type=int,
                    default=ASTAR_DEFAULTS.marker_clear_px,
                    help="Radius cleared around current/target marker pixels.")
-    p.add_argument("--astar_proxy_stop_real_dist_px", type=float,
-                   default=ASTAR_DEFAULTS.proxy_stop_real_dist_px,
-                   help="When target is inside an obstacle, stop at a reachable proxy only if real target distance is under this value.")
+    p.add_argument(
+        "--astar_proxy_stop_real_dist_m",
+        type=float,
+        default=ASTAR_DEFAULTS.proxy_stop_real_dist_m,
+        help="Blocked-target proxy threshold in Unity world meters.",
+    )
     p.add_argument("--astar_debug_viz", action="store_true",
                    help="Dump A* walkable-grid / path overlays per step.")
     p.add_argument("--astar_debug_dir", type=str, default="",
@@ -286,6 +297,44 @@ def world_to_unity_coords(projector, world_x, world_z, map_size=UNITY_MAP_SIZE):
         py = fallback_py
 
     return px, py
+
+
+def unity_to_world_coords(projector, unity_px, unity_py):
+    """Invert the run-calibrated axis-aligned world/minimap projection."""
+    if projector is None:
+        return None
+
+    spawn_px, spawn_py = projector["spawn_pixel"]
+    spawn_x, spawn_z = projector["spawn_world"]
+    target_px, target_py = projector["target_pixel"]
+    target_x, target_z = projector["target_world"]
+
+    if abs(target_py - spawn_py) > 1e-6:
+        world_x = spawn_x + (float(unity_py) - spawn_py) * (
+            target_x - spawn_x
+        ) / (target_py - spawn_py)
+    else:
+        world_x = spawn_x - 0.0754061 * (float(unity_py) - spawn_py)
+
+    if abs(target_px - spawn_px) > 1e-6:
+        world_z = spawn_z + (float(unity_px) - spawn_px) * (
+            target_z - spawn_z
+        ) / (target_px - spawn_px)
+    else:
+        world_z = spawn_z - 0.06702765 * (float(unity_px) - spawn_px)
+    return float(world_x), float(world_z)
+
+
+def visual_to_world_coords(margin, visual_xy, projector):
+    """Convert a runtime minimap point to Unity world X/Z coordinates."""
+    if projector is None:
+        return None
+    unity_px, unity_py = visual_to_unity_coords(
+        margin,
+        float(visual_xy[0]),
+        float(visual_xy[1]),
+    )
+    return unity_to_world_coords(projector, unity_px, unity_py)
 
 
 def world_to_visual_coords(
@@ -471,8 +520,27 @@ def action_space_for_baseline(baseline: str) -> dict:
     return ACTION_SPACE_AGENTS
 
 
+def target_reached(
+    curr_world_xz,
+    target_world_xz,
+    reach_m,
+):
+    """Return target reach status using Unity world X/Z coordinates only."""
+    if curr_world_xz is None or target_world_xz is None:
+        raise ValueError("Target reach requires current and target world coordinates.")
+    distance_m = float(
+        np.hypot(
+            curr_world_xz[0] - target_world_xz[0],
+            curr_world_xz[1] - target_world_xz[1],
+        )
+    )
+    return distance_m <= float(reach_m), distance_m
+
+
 def main():
     args = parse_args()
+    if args.reach_m <= 0:
+        raise SystemExit("--reach_m must be positive.")
     try:
         args.minimap_width, args.minimap_height = resolve_minimap_resolution(
             args.minimap_width,
@@ -482,10 +550,6 @@ def main():
         raise SystemExit(str(exc)) from exc
     minimap_size = (int(args.minimap_width), int(args.minimap_height))
     pixel_scale = minimap_pixel_scale(minimap_size)
-    runtime_reach_px = canonical_minimap_distance_to_runtime(
-        args.reach_px,
-        minimap_size,
-    )
     # Resolve --file_name="auto" against config.SCENE_ALL_BUILDS so a single
     # invocation works across dev machines without a per-host wrapper hack.
     args.file_name = resolve_scene_all_path(args.file_name)
@@ -519,7 +583,7 @@ def main():
         astar_planner = AStarBaseline(
             obstacle_inflate_px=args.astar_obstacle_inflate_px,
             marker_clear_px=args.astar_marker_clear_px,
-            proxy_stop_real_dist_px=args.astar_proxy_stop_real_dist_px,
+            proxy_stop_real_dist_m=args.astar_proxy_stop_real_dist_m,
             pixel_scale=pixel_scale,
             debug_viz=args.astar_debug_viz,
             debug_dir=astar_debug_dir,
@@ -528,7 +592,7 @@ def main():
             "A* baseline ready | "
             f"obstacle_inflate_px={args.astar_obstacle_inflate_px} | "
             f"marker_clear_px={args.astar_marker_clear_px} | "
-            f"proxy_stop_real_dist_px={args.astar_proxy_stop_real_dist_px} | "
+            f"proxy_stop_real_dist_m={args.astar_proxy_stop_real_dist_m} | "
             f"pixel_scale={pixel_scale:.4f} | "
             f"debug_viz={args.astar_debug_viz} | debug_dir={astar_debug_dir}"
         )
@@ -558,7 +622,7 @@ def main():
     target_xy = primed.target_xy
     logger.info(
         f"Minimap runtime space: {minimap_size[0]}x{minimap_size[1]} | "
-        f"canonical reach_px={args.reach_px:g} -> runtime={runtime_reach_px:.2f}"
+        f"reach_m={args.reach_m:g}"
     )
     minimap_projector = build_axis_aligned_projector(
         primed.target_sc.last_spawn_pixel,
@@ -566,6 +630,9 @@ def main():
         primed.target_sc.last_target_pixel,
         primed.target_sc.last_target_world,
     )
+
+    def astar_point_to_world(point):
+        return visual_to_world_coords(primed.margin, point, minimap_projector)
 
     # ---- Per-modality save dirs (prefixed by the baseline token) ----
     subdirs = {}
@@ -613,14 +680,16 @@ def main():
     last_prompt = ""
     detected_init_xy = None
     last_curr_xy = None
+    last_world_xz = None
+    last_saved_step = None
     step_count = 0
     stop_reason = None
 
     try:
         while True:
-            if args.max_steps > 0 and step_count > args.max_steps:
+            if args.max_steps > 0 and step_count >= args.max_steps:
                 stop_reason = "max_steps"
-                logger.info(f"Max steps reached: {step_count - 1} > {args.max_steps}")
+                logger.info(f"Max steps reached: {step_count} >= {args.max_steps}")
                 break
 
             decision_steps, _ = env.get_steps(BEHAVIOR_NAME)
@@ -632,11 +701,20 @@ def main():
             # Vector observation slot (4th sensor in the unified build).
             try:
                 vector_obs = decision_steps.obs[3]
+                if vector_obs.shape[1] < 6:
+                    raise ValueError(
+                        f"expected at least 6 values, got {vector_obs.shape[1]}"
+                    )
                 pos_x, pos_y, pos_z = vector_obs[0, 0], vector_obs[0, 1], vector_obs[0, 2]
                 rot_x, rot_y, rot_z = vector_obs[0, 3], vector_obs[0, 4], vector_obs[0, 5]
-            except Exception:
-                pos_x = pos_y = pos_z = 0.0
-                rot_x = rot_y = rot_z = 0.0
+            except Exception as exc:
+                stop_reason = "world_pose_unavailable"
+                logger.error(
+                    "Unity world pose observation is unavailable; "
+                    f"world-coordinate navigation cannot continue: {exc}"
+                )
+                break
+            last_world_xz = (float(pos_x), float(pos_z))
 
             if decision_thread is not None and decision_thread.is_alive():
                 # Decision in flight: advance Unity with STOP, but do not resave
@@ -680,19 +758,22 @@ def main():
                 saved_minimap_rgb = true_minimap_rgb
             ego_rgb = obs_to_rgb(ego_obs) if ego_obs is not None else None
 
-            # Frame saving
-            if ego_obs is not None and "ego" in subdirs:
-                save_frame_from_obs(ego_obs, save_dir=subdirs["ego"], filename=f"{step_count}.png")
-            if saved_minimap_rgb is not None and "minimap" in subdirs:
-                cv2.imwrite(
-                    os.path.join(subdirs["minimap"], f"{step_count}.png"),
-                    cv2.cvtColor(saved_minimap_rgb, cv2.COLOR_RGB2BGR),
-                )
-            if depth_obs_raw is not None and "depth" in subdirs:
-                if depth_obs_raw.ndim == 2:
-                    depth_obs_raw = depth_obs_raw[None, ...]
-                if depth_obs_raw.ndim == 3:
-                    save_frame_from_obs(depth_obs_raw, save_dir=subdirs["depth"], filename=f"{step_count}.png")
+            # The async decision loop observes a step both before launching the
+            # worker and after it completes. Persist that step only once.
+            should_save_frame = step_count != last_saved_step
+            if should_save_frame:
+                if ego_obs is not None and "ego" in subdirs:
+                    save_frame_from_obs(ego_obs, save_dir=subdirs["ego"], filename=f"{step_count}.png")
+                if saved_minimap_rgb is not None and "minimap" in subdirs:
+                    cv2.imwrite(
+                        os.path.join(subdirs["minimap"], f"{step_count}.png"),
+                        cv2.cvtColor(saved_minimap_rgb, cv2.COLOR_RGB2BGR),
+                    )
+                if depth_obs_raw is not None and "depth" in subdirs:
+                    if depth_obs_raw.ndim == 2:
+                        depth_obs_raw = depth_obs_raw[None, ...]
+                    if depth_obs_raw.ndim == 3:
+                        save_frame_from_obs(depth_obs_raw, save_dir=subdirs["depth"], filename=f"{step_count}.png")
 
             # Position tracking / marker drawing. Default to vector obs so the
             # marker cannot disappear behind scene geometry or detach from the
@@ -725,7 +806,7 @@ def main():
                 if detected_init_xy is None:
                     detected_init_xy = curr_xy
 
-            if true_minimap_rgb is not None and subdir_ann is not None:
+            if should_save_frame and true_minimap_rgb is not None and subdir_ann is not None:
                 annotated = draw_curr_target_heading_rgb(
                     true_minimap_rgb,
                     curr_xy,
@@ -737,6 +818,8 @@ def main():
                     os.path.join(subdir_ann, f"{step_count}.png"),
                     cv2.cvtColor(annotated, cv2.COLOR_RGB2BGR),
                 )
+            if should_save_frame:
+                last_saved_step = step_count
 
             # ----- Async decision state machine -----
             if decision_thread is not None and not decision_thread.is_alive():
@@ -759,20 +842,19 @@ def main():
                     _qa_file.flush()
                 if args.baseline == "llm" and args.history_size > 0 and curr_xy is not None:
                     history_xy = minimap_to_canonical_coords(curr_xy, minimap_size)
+                    history_distance_m = float(
+                        np.hypot(
+                            float(pos_x) - float(target_world_x),
+                            float(pos_z) - float(target_world_z),
+                        )
+                    )
                     history_deque.append({
                         "step": step_count,
                         "position": (round(history_xy[0]), round(history_xy[1])),
+                        "world_position": (float(pos_x), float(pos_z)),
                         "theta": unity_rotation_to_egocentric_theta(rot_y),
                         "action": chosen_action,
-                        "distance_to_target": (
-                            runtime_minimap_distance_to_canonical(
-                                curr_xy,
-                                target_xy,
-                                minimap_size,
-                            )
-                            if target_xy
-                            else 0.0
-                        ),
+                        "distance_to_target_m": history_distance_m,
                     })
                 logger.info(
                     f"[Step:{step_count}] Action: {chosen_action} | Reasoning: {str(reasoning)[:200]}"
@@ -782,12 +864,24 @@ def main():
                 continuous_actions = action2signal(chosen_action, action_space)
             else:
                 # No decision in flight: either we've reached, or we kick one off.
-                if (curr_xy is not None and target_xy is not None
-                        and pix_dist(curr_xy, target_xy) <= runtime_reach_px):
+                reached, reach_distance = target_reached(
+                    (float(pos_x), float(pos_z)),
+                    (
+                        (float(target_world_x), float(target_world_z))
+                        if target_world_x is not None and target_world_z is not None
+                        else None
+                    ),
+                    args.reach_m,
+                )
+                if reached:
                     chosen_action = "stop"
                     step_count += 1
                     continuous_actions = action2signal(chosen_action, action_space)
                     stop_reason = "reached_vicinity"
+                    logger.info(
+                        f"Reached target at {reach_distance:.2f}m "
+                        f"(threshold={args.reach_m:g}m)."
+                    )
                 else:
                     payload = None
                     if args.baseline == "random":
@@ -800,16 +894,30 @@ def main():
                                 round(prompt_curr_xy[1]),
                             )
                             prompt_target_xy = (int(args.target_x), int(args.target_y))
-                            distance = runtime_minimap_distance_to_canonical(
+                            distance_px = runtime_minimap_distance_to_canonical(
                                 curr_xy,
                                 target_xy,
                                 minimap_size,
+                            )
+                            distance_m = float(
+                                np.hypot(
+                                    float(pos_x) - float(target_world_x),
+                                    float(pos_z) - float(target_world_z),
+                                )
                             )
                             theta = unity_rotation_to_egocentric_theta(rot_y)
                             history_str = format_history_for_prompt(history_deque)
                             prompt = render_nav_prompt(
                                 prompt_template, prompt_curr_xy, prompt_target_xy, theta,
-                                distance, allowed_actions, history_str,
+                                distance_px, allowed_actions, history_str,
+                                curr_world_xz=(float(pos_x), float(pos_z)),
+                                target_world_xz=(
+                                    float(target_world_x),
+                                    float(target_world_z),
+                                ),
+                                distance_m=distance_m,
+                                reach_m=args.reach_m,
+                                dynamic_objects=args.dynamic_objects,
                             )
                             last_prompt = prompt
                             agent_images = (
@@ -830,9 +938,16 @@ def main():
                                 "curr_xy": curr_xy,
                                 "target_xy": target_xy,
                                 "agent_theta": unity_rotation_to_egocentric_theta(rot_y),
-                                "reach_px": runtime_reach_px,
+                                "reach_m": args.reach_m,
                                 "step": step_count,
                                 "curr_world_xz": (float(pos_x), float(pos_z)),
+                                "target_world_xz": (
+                                    (float(target_world_x), float(target_world_z))
+                                    if target_world_x is not None
+                                    and target_world_z is not None
+                                    else None
+                                ),
+                                "point_to_world": astar_point_to_world,
                             }
                     elif args.baseline == "bc":
                         payload = {
@@ -947,6 +1062,18 @@ def main():
                 if final_xy is not None
                 else None
             )
+            distance_world = (
+                float(
+                    np.hypot(
+                        last_world_xz[0] - target_world_x,
+                        last_world_xz[1] - target_world_z,
+                    )
+                )
+                if last_world_xz is not None
+                and target_world_x is not None
+                and target_world_z is not None
+                else None
+            )
             result = {
                 "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
                 # exp_name kept as a column alias of scene_name for backward compatibility
@@ -962,13 +1089,16 @@ def main():
                 "model": args.model_id,
                 "vision_input": bool(args.vision_input),
                 "max_steps": int(args.max_steps),
-                "reach_px": float(args.reach_px),
+                "reach_m": args.reach_m,
                 "target_x": int(args.target_x),
                 "target_y": int(args.target_y),
+                "target_world_x": target_world_x,
+                "target_world_z": target_world_z,
                 "init_direction": float(args.init_curr_direction),
                 "final_x": round(final_xy_canonical[0]) if final_xy_canonical is not None else None,
                 "final_y": round(final_xy_canonical[1]) if final_xy_canonical is not None else None,
                 "distance_px": distance_px,
+                "distance_world": distance_world,
                 "stop_reason": stop_reason or "loop_end",
                 "steps_taken": step_count,
                 "frame_sleep": float(args.frame_sleep),
@@ -977,11 +1107,18 @@ def main():
                 "marker_source": args.marker_source,
                 "spline_speed_multiplier": float(args.spline_speed_multiplier),
                 "dynamic_objects": args.dynamic_objects,
+                **lighting_result_fields(args),
             }
+            world_distance_label = (
+                f"{distance_world:.2f}m"
+                if distance_world is not None
+                else "unavailable"
+            )
             logger.info(
                 f"[FINAL] stop={result['stop_reason']} steps={result['steps_taken']} "
                 f"runtime_final={final_xy} runtime_target={target_xy} "
-                f"canonical_dist={distance_px:.2f}px"
+                f"canonical_dist={distance_px:.2f}px "
+                f"world_dist={world_distance_label}"
             )
             results_csv_path = (
                 args.results_csv.strip()

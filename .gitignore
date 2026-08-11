@@ -66,6 +66,7 @@ agent_qa.txt
 *.npy
 *.npz
 *.gif
+!docs/assets/industrynav_navigation_example.gif
 
 # Large local archives or downloaded bundles
 *.zip

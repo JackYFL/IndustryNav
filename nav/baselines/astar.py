@@ -2,15 +2,17 @@ import heapq
 import math
 import os
 from collections import deque
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import cv2
 import numpy as np
 
-from nav.config import ASTAR_DEFAULTS
+from nav.config import ASTAR_DEFAULTS, DEFAULT_REACH_DISTANCE_M
 
 
 Point = Tuple[int, int]
+WorldPoint = Tuple[float, float]
+PointToWorld = Callable[[Point], Optional[WorldPoint]]
 
 
 class AStarBaseline:
@@ -28,14 +30,15 @@ class AStarBaseline:
         min_free_ratio: float = ASTAR_DEFAULTS.min_free_ratio,
         obstacle_inflate_px: int = ASTAR_DEFAULTS.obstacle_inflate_px,
         marker_clear_px: int = ASTAR_DEFAULTS.marker_clear_px,
-        waypoint_distance_px: float = ASTAR_DEFAULTS.waypoint_distance_px,
-        waypoint_reach_px: float = ASTAR_DEFAULTS.waypoint_reach_px,
-        path_replan_distance_px: float = ASTAR_DEFAULTS.path_replan_distance_px,
         target_change_replan_px: float = ASTAR_DEFAULTS.target_change_replan_px,
         turn_tolerance_deg: float = ASTAR_DEFAULTS.turn_tolerance_deg,
         forward_priority_tolerance_deg: float = ASTAR_DEFAULTS.forward_priority_tolerance_deg,
         drive_turn_tolerance_deg: float = ASTAR_DEFAULTS.drive_turn_tolerance_deg,
-        lookahead_px: float = ASTAR_DEFAULTS.lookahead_px,
+        waypoint_distance_m: float = ASTAR_DEFAULTS.waypoint_distance_m,
+        waypoint_reach_m: float = ASTAR_DEFAULTS.waypoint_reach_m,
+        path_replan_distance_m: float = ASTAR_DEFAULTS.path_replan_distance_m,
+        terminal_approach_m: float = ASTAR_DEFAULTS.terminal_approach_m,
+        lookahead_m: float = ASTAR_DEFAULTS.lookahead_m,
         front_cone_deg: float = ASTAR_DEFAULTS.front_cone_deg,
         hysteresis_reset_deg: float = ASTAR_DEFAULTS.hysteresis_reset_deg,
         hysteresis_lock_deg: float = ASTAR_DEFAULTS.hysteresis_lock_deg,
@@ -46,7 +49,7 @@ class AStarBaseline:
         stuck_block_ahead_px: float = ASTAR_DEFAULTS.stuck_block_ahead_px,
         stuck_block_radius_px: float = ASTAR_DEFAULTS.stuck_block_radius_px,
         stuck_block_ttl_steps: int = ASTAR_DEFAULTS.stuck_block_ttl_steps,
-        proxy_stop_real_dist_px: float = ASTAR_DEFAULTS.proxy_stop_real_dist_px,
+        proxy_stop_real_dist_m: float = ASTAR_DEFAULTS.proxy_stop_real_dist_m,
         pixel_scale: float = 1.0,
         debug_viz: bool = False,
         debug_dir: Optional[str] = None,
@@ -63,14 +66,15 @@ class AStarBaseline:
         self.min_free_ratio = float(min_free_ratio)
         self.obstacle_inflate_px = scaled_int(obstacle_inflate_px, minimum=0)
         self.marker_clear_px = scaled_int(marker_clear_px)
-        self.waypoint_distance_px = float(waypoint_distance_px) * self.pixel_scale
-        self.waypoint_reach_px = float(waypoint_reach_px) * self.pixel_scale
-        self.path_replan_distance_px = float(path_replan_distance_px) * self.pixel_scale
         self.target_change_replan_px = float(target_change_replan_px) * self.pixel_scale
         self.turn_tolerance_deg = float(turn_tolerance_deg)
         self.forward_priority_tolerance_deg = float(forward_priority_tolerance_deg)
         self.drive_turn_tolerance_deg = float(drive_turn_tolerance_deg)
-        self.lookahead_px = float(lookahead_px) * self.pixel_scale
+        self.waypoint_distance_m = float(waypoint_distance_m)
+        self.waypoint_reach_m = float(waypoint_reach_m)
+        self.path_replan_distance_m = float(path_replan_distance_m)
+        self.terminal_approach_m = float(terminal_approach_m)
+        self.lookahead_m = float(lookahead_m)
         self.front_cone_deg = float(front_cone_deg)
         self.hysteresis_reset_deg = float(hysteresis_reset_deg)
         self.hysteresis_lock_deg = float(hysteresis_lock_deg)
@@ -81,7 +85,7 @@ class AStarBaseline:
         self.stuck_block_ahead_px = float(stuck_block_ahead_px) * self.pixel_scale
         self.stuck_block_radius_px = float(stuck_block_radius_px) * self.pixel_scale
         self.stuck_block_ttl_steps = int(stuck_block_ttl_steps)
-        self.proxy_stop_real_dist_px = float(proxy_stop_real_dist_px) * self.pixel_scale
+        self.proxy_stop_real_dist_m = float(proxy_stop_real_dist_m)
         self.debug_viz = bool(debug_viz)
         self.debug_dir = debug_dir
         self.last_path: List[Point] = []
@@ -106,17 +110,29 @@ class AStarBaseline:
         curr_xy: Point,
         target_xy: Point,
         agent_theta: float,
-        reach_px: float,
+        reach_m: float = DEFAULT_REACH_DISTANCE_M,
         step: Optional[int] = None,
-        curr_world_xz: Optional[Tuple[float, float]] = None,
+        curr_world_xz: Optional[WorldPoint] = None,
+        target_world_xz: Optional[WorldPoint] = None,
+        point_to_world: Optional[PointToWorld] = None,
     ) -> Tuple[str, str, List[Point]]:
-        distance = math.hypot(target_xy[0] - curr_xy[0], target_xy[1] - curr_xy[1])
-        if distance <= reach_px:
+        distance_m = self._world_distance(curr_world_xz, target_world_xz)
+        if distance_m is None:
+            raise ValueError(
+                "A* requires current and target Unity world coordinates."
+            )
+        if reach_m <= 0:
+            raise ValueError("reach_m must be positive.")
+        if minimap_rgb is not None and point_to_world is None:
+            raise ValueError(
+                "A* requires a minimap-to-world projection for path tracking."
+            )
+        if distance_m <= reach_m:
             self.last_path = [curr_xy, target_xy]
             self.last_action_was_move = False
             return (
                 "stop",
-                f"Astar reached target vicinity; dist={distance:.1f}px.",
+                f"Astar reached target vicinity; dist={distance_m:.2f}m.",
                 self.last_path,
             )
 
@@ -133,22 +149,45 @@ class AStarBaseline:
             )
 
         if minimap_rgb is None:
-            action, reasoning = self._greedy_action(curr_xy, target_xy, agent_theta)
+            action, reasoning = self._greedy_action(
+                curr_xy,
+                target_xy,
+                agent_theta,
+                curr_world_xz=curr_world_xz,
+                target_world_xz=target_world_xz,
+            )
             self.last_path = [curr_xy, target_xy]
             self._record_action(action)
             return action, f"Astar fallback without minimap: {reasoning}", self.last_path
 
         walkable = self._build_walkable_grid(minimap_rgb, curr_xy, target_xy)
-        should_replan, replan_reason = self._should_replan(curr_xy, target_xy)
+        should_replan, replan_reason = self._should_replan(
+            curr_xy,
+            target_xy,
+            curr_world_xz=curr_world_xz,
+            point_to_world=point_to_world,
+        )
         path = self.last_path
         if should_replan:
             path = self._plan_path(walkable, curr_xy, target_xy)
-            self.follow_waypoints = self._build_follow_waypoints(path, curr_xy, target_xy)
+            self.follow_waypoints = self._build_follow_waypoints(
+                path,
+                curr_xy,
+                target_xy,
+                curr_world_xz=curr_world_xz,
+                point_to_world=point_to_world,
+            )
             self.follow_waypoint_index = 0
             self.last_turn_sign = 0
 
         if not path:
-            action, reasoning = self._greedy_action(curr_xy, target_xy, agent_theta)
+            action, reasoning = self._greedy_action(
+                curr_xy,
+                target_xy,
+                agent_theta,
+                curr_world_xz=curr_world_xz,
+                target_world_xz=target_world_xz,
+            )
             fallback_path = [curr_xy, target_xy]
             self.last_path = []
             self.follow_waypoints = []
@@ -164,32 +203,89 @@ class AStarBaseline:
         self.last_path = path
         self.last_target_xy = target_xy
         if self._using_unreachable_proxy() and self.last_effective_target_xy is not None:
-            proxy_distance = math.hypot(
-                self.last_effective_target_xy[0] - curr_xy[0],
-                self.last_effective_target_xy[1] - curr_xy[1],
+            proxy_distance, proxy_unit = self._point_distance(
+                curr_xy,
+                self.last_effective_target_xy,
+                curr_world_xz=curr_world_xz,
+                point_to_world=point_to_world,
             )
-            if proxy_distance <= reach_px and distance <= self.proxy_stop_real_dist_px:
-                self.last_action_was_move = False
-                self._save_debug_visualization(
-                    minimap_rgb, curr_xy, target_xy, path, self.last_effective_target_xy, step
+            if (
+                proxy_distance <= reach_m
+                and distance_m <= self.proxy_stop_real_dist_m
+            ):
+                action, relative = self._terminal_action_toward(
+                    curr_xy,
+                    target_xy,
+                    agent_theta,
+                    curr_world_xz=curr_world_xz,
+                    target_world_xz=target_world_xz,
                 )
+                self._save_debug_visualization(
+                    minimap_rgb, curr_xy, target_xy, path, target_xy, step
+                )
+                self._record_action(action)
                 return (
-                    "stop",
-                    f"Astar reached reachable proxy {self.last_effective_target_xy} "
-                    f"for blocked target; proxy_dist={proxy_distance:.1f}px "
-                    f"target_dist={distance:.1f}px plan_status={self.last_plan_status}",
+                    action,
+                    f"Astar terminal approach from reachable proxy "
+                    f"{self.last_effective_target_xy}; "
+                    f"proxy_dist={proxy_distance:.2f}{proxy_unit} "
+                    f"target_dist={distance_m:.2f}m relative={relative:.1f}deg "
+                    f"plan_status={self.last_plan_status}",
                     path,
                 )
 
         if not self.follow_waypoints:
-            self.follow_waypoints = self._build_follow_waypoints(path, curr_xy, target_xy)
+            self.follow_waypoints = self._build_follow_waypoints(
+                path,
+                curr_xy,
+                target_xy,
+                curr_world_xz=curr_world_xz,
+                point_to_world=point_to_world,
+            )
             self.follow_waypoint_index = 0
-        anchor_waypoint, anchor_idx = self._current_follow_waypoint(curr_xy)
-        waypoint, waypoint_idx, waypoint_reason = self._lookahead_follow_waypoint(
-            curr_xy, agent_theta
+        anchor_waypoint, anchor_idx = self._current_follow_waypoint(
+            curr_xy,
+            curr_world_xz=curr_world_xz,
+            point_to_world=point_to_world,
         )
-        closest_idx, closest_dist = self._closest_path_index(path, curr_xy)
-        action, relative = self._action_toward(curr_xy, waypoint, agent_theta)
+        waypoint, waypoint_idx, waypoint_reason = self._lookahead_follow_waypoint(
+            curr_xy,
+            agent_theta,
+            curr_world_xz=curr_world_xz,
+            point_to_world=point_to_world,
+        )
+        closest_idx, closest_dist, closest_unit = self._closest_path_index(
+            path,
+            curr_xy,
+            curr_world_xz=curr_world_xz,
+            point_to_world=point_to_world,
+        )
+        terminal_approach = (
+            self.last_plan_status == "target_reachable"
+            and not self._using_unreachable_proxy()
+            and distance_m <= self.terminal_approach_m
+            and waypoint == target_xy
+        )
+        if terminal_approach:
+            waypoint_idx = len(self.follow_waypoints) - 1
+            waypoint_reason = "terminal_align_then_forward"
+            action, relative = self._terminal_action_toward(
+                curr_xy,
+                waypoint,
+                agent_theta,
+                curr_world_xz=curr_world_xz,
+                target_world_xz=target_world_xz,
+            )
+        else:
+            action, relative = self._action_toward(
+                curr_xy,
+                waypoint,
+                agent_theta,
+                curr_world_xz=curr_world_xz,
+                waypoint_world_xz=(
+                    point_to_world(waypoint) if point_to_world is not None else None
+                ),
+            )
         self._save_debug_visualization(
             minimap_rgb, curr_xy, target_xy, path, waypoint, step
         )
@@ -200,7 +296,8 @@ class AStarBaseline:
             f"{'replanned' if should_replan else 'tracking'}({replan_reason}) "
             f"stuck={self.stuck_count} "
             f"plan_status={self.last_plan_status} "
-            f"path_len={len(path)} closest_idx={closest_idx} closest_dist={closest_dist:.1f}px "
+            f"path_len={len(path)} closest_idx={closest_idx} "
+            f"closest_dist={closest_dist:.2f}{closest_unit} "
             f"anchor_idx={anchor_idx}/{len(self.follow_waypoints) - 1} "
             f"anchor={anchor_waypoint} action_idx={waypoint_idx} "
             f"waypoint={waypoint} waypoint_reason={waypoint_reason} "
@@ -440,13 +537,41 @@ class AStarBaseline:
             path[-1] = (int(target_xy[0]), int(target_xy[1]))
         return path
 
-    def _select_waypoint(self, path: List[Point], curr_xy: Point) -> Point:
-        for point in path[1:]:
-            if math.hypot(point[0] - curr_xy[0], point[1] - curr_xy[1]) >= self.waypoint_distance_px:
-                return point
-        return path[-1]
+    @staticmethod
+    def _world_distance(
+        first: Optional[WorldPoint], second: Optional[WorldPoint]
+    ) -> Optional[float]:
+        if first is None or second is None:
+            return None
+        return math.hypot(second[0] - first[0], second[1] - first[1])
 
-    def _should_replan(self, curr_xy: Point, target_xy: Point) -> Tuple[bool, str]:
+    def _point_distance(
+        self,
+        first_xy: Point,
+        second_xy: Point,
+        *,
+        curr_world_xz: Optional[WorldPoint] = None,
+        point_to_world: Optional[PointToWorld] = None,
+    ) -> Tuple[float, str]:
+        first_world = curr_world_xz
+        if first_world is None and point_to_world is not None:
+            first_world = point_to_world(first_xy)
+        second_world = point_to_world(second_xy) if point_to_world is not None else None
+        distance_m = self._world_distance(first_world, second_world)
+        if distance_m is None:
+            raise ValueError(
+                "A* path tracking requires valid Unity world coordinates."
+            )
+        return distance_m, "m"
+
+    def _should_replan(
+        self,
+        curr_xy: Point,
+        target_xy: Point,
+        *,
+        curr_world_xz: Optional[WorldPoint] = None,
+        point_to_world: Optional[PointToWorld] = None,
+    ) -> Tuple[bool, str]:
         if not self.last_path:
             return True, "no_cached_path"
         if self.last_target_xy is None:
@@ -457,26 +582,45 @@ class AStarBaseline:
         ) > self.target_change_replan_px:
             return True, "target_changed"
 
-        closest_idx, closest_dist = self._closest_path_index(self.last_path, curr_xy)
-        if closest_dist > self.path_replan_distance_px:
-            return True, f"off_path_{closest_dist:.1f}px"
+        closest_idx, closest_dist, unit = self._closest_path_index(
+            self.last_path,
+            curr_xy,
+            curr_world_xz=curr_world_xz,
+            point_to_world=point_to_world,
+        )
+        if closest_dist > self.path_replan_distance_m:
+            return True, f"off_path_{closest_dist:.2f}{unit}"
         if closest_idx >= len(self.last_path) - 1:
             return True, "path_exhausted"
-        return False, f"cached_path_dist_{closest_dist:.1f}px"
+        return False, f"cached_path_dist_{closest_dist:.2f}{unit}"
 
     def _build_follow_waypoints(
-        self, path: List[Point], curr_xy: Point, target_xy: Point
+        self,
+        path: List[Point],
+        curr_xy: Point,
+        target_xy: Point,
+        *,
+        curr_world_xz: Optional[WorldPoint] = None,
+        point_to_world: Optional[PointToWorld] = None,
     ) -> List[Point]:
         if not path:
             return []
 
         waypoints: List[Point] = []
         distance_since_last = 0.0
-        prev = curr_xy
+        prev_world = curr_world_xz
+        if point_to_world is None or prev_world is None:
+            raise ValueError(
+                "A* waypoint construction requires a minimap-to-world projection."
+            )
         for point in path[1:]:
-            distance_since_last += math.hypot(point[0] - prev[0], point[1] - prev[1])
-            prev = point
-            if distance_since_last >= self.waypoint_distance_px:
+            point_world = point_to_world(point)
+            segment_m = self._world_distance(prev_world, point_world)
+            if segment_m is None:
+                raise ValueError("Failed to project an A* waypoint into world space.")
+            distance_since_last += segment_m
+            prev_world = point_world
+            if distance_since_last >= self.waypoint_distance_m:
                 waypoints.append(point)
                 distance_since_last = 0.0
 
@@ -485,7 +629,13 @@ class AStarBaseline:
             waypoints.append(path_end)
         return waypoints
 
-    def _current_follow_waypoint(self, curr_xy: Point) -> Tuple[Point, int]:
+    def _current_follow_waypoint(
+        self,
+        curr_xy: Point,
+        *,
+        curr_world_xz: Optional[WorldPoint] = None,
+        point_to_world: Optional[PointToWorld] = None,
+    ) -> Tuple[Point, int]:
         if not self.follow_waypoints:
             return curr_xy, 0
 
@@ -493,7 +643,12 @@ class AStarBaseline:
         nearest_dist = float("inf")
         for idx in range(self.follow_waypoint_index, len(self.follow_waypoints)):
             waypoint = self.follow_waypoints[idx]
-            distance = math.hypot(waypoint[0] - curr_xy[0], waypoint[1] - curr_xy[1])
+            distance, _ = self._point_distance(
+                curr_xy,
+                waypoint,
+                curr_world_xz=curr_world_xz,
+                point_to_world=point_to_world,
+            )
             if distance < nearest_dist:
                 nearest_idx = idx
                 nearest_dist = distance
@@ -501,8 +656,13 @@ class AStarBaseline:
 
         while self.follow_waypoint_index < len(self.follow_waypoints) - 1:
             waypoint = self.follow_waypoints[self.follow_waypoint_index]
-            distance = math.hypot(waypoint[0] - curr_xy[0], waypoint[1] - curr_xy[1])
-            if distance > self.waypoint_reach_px:
+            distance, _ = self._point_distance(
+                curr_xy,
+                waypoint,
+                curr_world_xz=curr_world_xz,
+                point_to_world=point_to_world,
+            )
+            if distance > self.waypoint_reach_m:
                 break
             self.follow_waypoint_index += 1
 
@@ -512,7 +672,12 @@ class AStarBaseline:
         )
 
     def _lookahead_follow_waypoint(
-        self, curr_xy: Point, agent_theta: float
+        self,
+        curr_xy: Point,
+        agent_theta: float,
+        *,
+        curr_world_xz: Optional[WorldPoint] = None,
+        point_to_world: Optional[PointToWorld] = None,
     ) -> Tuple[Point, int, str]:
         if not self.follow_waypoints:
             return curr_xy, 0, "no_follow_waypoints"
@@ -520,46 +685,133 @@ class AStarBaseline:
         start_idx = self.follow_waypoint_index
         candidate_idx = start_idx
         distance_ahead = 0.0
-        prev = curr_xy
+        prev_world = curr_world_xz
+        if point_to_world is None or prev_world is None:
+            raise ValueError(
+                "A* lookahead requires a minimap-to-world projection."
+            )
         for idx in range(start_idx, len(self.follow_waypoints)):
             point = self.follow_waypoints[idx]
-            distance_ahead += math.hypot(point[0] - prev[0], point[1] - prev[1])
-            prev = point
+            point_world = point_to_world(point)
+            segment_m = self._world_distance(prev_world, point_world)
+            if segment_m is None:
+                raise ValueError("Failed to project an A* lookahead point.")
+            distance_ahead += segment_m
+            prev_world = point_world
             candidate_idx = idx
-            if distance_ahead >= self.lookahead_px:
+            if distance_ahead >= self.lookahead_m:
                 break
 
         final_idx = len(self.follow_waypoints) - 1
         for idx in range(candidate_idx, final_idx + 1):
             point = self.follow_waypoints[idx]
-            relative = self._relative_angle_to_point(curr_xy, point, agent_theta)
+            relative = self._relative_angle_to_point(
+                curr_xy,
+                point,
+                agent_theta,
+                curr_world_xz=curr_world_xz,
+                waypoint_world_xz=(
+                    point_to_world(point) if point_to_world is not None else None
+                ),
+            )
             if relative is None:
                 continue
             if abs(relative) <= self.front_cone_deg:
-                return point, idx, f"lookahead_from_{start_idx}_dist_{distance_ahead:.1f}"
+                return (
+                    point,
+                    idx,
+                    f"lookahead_from_{start_idx}_dist_{distance_ahead:.2f}m",
+                )
 
         point = self.follow_waypoints[candidate_idx]
         return point, candidate_idx, f"lookahead_outside_front_cone_from_{start_idx}"
 
-    @staticmethod
-    def _closest_path_index(path: List[Point], curr_xy: Point) -> Tuple[int, float]:
+    def _closest_path_index(
+        self,
+        path: List[Point],
+        curr_xy: Point,
+        *,
+        curr_world_xz: Optional[WorldPoint] = None,
+        point_to_world: Optional[PointToWorld] = None,
+    ) -> Tuple[int, float, str]:
         best_idx = 0
         best_dist = float("inf")
+        best_unit = "m"
         for idx, point in enumerate(path):
-            dist = math.hypot(point[0] - curr_xy[0], point[1] - curr_xy[1])
+            dist, unit = self._point_distance(
+                curr_xy,
+                point,
+                curr_world_xz=curr_world_xz,
+                point_to_world=point_to_world,
+            )
             if dist < best_dist:
                 best_idx = idx
                 best_dist = dist
-        return best_idx, best_dist
+                best_unit = unit
+        return best_idx, best_dist, best_unit
 
-    def _greedy_action(self, curr_xy: Point, target_xy: Point, agent_theta: float):
-        action, relative = self._action_toward(curr_xy, target_xy, agent_theta)
+    def _greedy_action(
+        self,
+        curr_xy: Point,
+        target_xy: Point,
+        agent_theta: float,
+        *,
+        curr_world_xz: Optional[WorldPoint] = None,
+        target_world_xz: Optional[WorldPoint] = None,
+    ):
+        action, relative = self._action_toward(
+            curr_xy,
+            target_xy,
+            agent_theta,
+            curr_world_xz=curr_world_xz,
+            waypoint_world_xz=target_world_xz,
+        )
         return action, f"target_relative={relative:.1f}deg"
 
-    def _action_toward(
-        self, curr_xy: Point, waypoint_xy: Point, agent_theta: float
+    def _terminal_action_toward(
+        self,
+        curr_xy: Point,
+        target_xy: Point,
+        agent_theta: float,
+        *,
+        curr_world_xz: Optional[WorldPoint] = None,
+        target_world_xz: Optional[WorldPoint] = None,
     ) -> Tuple[str, float]:
-        relative = self._relative_angle_to_point(curr_xy, waypoint_xy, agent_theta)
+        relative = self._relative_angle_to_point(
+            curr_xy,
+            target_xy,
+            agent_theta,
+            curr_world_xz=curr_world_xz,
+            waypoint_world_xz=target_world_xz,
+        )
+        if relative is None:
+            return "stop", 0.0
+        if abs(relative) <= self.turn_tolerance_deg:
+            self.last_turn_sign = 0
+            return "astar forward", relative
+
+        self.last_turn_sign = 1 if relative > 0 else -1
+        if self.last_turn_sign > 0:
+            return "astar turn right", relative
+        return "astar turn left", relative
+
+    def _action_toward(
+        self,
+        curr_xy: Point,
+        waypoint_xy: Point,
+        agent_theta: float,
+        *,
+        curr_world_xz: Optional[WorldPoint] = None,
+        waypoint_world_xz: Optional[WorldPoint] = None,
+        drive_turn_tolerance_deg: Optional[float] = None,
+    ) -> Tuple[str, float]:
+        relative = self._relative_angle_to_point(
+            curr_xy,
+            waypoint_xy,
+            agent_theta,
+            curr_world_xz=curr_world_xz,
+            waypoint_world_xz=waypoint_world_xz,
+        )
         if relative is None:
             return "stop", 0.0
 
@@ -577,7 +829,12 @@ class AStarBaseline:
             turn_sign = self.last_turn_sign
         self.last_turn_sign = turn_sign
 
-        if abs(relative) <= self.drive_turn_tolerance_deg:
+        drive_turn_tolerance = (
+            self.drive_turn_tolerance_deg
+            if drive_turn_tolerance_deg is None
+            else float(drive_turn_tolerance_deg)
+        )
+        if abs(relative) <= drive_turn_tolerance:
             if turn_sign > 0:
                 return "astar forward turn right", relative
             return "astar forward turn left", relative
@@ -586,8 +843,27 @@ class AStarBaseline:
         return "astar turn left", relative
 
     def _relative_angle_to_point(
-        self, curr_xy: Point, waypoint_xy: Point, agent_theta: float
+        self,
+        curr_xy: Point,
+        waypoint_xy: Point,
+        agent_theta: float,
+        *,
+        curr_world_xz: Optional[WorldPoint] = None,
+        waypoint_world_xz: Optional[WorldPoint] = None,
     ) -> Optional[float]:
+        if curr_world_xz is not None and waypoint_world_xz is not None:
+            dx = waypoint_world_xz[0] - curr_world_xz[0]
+            dz = waypoint_world_xz[1] - curr_world_xz[1]
+            if abs(dx) < 1e-6 and abs(dz) < 1e-6:
+                return None
+            target_yaw = math.degrees(math.atan2(dx, dz)) % 360.0
+            relative = target_yaw - float(agent_theta)
+            while relative > 180.0:
+                relative -= 360.0
+            while relative < -180.0:
+                relative += 360.0
+            return relative
+
         dx = waypoint_xy[0] - curr_xy[0]
         dy = waypoint_xy[1] - curr_xy[1]
         if abs(dx) < 1e-6 and abs(dy) < 1e-6:

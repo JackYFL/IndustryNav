@@ -18,10 +18,14 @@
 #                                  which prefers the in-repo unity_client/ build, no path needed)
 #   SCENE_ID     override the scene_code->scene_id mapping
 #   MAX_STEPS    per-point decision-step cap               (default: 70)
+#   REACH_M      success radius in Unity world meters       (default: 2.0)
 #   EGO_WIDTH / EGO_HEIGHT  egocentric RGB/depth sensor size (default: 512 / 512)
 #   MINIMAP_WIDTH / MINIMAP_HEIGHT  minimap size; set either value and derive
 #                                  the other using 862:512 (default: 862x512)
 #   DYNAMIC_OBJECTS  moving | static                       (default: moving)
+#   LIGHT_INTENSITY_MULTIPLIER  optional fixed global light multiplier
+#   LIGHT_INTENSITY_MIN / LIGHT_INTENSITY_MAX  optional per-run range
+#   LIGHT_RANDOM_SEED / LIGHT_FIXED_EXPOSURE    defaults: 0 / 9.0 EV
 #   PYTHON_BIN   interpreter                               (default: <repo>/.venv/bin/python)
 #   USE_XVFB / XVFB_SCREEN   Linux virtual-display knobs    (default: 1 / 1724x1024x24)
 #   INDUSTRYNAV_UNITY_BATCHMODE  pass -batchmode to Unity    (default: 0 on Linux, 1 elsewhere)
@@ -47,18 +51,18 @@ fi
 
 # scene_code -> scene_id baked into the unified client. Override via SCENE_ID.
 case "$SCENE_CODE" in
-  scene1)  SCENE_ID_DEFAULT=1  ;;
-  scene2)  SCENE_ID_DEFAULT=2  ;;
-  scene3)  SCENE_ID_DEFAULT=3  ;;
-  scene4)  SCENE_ID_DEFAULT=4  ;;
-  scene5)  SCENE_ID_DEFAULT=5  ;;
-  scene6)  SCENE_ID_DEFAULT=6  ;;
-  scene7)  SCENE_ID_DEFAULT=7  ;;
-  scene8)  SCENE_ID_DEFAULT=8  ;;
-  scene9)  SCENE_ID_DEFAULT=9  ;;
-  scene10) SCENE_ID_DEFAULT=10 ;;
-  scene11) SCENE_ID_DEFAULT=11 ;;
-  scene12) SCENE_ID_DEFAULT=12 ;;
+  scene1)  SCENE_ID_DEFAULT=0  ;;
+  scene2)  SCENE_ID_DEFAULT=1  ;;
+  scene3)  SCENE_ID_DEFAULT=2  ;;
+  scene4)  SCENE_ID_DEFAULT=3  ;;
+  scene5)  SCENE_ID_DEFAULT=4  ;;
+  scene6)  SCENE_ID_DEFAULT=5  ;;
+  scene7)  SCENE_ID_DEFAULT=6  ;;
+  scene8)  SCENE_ID_DEFAULT=7  ;;
+  scene9)  SCENE_ID_DEFAULT=8  ;;
+  scene10) SCENE_ID_DEFAULT=9  ;;
+  scene11) SCENE_ID_DEFAULT=10 ;;
+  scene12) SCENE_ID_DEFAULT=11 ;;
   *)       echo "Unknown scene_code: $SCENE_CODE"; exit 1 ;;
 esac
 SCENE_ID="${SCENE_ID:-$SCENE_ID_DEFAULT}"
@@ -112,13 +116,27 @@ if [[ ! -f "$INPUT_FILE" ]]; then
 fi
 
 MAX_STEPS="${MAX_STEPS:-70}"
+REACH_M="${REACH_M:-2.0}"
 EGO_WIDTH="${EGO_WIDTH:-512}"
 EGO_HEIGHT="${EGO_HEIGHT:-512}"
 MINIMAP_WIDTH="${MINIMAP_WIDTH:-}"
 MINIMAP_HEIGHT="${MINIMAP_HEIGHT:-}"
 DYNAMIC_OBJECTS="${DYNAMIC_OBJECTS:-moving}"
+LIGHT_INTENSITY_MULTIPLIER="${LIGHT_INTENSITY_MULTIPLIER:-${GLOBAL_LIGHT_INTENSITY:-}}"
+LIGHT_INTENSITY_MIN="${LIGHT_INTENSITY_MIN:-}"
+LIGHT_INTENSITY_MAX="${LIGHT_INTENSITY_MAX:-}"
+LIGHT_RANDOM_SEED="${LIGHT_RANDOM_SEED:-0}"
+LIGHT_FIXED_EXPOSURE="${LIGHT_FIXED_EXPOSURE:-9.0}"
 if [[ "$DYNAMIC_OBJECTS" != "moving" && "$DYNAMIC_OBJECTS" != "static" ]]; then
   echo "DYNAMIC_OBJECTS must be 'moving' or 'static', got: $DYNAMIC_OBJECTS"
+  exit 1
+fi
+if [[ -n "$LIGHT_INTENSITY_MULTIPLIER" && ( -n "$LIGHT_INTENSITY_MIN" || -n "$LIGHT_INTENSITY_MAX" ) ]]; then
+  echo "LIGHT_INTENSITY_MULTIPLIER cannot be combined with LIGHT_INTENSITY_MIN/MAX."
+  exit 1
+fi
+if [[ -n "$LIGHT_INTENSITY_MIN" && -z "$LIGHT_INTENSITY_MAX" ]] || [[ -z "$LIGHT_INTENSITY_MIN" && -n "$LIGHT_INTENSITY_MAX" ]]; then
+  echo "LIGHT_INTENSITY_MIN and LIGHT_INTENSITY_MAX must be set together."
   exit 1
 fi
 if [[ -z "$MINIMAP_WIDTH" && -z "$MINIMAP_HEIGHT" ]]; then
@@ -160,6 +178,7 @@ PY
        --worker_id "$WORKER_ID"
        --base_port "$BASE_PORT"
        --max_steps "$MAX_STEPS"
+       --reach_m "$REACH_M"
        --ego_width "$EGO_WIDTH"
        --ego_height "$EGO_HEIGHT"
        --dynamic_objects "$DYNAMIC_OBJECTS"
@@ -175,6 +194,14 @@ PY
   fi
   if [[ -n "$MINIMAP_HEIGHT" ]]; then
     CMD+=(--minimap_height "$MINIMAP_HEIGHT")
+  fi
+  if [[ -n "$LIGHT_INTENSITY_MULTIPLIER" ]]; then
+    CMD+=(--light_intensity_multiplier "$LIGHT_INTENSITY_MULTIPLIER")
+  elif [[ -n "$LIGHT_INTENSITY_MIN" ]]; then
+    CMD+=(--light_intensity_min "$LIGHT_INTENSITY_MIN" --light_intensity_max "$LIGHT_INTENSITY_MAX")
+  fi
+  if [[ -n "$LIGHT_INTENSITY_MULTIPLIER" || -n "$LIGHT_INTENSITY_MIN" ]]; then
+    CMD+=(--light_random_seed "$LIGHT_RANDOM_SEED" --light_fixed_exposure "$LIGHT_FIXED_EXPOSURE")
   fi
   # Prepend the xvfb prefix only when non-empty (safe under `set -u` on bash 3.2).
   if [[ ${#XVFB_PREFIX[@]} -gt 0 ]]; then

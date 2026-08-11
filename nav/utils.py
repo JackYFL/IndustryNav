@@ -105,6 +105,20 @@ def append_results_csv(csv_path: str, row: dict) -> None:
     """
     ensure_parent_dir(csv_path)
     file_exists = os.path.exists(csv_path)
+    if file_exists:
+        with open(csv_path, newline="") as existing_file:
+            reader = csv.DictReader(existing_file)
+            existing_rows = list(reader)
+            existing_fields = reader.fieldnames or []
+        if existing_fields != RESULTS_CSV_FIELDS:
+            with open(csv_path, "w", newline="") as migrated_file:
+                writer = csv.DictWriter(
+                    migrated_file,
+                    fieldnames=RESULTS_CSV_FIELDS,
+                    extrasaction="ignore",
+                )
+                writer.writeheader()
+                writer.writerows(existing_rows)
     with open(csv_path, "a", newline="") as f:
         w = csv.DictWriter(f, fieldnames=RESULTS_CSV_FIELDS, extrasaction="ignore")
         if not file_exists:
@@ -170,6 +184,16 @@ def srgb_to_linear(values: np.ndarray) -> np.ndarray:
     ).astype(np.float32)
 
 
+def linear_to_srgb(values: np.ndarray) -> np.ndarray:
+    """Encode normalized linear intensity as sRGB values."""
+    values = np.clip(np.asarray(values, dtype=np.float32), 0.0, 1.0)
+    return np.where(
+        values <= 0.0031308,
+        values * 12.92,
+        1.055 * np.power(values, 1.0 / 2.4) - 0.055,
+    ).astype(np.float32)
+
+
 def decode_depth_observation_meters(
     obs: np.ndarray,
     max_distance_m: float = UNITY_DEPTH_MAX_DISTANCE_M,
@@ -191,6 +215,69 @@ def decode_depth_observation_meters(
     if depth.dtype == np.uint8:
         depth = depth.astype(np.float32) / 255.0
     return srgb_to_linear(depth) * float(max_distance_m)
+
+
+def metric_depth_to_visualization(
+    depth_m: np.ndarray,
+    max_distance_m: float = UNITY_DEPTH_MAX_DISTANCE_M,
+    *,
+    smooth: bool = True,
+) -> np.ndarray:
+    """Render metric depth as uint8 grayscale without changing source values.
+
+    A small bilateral filter reduces visible 8-bit sensor banding while
+    retaining object boundaries. This helper is for previews only; evaluation
+    and training should continue to consume the original PNG/NPY observations.
+    """
+    if max_distance_m <= 0:
+        raise ValueError("max_distance_m must be positive.")
+    depth = np.asarray(depth_m, dtype=np.float32)
+    if depth.ndim != 2:
+        raise ValueError(f"Expected a 2D metric depth map, got {depth.shape}.")
+    depth = np.nan_to_num(
+        depth,
+        nan=0.0,
+        posinf=float(max_distance_m),
+        neginf=0.0,
+    )
+    if smooth and min(depth.shape) >= 5:
+        source_depth = np.ascontiguousarray(depth)
+        edge_preserved = cv2.bilateralFilter(
+            source_depth,
+            d=11,
+            sigmaColor=0.75,
+            sigmaSpace=7.0,
+        )
+        softened = cv2.GaussianBlur(edge_preserved, (0, 0), sigmaX=1.4)
+
+        # Blend the final low-pass only across shallow quantization bands. A
+        # local metric range above 0.75 m is treated as a real object edge.
+        kernel = np.ones((5, 5), dtype=np.uint8)
+        local_range = cv2.dilate(source_depth, kernel) - cv2.erode(
+            source_depth, kernel
+        )
+        smooth_weight = np.clip((0.75 - local_range) / 0.60, 0.0, 1.0) * 0.85
+        depth = (
+            edge_preserved * (1.0 - smooth_weight)
+            + softened * smooth_weight
+        ).astype(np.float32)
+    encoded = linear_to_srgb(np.clip(depth / float(max_distance_m), 0.0, 1.0))
+    return np.round(encoded * 255.0).astype(np.uint8)
+
+
+def depth_observation_to_visualization(
+    obs: np.ndarray,
+    max_distance_m: float = UNITY_DEPTH_MAX_DISTANCE_M,
+    *,
+    smooth: bool = True,
+) -> np.ndarray:
+    """Decode a Unity depth observation and render a preview grayscale image."""
+    depth_m = decode_depth_observation_meters(obs, max_distance_m)
+    return metric_depth_to_visualization(
+        depth_m,
+        max_distance_m,
+        smooth=smooth,
+    )
 
 
 def save_frame_from_obs(
@@ -294,16 +381,20 @@ def action2signal(action: str, action_space: dict) -> np.ndarray:
     Unrecognized actions resolve to the zero signal (stop) for safety.
     """
     sig = np.array([[0.0, 0.0, 0.0]], dtype=np.float32)
-    if action in ("astar forward turn right", "astar forward right"):
+    if action == "astar forward":
+        sig[0, 0] = action_space.get("forward", 0.0) * 0.5
+    elif action in ("astar forward turn right", "astar forward right"):
         sig[0, 0] = action_space.get("forward", 0.0) * 0.5
         sig[0, 2] = action_space.get("turn right", 0.0) * 0.25
     elif action in ("astar forward turn left", "astar forward left"):
         sig[0, 0] = action_space.get("forward", 0.0) * 0.5
         sig[0, 2] = action_space.get("turn left", 0.0) * 0.25
     elif action == "astar turn right":
-        sig[0, 2] = action_space.get("turn right", 0.0) * 0.25
+        # Pure turns can use the full annotation turn rate. The reduced rate is
+        # only needed while driving to keep curved motion from overshooting.
+        sig[0, 2] = action_space.get("turn right", 0.0)
     elif action == "astar turn left":
-        sig[0, 2] = action_space.get("turn left", 0.0) * 0.25
+        sig[0, 2] = action_space.get("turn left", 0.0)
     elif action in ("forward turn right", "forward right"):
         sig[0, 0] = action_space.get("forward", 0.0)
         sig[0, 2] = action_space.get("turn right", 0.0)

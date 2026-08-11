@@ -2,6 +2,8 @@
 All prompts for the multi-agent navigation system.
 """
 
+from nav.config import DEFAULT_REACH_DISTANCE_M
+
 # ========== GLOBAL PLANNER PROMPTS ==========
 
 GLOBAL_PLANNER_PROMPT_MINIMAP_ONLY = """You are a GLOBAL NAVIGATION PLANNER for a warehouse robot.
@@ -13,7 +15,7 @@ Your job: Analyze the minimap to suggest high-level navigation direction toward 
   * The TIP of the red triangle points in the direction the agent is FACING
   * Current heading: {heading}° (0°=North/Up, 90°=East/Right, 180°=South/Down, 270°=West/Left)
 - Target position (green dot): ({target_x}, {target_y})
-- Distance to target: {distance:.1f} pixels
+- World distance to target: {distance:.2f} m
 
 ## MINIMAP COORDINATE SYSTEM
 - **North (N) = UP on the map**
@@ -63,7 +65,7 @@ Your job: Analyze the minimap and trajectory history to suggest high-level navig
   * The TIP of the red triangle points in the direction the agent is FACING
   * Current heading: {heading}° (0°=North/Up, 90°=East/Right, 180°=South/Down, 270°=West/Left)
 - Target position (green dot): ({target_x}, {target_y})
-- Distance to target: {distance:.1f} pixels
+- World distance to target: {distance:.2f} m
 
 ## MINIMAP COORDINATE SYSTEM
 - **North (N) = UP on the map**
@@ -116,7 +118,7 @@ Your job: Analyze the first-person camera view to identify immediate obstacles a
 ## CURRENT SITUATION
 - Current heading: {heading}° (0=North, 90=East, 180=South, 270=West)
 - **Target bearing: {target_bearing}° relative to agent** (0°=straight ahead, -90°=left, +90°=right, ±180°=behind)
-- **Target distance: {target_distance:.1f} pixels** (close <20px, medium 20-50px, far >50px)
+- **Target world distance: {target_distance:.2f} m** (close <2m, medium 2-5m, far >5m)
 
 ## AVAILABLE ACTIONS
 {allowed_actions}
@@ -173,7 +175,7 @@ Your job: Analyze first-person and bird's-eye views to identify immediate obstac
 ## CURRENT SITUATION
 - Current heading: {heading}° (0=North, 90=East, 180=South, 270=West)
 - **Target bearing: {target_bearing}° relative to agent** (0°=straight ahead, -90°=left, +90°=right, ±180°=behind)
-- **Target distance: {target_distance:.1f} pixels** (close <20px, medium 20-50px, far >50px)
+- **Target world distance: {target_distance:.2f} m** (close <2m, medium 2-5m, far >5m)
 
 ## AVAILABLE ACTIONS
 {allowed_actions}
@@ -235,7 +237,7 @@ Your job: Synthesize recommendations from the Global Planner and Local Planner t
 ## CURRENT STATE
 - Position: ({current_x}, {current_y}) on minimap
 - Target: ({target_x}, {target_y}) on minimap
-- Distance to target: {distance:.1f} pixels (STOP if < {threshold:.1f})
+- World distance to target: {distance:.2f} m (STOP if <= {threshold:.2f} m)
 - World position: X={world_x:.2f}, Y={world_y:.2f}, Z={world_z:.2f}
 - Rotation: RotY={rot_y:.2f}° (heading)
 
@@ -257,7 +259,7 @@ Your job: Synthesize recommendations from the Global Planner and Local Planner t
 {allowed_actions}
 
 ## DECISION RULES (Priority Order)
-1. **Goal reached**: If distance < {threshold:.1f}px, choose "stop" immediately
+1. **Goal reached**: If world distance <= {threshold:.2f} m, choose "stop" immediately
 
 2. **EMERGENCY situation**: If local emergency=true, ONLY choose from safe_directions
    - Ignore global recommendations completely
@@ -342,30 +344,71 @@ def format_history_for_prompt(history_deque) -> str:
         return "No previous movements yet."
     lines = []
     for entry in history_deque:
+        world_position = entry.get("world_position")
+        distance_m = entry.get("distance_to_target_m")
+        if world_position is not None and distance_m is not None:
+            position_label = (
+                f"World X/Z ({world_position[0]:.2f}, {world_position[1]:.2f}) m"
+            )
+            distance_label = f"{distance_m:.2f} m"
+        else:
+            pixel_position = entry.get("position", ("?", "?"))
+            position_label = (
+                f"Legacy minimap position ({pixel_position[0]}, {pixel_position[1]}) px"
+            )
+            pixel_distance = entry.get("distance_to_target")
+            distance_label = (
+                f"{pixel_distance:.1f} px"
+                if pixel_distance is not None
+                else "unavailable"
+            )
         lines.append(
-            f"Step {entry['step']}: Position ({entry['position'][0]},{entry['position'][1]}), "
+            f"Step {entry['step']}: {position_label}, "
             f"θ={entry['theta']:.1f}°, Action: '{entry['action']}', "
-            f"Distance to target: {entry['distance_to_target']:.1f}px"
+            f"Distance to target: {distance_label}"
         )
     return "\n".join(lines)
 
 
 def render_nav_prompt(
-    tmpl: str, curr_xy, target_xy, theta, distance, allowed_actions, history_str
+    tmpl: str,
+    curr_xy,
+    target_xy,
+    theta,
+    distance_px,
+    allowed_actions,
+    history_str,
+    *,
+    curr_world_xz=None,
+    target_world_xz=None,
+    distance_m=None,
+    reach_m=DEFAULT_REACH_DISTANCE_M,
+    dynamic_objects="moving",
 ) -> str:
     """Fill a navigation prompt template's placeholders.
 
-    Placeholders: ``curr_x/curr_y``, ``theta``, ``target_x/target_y``,
-    ``distance``, ``allowed_actions``, ``history``. ``curr_xy`` / ``target_xy``
-    may be None (rendered as the string "None").
+    Pixel placeholders are retained for minimap interpretation. World X/Z and
+    metric distance placeholders drive navigation and stopping decisions.
     """
     return tmpl.format(
         curr_x=int(curr_xy[0]) if curr_xy else "None",
         curr_y=int(curr_xy[1]) if curr_xy else "None",
+        curr_world_x=f"{curr_world_xz[0]:.2f}" if curr_world_xz else "unavailable",
+        curr_world_z=f"{curr_world_xz[1]:.2f}" if curr_world_xz else "unavailable",
         theta=f"{theta:.1f}",
         target_x=int(target_xy[0]) if target_xy else "None",
         target_y=int(target_xy[1]) if target_xy else "None",
-        distance=f"{distance:.2f}",
+        target_world_x=(
+            f"{target_world_xz[0]:.2f}" if target_world_xz else "unavailable"
+        ),
+        target_world_z=(
+            f"{target_world_xz[1]:.2f}" if target_world_xz else "unavailable"
+        ),
+        distance=f"{distance_px:.2f}",
+        distance_px=f"{distance_px:.2f}",
+        distance_m=f"{distance_m:.2f}" if distance_m is not None else "unavailable",
+        reach_m=f"{reach_m:.2f}",
         allowed_actions=str(allowed_actions),
         history=history_str,
+        dynamic_objects=str(dynamic_objects),
     )

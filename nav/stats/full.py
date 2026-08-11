@@ -25,7 +25,7 @@ from typing import List, Sequence, Tuple
 import numpy as np
 
 from nav.config import (
-    EVAL_SUCCESS_DIST_PX,
+    EVAL_SUCCESS_DIST_M,
     STATS_REPORT_BASE_METRICS,
     STATS_REPORT_OPTIONAL_METRICS,
 )
@@ -305,7 +305,7 @@ def _render_report(
               f"Spearman split: `{spearman_split}`.\n\n")
     md.append("**Metric definitions** (matching `eval_metrics.py`):\n")
     md.append(
-        f"- **SR** (success rate): final `distance_px < {EVAL_SUCCESS_DIST_PX}`. "
+        f"- **SR** (success rate): final `distance_world <= {EVAL_SUCCESS_DIST_M:g} m`. "
         "Per-cell binary 0/1.\n"
     )
     md.append("- **DR** (distance ratio): `|start_dist − final_dist| / start_dist`, clamped to 1 on success.\n")

@@ -21,12 +21,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
 
-import numpy as np
-
 from nav.config import (
     EVAL_COLLISION_PX_THRESH,
     EVAL_ROI_PARAMS,
-    EVAL_SUCCESS_DIST_PX,
+    EVAL_SUCCESS_DIST_M,
     EVAL_WARNING_THRESHOLD_M,
 )
 from nav.eval.collision import compute_collision_rate
@@ -44,7 +42,7 @@ class EvaluateOptions:
 
     warning_threshold_m: float = EVAL_WARNING_THRESHOLD_M
     collision_threshold_px: int = EVAL_COLLISION_PX_THRESH
-    success_dist_px: int = EVAL_SUCCESS_DIST_PX
+    success_dist_m: float = EVAL_SUCCESS_DIST_M
     bottom_margin: float = EVAL_ROI_PARAMS["bottom_margin"]
     top_margin: float = EVAL_ROI_PARAMS["top_margin"]
     bottom_pad: float = EVAL_ROI_PARAMS["bottom_pad"]
@@ -62,12 +60,12 @@ class EvaluateOptions:
 
 def compute_success_efficiency_distance(
     actions_csv: Path,
-    success_dist_px: int = EVAL_SUCCESS_DIST_PX,
+    success_dist_m: float = EVAL_SUCCESS_DIST_M,
 ) -> Tuple[int, int, float]:
     """Compute (success, efficiency_steps, distance_ratio) from an actions CSV.
 
-    - ``success`` ∈ {0, 1}: 1 if the final pixel-distance to the target is
-      strictly below ``success_dist_px``.
+    - ``success`` ∈ {0, 1}: 1 if the final world-distance is at or below
+      ``success_dist_m``. Rows without a valid world distance are ignored.
     - ``efficiency_steps``: the number of step rows in the CSV (a proxy for
       time-to-target; lower is better when ``success == 1``).
     - ``distance_ratio``: ``|start_dist - final_dist| / start_dist``,
@@ -83,31 +81,25 @@ def compute_success_efficiency_distance(
         for row in reader:
             try:
                 step_num = int(float(row["step"]))
-                curr_px = int(float(row["curr_px"]))
-                curr_py = int(float(row["curr_py"]))
-                target_px = int(float(row["target_px"]))
-                target_py = int(float(row["target_py"]))
-                distance_px = float(row["distance_px"])
+                distance_world = float(row["distance_world"])
             except (ValueError, KeyError, TypeError):
+                distance_world = None
+            if distance_world is None or not math.isfinite(distance_world):
                 continue
             rows.append({
                 "step": step_num,
-                "pos": (curr_px, curr_py),
-                "target": (target_px, target_py),
-                "distance_px": distance_px,
+                "distance_world": distance_world,
             })
 
     if not rows:
         return 0, 0, 0.0
 
     rows.sort(key=lambda r: r["step"])
-    start_pos = rows[0]["pos"]
-    target_pos = rows[0]["target"]
-    start_dist = float(np.hypot(start_pos[0] - target_pos[0], start_pos[1] - target_pos[1]))
-    final_dist = float(rows[-1]["distance_px"])
+    start_dist = float(rows[0]["distance_world"])
+    final_dist = float(rows[-1]["distance_world"])
     efficiency_steps = len(rows)
 
-    success = 1 if final_dist < success_dist_px else 0
+    success = 1 if final_dist <= success_dist_m else 0
 
     if start_dist > 0:
         distance_ratio = math.fabs(start_dist - final_dist) / start_dist
@@ -152,7 +144,8 @@ def evaluate_run(
         actions_csv, collision_px_thresh=opts.collision_threshold_px,
     )
     success, efficiency_steps, distance_ratio = compute_success_efficiency_distance(
-        actions_csv, success_dist_px=opts.success_dist_px,
+        actions_csv,
+        success_dist_m=opts.success_dist_m,
     )
 
     # results.csv carries the run's final metadata. When present, override
@@ -160,6 +153,7 @@ def evaluate_run(
     # values (the CSV may include extra logged-but-not-acted-on frames).
     results_row = read_latest_results_row(input_dir / "results.csv")
     final_distance_px: Optional[float] = None
+    final_distance_world: Optional[float] = None
     stop_reason = ""
     steps_taken: Optional[int] = None
     if results_row:
@@ -167,14 +161,20 @@ def evaluate_run(
             final_distance_px = float(results_row.get("distance_px", ""))
         except (ValueError, TypeError):
             final_distance_px = None
+        try:
+            final_distance_world = float(results_row.get("distance_world", ""))
+        except (ValueError, TypeError):
+            final_distance_world = None
         stop_reason = results_row.get("stop_reason", "")
         try:
             steps_taken = int(float(results_row.get("steps_taken", "")))
         except (ValueError, TypeError):
             steps_taken = None
 
-    if final_distance_px is not None:
-        success = 1 if final_distance_px < opts.success_dist_px else 0
+    if final_distance_world is not None:
+        success = 1 if final_distance_world <= opts.success_dist_m else 0
+    else:
+        success = 0
     if steps_taken is not None:
         efficiency_steps = steps_taken
 
@@ -186,6 +186,7 @@ def evaluate_run(
         "success_ratio": success,
         "efficiency_steps": efficiency_steps,
         "distance_ratio": distance_ratio,
+        "final_distance_world": final_distance_world,
         "final_distance_px": final_distance_px,
         "stop_reason": stop_reason,
         "warning_steps": warning_steps,

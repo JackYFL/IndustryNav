@@ -43,18 +43,18 @@ UNITY_DEPTH_MAX_DISTANCE_M: float = 20.0
 MODALITY_TO_IDX: Dict[str, int] = {"ego": 0, "depth": 1, "minimap": 2}
 
 SCENE_ID_MAP: Dict[str, int] = {
-    "scene1": 1,
-    "scene2": 2,
-    "scene3": 3,
-    "scene4": 4,
-    "scene5": 5,
-    "scene6": 6,
-    "scene7": 7,
-    "scene8": 8,
-    "scene9": 9,
-    "scene10": 10,
-    "scene11": 11,
-    "scene12": 12,
+    "scene1": 0,
+    "scene2": 1,
+    "scene3": 2,
+    "scene4": 3,
+    "scene5": 4,
+    "scene6": 5,
+    "scene7": 6,
+    "scene8": 7,
+    "scene9": 8,
+    "scene10": 9,
+    "scene11": 10,
+    "scene12": 11,
 }
 
 # UUIDs/opcodes must match the Unity C# side-channel registration.
@@ -104,14 +104,15 @@ class AStarParams:
     min_free_ratio: float = 0.55
     obstacle_inflate_px: int = 8
     marker_clear_px: int = 16
-    waypoint_distance_px: float = 28.0
-    waypoint_reach_px: float = 24.0
-    path_replan_distance_px: float = 56.0
     target_change_replan_px: float = 8.0
     turn_tolerance_deg: float = 25.0
-    forward_priority_tolerance_deg: float = 35.0
-    drive_turn_tolerance_deg: float = 65.0
-    lookahead_px: float = 80.0
+    forward_priority_tolerance_deg: float = 20.0
+    drive_turn_tolerance_deg: float = 30.0
+    waypoint_distance_m: float = 2.0
+    waypoint_reach_m: float = 1.2
+    path_replan_distance_m: float = 2.4
+    terminal_approach_m: float = 3.0
+    lookahead_m: float = 3.0
     front_cone_deg: float = 140.0
     hysteresis_reset_deg: float = 45.0
     hysteresis_lock_deg: float = 165.0
@@ -122,7 +123,7 @@ class AStarParams:
     stuck_block_ahead_px: float = 28.0
     stuck_block_radius_px: float = 18.0
     stuck_block_ttl_steps: int = 24
-    proxy_stop_real_dist_px: float = 65.0
+    proxy_stop_real_dist_m: float = 4.9
 
 
 ASTAR_DEFAULTS = AStarParams()
@@ -130,7 +131,8 @@ ASTAR_DEFAULTS = AStarParams()
 
 # Evaluation
 
-EVAL_SUCCESS_DIST_PX: int = 20
+DEFAULT_REACH_DISTANCE_M: float = 2.0
+EVAL_SUCCESS_DIST_M: float = DEFAULT_REACH_DISTANCE_M
 EVAL_COLLISION_PX_THRESH: int = 34
 EVAL_WARNING_THRESHOLD_M: float = 0.3
 EVAL_ROI_PARAMS: Dict[str, float] = {
@@ -153,13 +155,16 @@ RESULTS_CSV_FIELDS: List[str] = [
     "model",
     "vision_input",
     "max_steps",
-    "reach_px",
+    "reach_m",
     "target_x",
     "target_y",
+    "target_world_x",
+    "target_world_z",
     "init_direction",
     "final_x",
     "final_y",
     "distance_px",
+    "distance_world",
     "stop_reason",
     "steps_taken",
     "frame_sleep",
@@ -168,6 +173,13 @@ RESULTS_CSV_FIELDS: List[str] = [
     "marker_source",
     "spline_speed_multiplier",
     "dynamic_objects",
+    "global_light_intensity",
+    "light_randomization_mode",
+    "light_intensity_multiplier",
+    "light_intensity_min",
+    "light_intensity_max",
+    "light_random_seed",
+    "light_fixed_exposure",
 ]
 
 ACTIONS_CSV_FIELDS: List[str] = [
@@ -206,6 +218,13 @@ GRID_CSV_FIELDS: List[str] = [
     "vision_input",
     "history_size",
     "dynamic_objects",
+    "global_light_intensity",
+    "light_randomization_mode",
+    "light_intensity_multiplier",
+    "light_intensity_min",
+    "light_intensity_max",
+    "light_random_seed",
+    "light_fixed_exposure",
     "ok",
     "returncode",
     "duration_sec",

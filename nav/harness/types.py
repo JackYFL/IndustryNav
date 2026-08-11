@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from typing import List, Tuple, Optional, Dict
 import numpy as np
 
+from nav.config import DEFAULT_REACH_DISTANCE_M
+
 
 @dataclass
 class GlobalPlannerInput:
@@ -21,7 +23,8 @@ class GlobalPlannerInput:
     # Metadata
     current_position: Tuple[int, int] = (0, 0)  # (x, y) on minimap
     target_position: Tuple[int, int] = (0, 0)  # (x, y) on minimap
-    distance_to_target: float = 0.0  # Euclidean distance in pixels
+    distance_to_target: float = 0.0  # Unity world X/Z distance in meters
+    reach_threshold_m: float = DEFAULT_REACH_DISTANCE_M
 
     # Agent state
     agent_rotation: float = (
@@ -59,7 +62,7 @@ class LocalPlannerInput:
     target_bearing: float = (
         0.0  # Relative angle to target (-180 to 180, 0=straight ahead)
     )
-    target_distance: float = 0.0  # Distance to target (for urgency assessment)
+    target_distance: float = 0.0  # Unity world X/Z distance in meters
 
 
 @dataclass
@@ -97,7 +100,7 @@ class DecisionMakerInput:
     # Current state
     current_position: Tuple[int, int] = (0, 0)  # Minimap coordinates
     target_position: Tuple[int, int] = (0, 0)
-    distance_to_target: float = 0.0
+    distance_to_target: float = 0.0  # Unity world X/Z distance in meters
 
     # Agent physical state
     agent_world_position: Tuple[float, float, float] = (0.0, 0.0, 0.0)
@@ -105,7 +108,7 @@ class DecisionMakerInput:
 
     # Context
     allowed_actions: List[str] = field(default_factory=list)
-    reach_threshold: float = 3.0  # Stop if within this distance (pixels)
+    reach_threshold: float = DEFAULT_REACH_DISTANCE_M  # Meters
 
 
 @dataclass

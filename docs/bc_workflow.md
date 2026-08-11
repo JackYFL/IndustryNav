@@ -39,6 +39,9 @@ python -m nav.scripts.collect_data \
   --ego_height 512 \
   --minimap_width 862 \
   --dynamic_objects moving \
+  --light_intensity_min 0.7 \
+  --light_intensity_max 1.3 \
+  --light_random_seed 42 \
   --modalities ego,minimap,depth \
   --marker_source vector
 ```
@@ -46,8 +49,8 @@ python -m nav.scripts.collect_data \
 Set `--ego_width` and `--ego_height` to collect egocentric RGB and depth frames
 at a different resolution. Set either `--minimap_width` or `--minimap_height`;
 the missing dimension is derived automatically from the canonical `862:512`
-aspect ratio. Canonical minimap coordinates and pixel thresholds are scaled to
-the selected runtime size automatically.
+aspect ratio. Canonical minimap coordinates and image-space parameters are
+scaled to the selected runtime size automatically.
 The Unity client must be rebuilt from the current project for these arguments
 to take effect.
 

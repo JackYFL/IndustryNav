@@ -52,6 +52,7 @@ from typing import List, Optional
 
 from nav.config import (
     ANALYSIS_ROOT,
+    DEFAULT_REACH_DISTANCE_M,
     DEFAULT_PROMPT_NOVISION,
     DEFAULT_PROMPT_VISION,
     GRID_CSV_FIELDS,
@@ -59,6 +60,11 @@ from nav.config import (
     SCENE_ID_MAP,
 )
 from nav.harness.coordinates import resolve_minimap_resolution
+from nav.harness.lighting import (
+    add_lighting_args,
+    lighting_result_fields,
+    resolve_lighting_config,
+)
 
 
 # nav/scripts/run_benchmark_grid.py -> repo root is two parents up.
@@ -178,6 +184,7 @@ def run_cell(args_dict: dict) -> dict:
     file_name = args_dict["file_name"]
     python_bin = args_dict["python_bin"]
     max_steps = args_dict["max_steps"]
+    reach_m = args_dict["reach_m"]
     use_xvfb = args_dict["use_xvfb"]
     xvfb_screen = args_dict["xvfb_screen"]
     ego_width = args_dict["ego_width"]
@@ -185,6 +192,20 @@ def run_cell(args_dict: dict) -> dict:
     minimap_width = args_dict["minimap_width"]
     minimap_height = args_dict["minimap_height"]
     dynamic_objects = args_dict["dynamic_objects"]
+    lighting_args = argparse.Namespace(
+        scene_id=SCENE_ID_MAP[cell.scene_name],
+        scene_name=cell.scene_name,
+        point_id=cell.point_id,
+        seed_id=cell.seed_id,
+        global_light_intensity=args_dict["global_light_intensity"],
+        light_intensity_multiplier=args_dict["light_intensity_multiplier"],
+        light_intensity_min=args_dict["light_intensity_min"],
+        light_intensity_max=args_dict["light_intensity_max"],
+        light_random_seed=args_dict["light_random_seed"],
+        light_fixed_exposure=args_dict["light_fixed_exposure"],
+    )
+    lighting = resolve_lighting_config(lighting_args)
+    lighting_fields = lighting_result_fields(lighting_args)
 
     cell.frame_save_dir.mkdir(parents=True, exist_ok=True)
     log_path = cell.frame_save_dir / "run.log"
@@ -208,6 +229,7 @@ def run_cell(args_dict: dict) -> dict:
         "--worker_id", "0",
         "--base_port", str(base_port),
         "--max_steps", str(max_steps),
+        "--reach_m", str(reach_m),
         "--ego_width", str(ego_width),
         "--ego_height", str(ego_height),
         "--minimap_width", str(minimap_width),
@@ -222,6 +244,23 @@ def run_cell(args_dict: dict) -> dict:
         "--target_x", str(cell.target_x),
         "--target_y", str(cell.target_y),
     ]
+    if args_dict["global_light_intensity"] is not None:
+        cmd += ["--global_light_intensity", str(args_dict["global_light_intensity"])]
+    if args_dict["light_intensity_multiplier"] is not None:
+        cmd += [
+            "--light_intensity_multiplier",
+            str(args_dict["light_intensity_multiplier"]),
+        ]
+    if lighting.enabled and lighting.mode == "range":
+        cmd += [
+            "--light_intensity_min", str(args_dict["light_intensity_min"]),
+            "--light_intensity_max", str(args_dict["light_intensity_max"]),
+        ]
+    if lighting.enabled:
+        cmd += [
+            "--light_random_seed", str(args_dict["light_random_seed"]),
+            "--light_fixed_exposure", str(args_dict["light_fixed_exposure"]),
+        ]
 
     started = time.time()
     try:
@@ -247,6 +286,7 @@ def run_cell(args_dict: dict) -> dict:
             "log_path": str(log_path),
             "cell": asdict(cell),
             "dynamic_objects": dynamic_objects,
+            "lighting": lighting_fields,
         }
     except subprocess.TimeoutExpired:
         return {
@@ -258,6 +298,7 @@ def run_cell(args_dict: dict) -> dict:
             "log_path": str(log_path),
             "cell": asdict(cell),
             "dynamic_objects": dynamic_objects,
+            "lighting": lighting_fields,
             "error": "timeout",
         }
     except Exception as e:  # noqa: BLE001
@@ -270,6 +311,7 @@ def run_cell(args_dict: dict) -> dict:
             "log_path": str(log_path),
             "cell": asdict(cell),
             "dynamic_objects": dynamic_objects,
+            "lighting": lighting_fields,
             "error": f"{type(e).__name__}: {e}",
         }
 
@@ -290,6 +332,7 @@ def append_grid_row(grid_csv: Path, status: dict):
         "vision_input": cell["vision_input"],
         "history_size": cell["history_size"],
         "dynamic_objects": status["dynamic_objects"],
+        **status["lighting"],
         "ok": status["ok"],
         "returncode": status["returncode"],
         "duration_sec": round(status["duration_sec"], 2),
@@ -317,6 +360,7 @@ def append_failure_row(failures_csv: Path, status: dict, attempts: int):
         "vision_input": cell["vision_input"],
         "history_size": cell["history_size"],
         "dynamic_objects": status.get("dynamic_objects", ""),
+        **status.get("lighting", {}),
         "attempts": attempts,
         "returncode": status["returncode"],
         "error": status.get("error", ""),
@@ -352,6 +396,12 @@ def parse_args():
     p.add_argument("--max_concurrency", type=int, default=4,
                    help="Max parallel cells. Start at 4; bump up if you don't see OpenRouter 429s.")
     p.add_argument("--max_steps", type=int, default=70)
+    p.add_argument(
+        "--reach_m",
+        type=float,
+        default=DEFAULT_REACH_DISTANCE_M,
+        help=f"Success radius in Unity world meters (default: {DEFAULT_REACH_DISTANCE_M:g}).",
+    )
     p.add_argument("--ego_width", type=int, default=512,
                    help="Width of each egocentric RGB and depth observation.")
     p.add_argument("--ego_height", type=int, default=512,
@@ -366,6 +416,7 @@ def parse_args():
         default="moving",
         help="Run environment objects normally or freeze them for every grid cell.",
     )
+    add_lighting_args(p)
     p.add_argument("--max_retries", type=int, default=2,
                    help="Retry a failed cell this many times before logging it to failures.csv.")
     p.add_argument("--resume", action="store_true",
@@ -410,8 +461,14 @@ def resolve_file_name(arg_file_name: str) -> str:
 
 def main():
     args = parse_args()
+    try:
+        lighting = resolve_lighting_config(args)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     if args.ego_width <= 0 or args.ego_height <= 0:
         raise SystemExit("--ego_width and --ego_height must be positive integers.")
+    if args.reach_m <= 0:
+        raise SystemExit("--reach_m must be positive.")
     try:
         args.minimap_width, args.minimap_height = resolve_minimap_resolution(
             args.minimap_width,
@@ -453,9 +510,11 @@ def main():
 
     print(f"[grid] cells={len(cells)} | concurrency={args.max_concurrency} | "
           f"max_steps={args.max_steps} | vision={args.vision_input} | "
+          f"reach_m={args.reach_m:g} | "
           f"ego={args.ego_width}x{args.ego_height} | "
           f"minimap={args.minimap_width}x{args.minimap_height} | "
           f"dynamic_objects={args.dynamic_objects} | "
+          f"lighting={lighting.mode} | "
           f"file={file_name} | xvfb={use_xvfb}", flush=True)
 
     if args.dry_run:
@@ -483,11 +542,18 @@ def main():
                         "file_name": file_name,
                         "python_bin": args.python_bin,
                         "max_steps": args.max_steps,
+                        "reach_m": args.reach_m,
                         "ego_width": args.ego_width,
                         "ego_height": args.ego_height,
                         "minimap_width": args.minimap_width,
                         "minimap_height": args.minimap_height,
                         "dynamic_objects": args.dynamic_objects,
+                        "global_light_intensity": args.global_light_intensity,
+                        "light_intensity_multiplier": args.light_intensity_multiplier,
+                        "light_intensity_min": args.light_intensity_min,
+                        "light_intensity_max": args.light_intensity_max,
+                        "light_random_seed": args.light_random_seed,
+                        "light_fixed_exposure": args.light_fixed_exposure,
                         "use_xvfb": use_xvfb,
                         "xvfb_screen": args.xvfb_screen,
                         "per_cell_timeout_sec": (args.per_cell_timeout_sec or None),
@@ -506,6 +572,7 @@ def main():
                         "duration_sec": 0, "frame_save_dir": str(c.frame_save_dir),
                         "log_path": str(c.frame_save_dir / "run.log"),
                         "cell": asdict(c), "dynamic_objects": args.dynamic_objects,
+                        "lighting": lighting_result_fields(args),
                         "error": f"future failed: {type(e).__name__}: {e}",
                     }
 

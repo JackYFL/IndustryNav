@@ -32,6 +32,7 @@ from nav.harness.coordinates import (
     visual_to_unity_coords,
 )
 from nav.harness.observations import get_minimap_rgb_for_init, patch_observation_decoding
+from nav.harness.lighting import configure_unity_lighting
 from nav.harness.side_channels import BoundsSideChannel, TargetSideChannel
 
 
@@ -158,11 +159,16 @@ def _launch_env(args, logger):
         "spline_speed_multiplier",
         float(getattr(args, "spline_speed_multiplier", 1.0)),
     )
+    try:
+        lighting = configure_unity_lighting(env_params, args, logger)
+    except ValueError as exc:
+        env.close()
+        raise EnvSetupError(str(exc)) from exc
     if _set_world_spawn_parameters(env_params, args):
         logger.info("Seeded world spawn parameters before the initial Unity reset.")
     logger.info(
         f"Starting Unity ({args.file_name}) scene_id={args.scene_id} "
-        f"dynamic_objects={dynamic_objects}"
+        f"dynamic_objects={dynamic_objects} lighting={lighting.mode}"
     )
     logger.info(f"Unity launch args: {unity_args}")
     env.reset()
@@ -275,8 +281,11 @@ def _prime_target(
             f"unity{target_sc.last_target_pixel} -> world({target_world[0]:.2f},{target_world[1]:.2f})"
         )
         return target_world
-    logger.warning("Target world ack not received; world distance will be unavailable.")
-    return None
+    raise EnvSetupError(
+        "Target world mapping was not received from Unity. This client cannot "
+        "run the world-coordinate-only benchmark; rebuild it with the target "
+        "side-channel mapping enabled."
+    )
 
 
 def setup_and_prime(args, logger) -> PrimedEnv:

@@ -1,15 +1,94 @@
-# IndustryNav: Exploring Spatial Reasoning of Embodied Agents in Dynamic Industrial Navigation
+<div align="center">
+  <h1>IndustryNav</h1>
+  <h3>Exploring Spatial Reasoning of Embodied Agents in Dynamic Industrial Navigation</h3>
 
-[![Paper](https://img.shields.io/badge/Paper-arXiv-b31b1b?style=flat-square)](https://arxiv.org/pdf/2511.17384)
-[![Project Page](https://img.shields.io/badge/Project-Page-2f80ed?style=flat-square)](https://jackyfl.github.io/IndustryNav_project_page/)
+  <p>
+    <a href="https://arxiv.org/pdf/2511.17384"><img src="https://img.shields.io/badge/arXiv-2511.17384-B31B1B?style=for-the-badge&logo=arxiv&logoColor=white" alt="Paper"></a>
+    <a href="https://jackyfl.github.io/IndustryNav_project_page/"><img src="https://img.shields.io/badge/Project-Page-222222?style=for-the-badge&logo=githubpages&logoColor=white" alt="Project Page"></a>
+    <a href="https://github.com/JackYFL/IndustryNav"><img src="https://img.shields.io/badge/GitHub-Code-181717?style=for-the-badge&logo=github&logoColor=white" alt="GitHub Code"></a>
+  </p>
 
-**Authors:** Yifan Li, Lichi Li, Anh Dao, Xinyu Zhou, Wenjun Huang, Tianyi Ma, Yicheng Qiao, Zheda Mai, Daeun Lee, Zichen Chen, Pan Wang, Lehan Yang, Tianlong Wang, Zhen Tan, Sheng Li, Mohit Bansal, Yang Ni, Yu Kong
+  <p>
+    <img src="https://img.shields.io/badge/Unity-6-000000?style=flat-square&logo=unity&logoColor=white" alt="Unity 6">
+    <img src="https://img.shields.io/badge/Python-3.10-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.10">
+    <img src="https://img.shields.io/badge/Unity-ML--Agents-555555?style=flat-square&logo=unity&logoColor=white" alt="Unity ML-Agents">
+    <img src="https://img.shields.io/badge/Platforms-macOS%20%7C%20Linux%20%7C%20Windows-4C8BF5?style=flat-square" alt="Supported platforms">
+  </p>
 
-![Overview of the IndustryNav benchmark](docs/assets/industrynav_overview.png)
+  <p><strong>Yifan Li, Lichi Li, Anh Dao, Xinyu Zhou, Wenjun Huang, Tianyi Ma, Yicheng Qiao, Zheda Mai, Daeun Lee, Zichen Chen, Pan Wang, Lehan Yang, Tianlong Wang, Zhen Tan, Sheng Li, Mohit Bansal, Yang Ni, Yu Kong</strong></p>
+</div>
 
-*Overview of the IndustryNav benchmark: 12 dynamic Unity warehouses, egocentric observations with global odometry, action generation, and evaluation over success, efficiency, and safety.*
+<p align="center">
+  <a href="#news">News</a> |
+  <a href="#overview">Overview</a> |
+  <a href="#preview">Preview</a> |
+  <a href="#setup">Setup</a> |
+  <a href="#benchmark">Benchmark</a> |
+  <a href="#astar">A*</a>
+</p>
 
-## About the Paper
+---
+
+<a id="news"></a>
+## 📰 News
+
+- **2026-08-10**
+  - **Scenes and runtime**
+    - Expanded the unified Unity workflow to 24 warehouse scenes and added full-scene RGB, depth, and minimap validation.
+    - Added a single runtime flag for moving or freezing animations, splines, physics objects, NavMesh agents, particles, and timelines while keeping the navigation agent controllable.
+    - Added fixed and deterministic range-based scene-light multipliers, reproducible seeds, and fixed HDRP exposure; resolved lighting settings are recorded in run results.
+    - Aligned scene-code selection with the unified client's zero-based scene IDs.
+  - **Sensors and visualization**
+    - Added shared runtime resolution controls for egocentric RGB and depth, plus aspect-ratio-preserving minimap resizing when either width or height is supplied.
+    - Added vector-based agent position and heading markers, optional removal of the legacy Unity marker, and configurable minimap targets.
+    - Added fixed-scale depth PNGs with corresponding float32 metric-depth `.npy` files for training and safety evaluation.
+    - Added edge-preserving depth previews, 24-scene GIF export tooling, and a combined RGB/depth/A* navigation preview.
+  - **Navigation and baselines**
+    - Reworked A* path following to use Unity world X/Z distances for waypoint spacing, lookahead, off-path replanning, terminal approach, proxy handling, and target reach.
+    - Removed the pixel-based reach interface; runtime success now uses `reach_m=2.0` by default, while minimap pixels remain limited to image-space planning and diagnostics.
+    - Improved A* turning, terminal alignment, stuck recovery, virtual-obstacle handling, and debug path overlays.
+    - Updated LLM prompts and movement history to use world positions and meter distances, account for moving obstacles, and route learned/LLM agents through the agent action space.
+  - **Evaluation and outputs**
+    - Unified runtime, data-collection, post-hoc evaluation, and aggregate statistics around final Unity world distance, with no pixel-distance success fallback.
+    - Added world target coordinates, metric distance, dynamic-object state, and lighting configuration to result records while retaining canonical pixel distance for diagnostics.
+    - Added automatic `results.csv` schema migration and deduplicated frame saving in the asynchronous benchmark loop.
+  - **Stability, documentation, and tools**
+    - Seeded world spawn parameters before the first reset, required Unity target-world acknowledgements, and fail fast when world pose or mapping data is unavailable.
+    - Improved Linux launch compatibility with Xvfb, configurable `-batchmode`, explicit AI control, and camera-rendering-safe defaults.
+    - Expanded benchmark, A*, BC, scene-interface, sensor-resolution, lighting, evaluation, and baseline-extension documentation.
+- **2026-08-06**
+  - Improved Unity reset and Linux launch stability.
+  - Aligned runtime success thresholds with post-hoc evaluation.
+- **2026-07-03**
+  - Added unified LLM, A*, BC, and random baseline workflows.
+  - Added an extension interface for integrating additional baselines.
+
+## ✨ Highlights
+
+| Industrial Navigation | Multimodal Observations | Extensible Evaluation |
+|:---:|:---:|:---:|
+| High-fidelity Unity warehouses with workers, vehicles, and dynamic obstacles | Egocentric RGB, metric depth, minimap, agent pose, and action history | Shared runners for LLM, A*, BC, random, and additional baselines |
+| Safety-critical PointGoal tasks | Runtime-configurable sensor resolution and lighting | Success, efficiency, collision, warning, and trajectory outputs |
+
+<a id="overview"></a>
+## 🗺️ Benchmark Overview
+
+<p align="center">
+  <img src="docs/assets/industrynav_overview.png" alt="Overview of the IndustryNav benchmark" width="900">
+</p>
+
+<p align="center"><em>IndustryNav combines 24 dynamic Unity warehouse benchmarks, egocentric observations with global odometry, action generation, and safety-aware evaluation.</em></p>
+
+<a id="preview"></a>
+## 🎬 Navigation Preview
+
+<p align="center">
+  <img src="docs/assets/industrynav_navigation_example.gif" alt="IndustryNav A-star navigation with RGB, depth, and planned minimap path" width="640">
+</p>
+
+<p align="center"><em>A* navigation in Scene 1, Point 3. The top row shows egocentric RGB and an edge-preserving smoothed depth preview; the minimap shows the planned route, current waypoint, agent, and target.</em></p>
+
+## 📄 About the Paper
 
 The paper introduces IndustryNav, a dynamic industrial navigation benchmark designed to evaluate active spatial reasoning in embodied agents. Unlike many embodied benchmarks that focus on static household scenes or passive perception, IndustryNav uses high-fidelity Unity warehouse environments with moving objects, human activity, and safety-critical navigation constraints.
 
@@ -27,7 +106,7 @@ The Python side provides:
 
 The current benchmark uses one compiled Unity client, `scene_all`, which contains all supported scenes. The scene is selected at runtime by `scene_id`.
 
-## Folder Structure
+## 🗂️ Repository Structure
 
 ```text
 IndustryNav/
@@ -65,7 +144,8 @@ Scene/client maintenance docs:
 - [`docs/astar_workflow.md`](docs/astar_workflow.md): A* commands plus the shared baseline extension interface.
 - [`docs/bc_workflow.md`](docs/bc_workflow.md): behavior-cloning data collection, training, and inference.
 
-## Environment Setup
+<a id="setup"></a>
+## ⚙️ Environment Setup
 
 Use Python 3.10. The recommended setup is `uv`; conda is still usable if your local ML-Agents workflow already depends on it.
 
@@ -165,7 +245,8 @@ A* does not need an API key.
 
 For details about scene-code mapping, Unity environment parameters, and Python/Unity side-channel handshake, see [`docs/scene_files_and_interfaces.md`](docs/scene_files_and_interfaces.md).
 
-## Run Benchmark
+<a id="benchmark"></a>
+## 🚀 Run Benchmark
 
 The easiest way to run an LLM benchmark is the shell wrapper:
 
@@ -186,6 +267,10 @@ MAX_STEPS=70
 BASELINE=llm
 MODEL_ID=google/gemini-3-flash-preview
 DYNAMIC_OBJECTS=moving
+GLOBAL_LIGHT_INTENSITY=1.0
+LIGHT_INTENSITY_MIN=0.7
+LIGHT_INTENSITY_MAX=1.3
+LIGHT_RANDOM_SEED=0
 ```
 
 Example:
@@ -209,7 +294,9 @@ python -m nav.scripts.run_benchmark_cell \
   --ego_width 512 \
   --ego_height 512 \
   --minimap_width 431 \
-  --dynamic_objects static \
+  --dynamic_objects moving \
+  --light_intensity_min 0.7 \
+  --light_intensity_max 1.3 \
   --frame_save_dir outputs/scene1/point1/gemini-3-flash-preview \
   --model_id google/gemini-3-flash-preview \
   --init_world_x 31 \
@@ -224,6 +311,15 @@ Use `--dynamic_objects static` to freeze workers, vehicles, spline objects,
 physics objects, particles, and timelines while leaving the navigation agent
 controllable. The shell wrappers expose the same option as
 `DYNAMIC_OBJECTS=static`.
+
+Use `--global_light_intensity 0.8` for a fixed global light multiplier, or
+`--light_intensity_min 0.7 --light_intensity_max 1.3` to sample one multiplier
+per run. Range sampling is reproducible through `--light_random_seed`; scene,
+point, and benchmark seed identifiers are included in the derived seed. Runtime
+lighting also switches HDRP to fixed exposure (`--light_fixed_exposure`, default
+`9.0`) so automatic exposure does not cancel the variation. The resolved value
+is written to `results.csv`. Baked indirect light remains unchanged until the
+scene is rebaked. `--light_intensity_multiplier` is an equivalent alias.
 
 Use `--ego_width` and `--ego_height` to change both the egocentric RGB and depth
 observations and their saved frame sizes. Set either `--minimap_width` or
@@ -240,7 +336,8 @@ Supported scenes:
 scene1 scene2 scene3 scene4 scene5 scene6 scene7 scene8 scene9 scene10 scene11 scene12
 ```
 
-## Run A*
+<a id="astar"></a>
+## 🧭 Run A*
 
 A* is the offline classical navigation baseline. It does not call OpenRouter.
 

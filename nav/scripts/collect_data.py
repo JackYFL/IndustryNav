@@ -38,9 +38,13 @@ from mlagents_envs.side_channel.environment_parameters_channel import (
 )
 
 from nav.config import ACTION_SPACE_ANNOTATION as ACTION_SPACE
-from nav.config import BEHAVIOR_NAME, UNITY_ENGINE_QUALITY_LEVEL, UNITY_MAP_SIZE
+from nav.config import (
+    BEHAVIOR_NAME,
+    DEFAULT_REACH_DISTANCE_M,
+    UNITY_ENGINE_QUALITY_LEVEL,
+    UNITY_MAP_SIZE,
+)
 from nav.harness.coordinates import (
-    canonical_minimap_distance_to_runtime,
     canonical_to_minimap_coords,
     find_exact_map_bounds,
     minimap_pixel_scale,
@@ -50,12 +54,16 @@ from nav.harness.coordinates import (
 )
 from nav.harness.coordinates import visual_to_unity_coords as _visual_to_unity_coords
 from nav.harness.observations import get_obs_safe, patch_observation_decoding
+from nav.harness.lighting import (
+    add_lighting_args,
+    configure_unity_lighting,
+    lighting_result_fields,
+)
 from nav.harness.perception import detect_red_point
 from nav.harness.side_channels import BoundsSideChannel, TargetSideChannel
 from nav.utils import (
     obs_to_rgb,
     action2signal,
-    pix_dist,
     logger_config,
     save_frame_from_obs,
     clear_and_reset_dir,
@@ -132,8 +140,10 @@ def parse_args():
     p.add_argument("--target_x", type=int, default=None, help="Target x in canonical 862x512 pixels.")
     p.add_argument("--target_y", type=int, default=None, help="Target y in canonical 862x512 pixels.")
     p.add_argument(
-        "--reach_px", type=float, default=20.0,
-        help="Canonical 862x512 stop threshold; scaled at runtime."
+        "--reach_m",
+        type=float,
+        default=DEFAULT_REACH_DISTANCE_M,
+        help=f"Stop threshold in Unity world meters (default: {DEFAULT_REACH_DISTANCE_M:g}).",
     )
     p.add_argument("--init_curr_x", type=int, default=None, help="Initial x in canonical 862x512 pixels")
     p.add_argument("--init_curr_y", type=int, default=None, help="Initial y in canonical 862x512 pixels")
@@ -155,6 +165,7 @@ def parse_args():
         help="Run environment objects normally or freeze them while keeping the "
              "navigation agent controllable.",
     )
+    add_lighting_args(p)
     p.add_argument(
         "--screen_width",
         type=int,
@@ -723,6 +734,8 @@ def get_minimap_rgb_for_init(env, behavior_name, max_attempts=10):
 
 def main():
     args = parse_args()
+    if args.reach_m <= 0:
+        raise SystemExit("--reach_m must be positive.")
     logger = logger_config(args.frame_save_dir)
     # Tolerate the scene_all build's sensor-shape quirk before env launch.
     patch_observation_decoding()
@@ -766,10 +779,6 @@ def main():
         args.minimap_height,
     )
     minimap_size = (int(args.minimap_width), int(args.minimap_height))
-    runtime_reach_px = canonical_minimap_distance_to_runtime(
-        args.reach_px,
-        minimap_size,
-    )
     if args.init_curr_x is not None and args.init_curr_y is not None:
         args.init_curr_x, args.init_curr_y = canonical_to_minimap_coords(
             (args.init_curr_x, args.init_curr_y),
@@ -787,7 +796,7 @@ def main():
         )
     logger.info(
         f"Minimap runtime space: {minimap_size[0]}x{minimap_size[1]} | "
-        f"canonical reach_px={args.reach_px:g} -> runtime={runtime_reach_px:.2f}"
+        f"reach_m={args.reach_m:g}"
     )
     unity_args = [
         "-logFile", "test.log",
@@ -829,6 +838,11 @@ def main():
         1.0 if args.dynamic_objects == "moving" else 0.0,
     )
     env_params.set_float_parameter("spline_speed_multiplier", float(args.spline_speed_multiplier))
+    try:
+        configure_unity_lighting(env_params, args, logger)
+    except ValueError as exc:
+        env.close()
+        raise SystemExit(str(exc)) from exc
     logger.info(f"Unity launch args: {unity_args}")
     logger.info("Starting Unity…")
     env.reset()
@@ -973,6 +987,10 @@ def main():
          
         # logger.info(f"target_sc.last_target_pixel: {target_sc.last_target_pixel}, target_sc.last_target_world: {target_sc.last_target_world}")
   
+        if target_sc.last_target_world is None:
+            raise RuntimeError(
+                "Target world mapping was not received from Unity."
+            )
         target_world_x, target_world_z = target_sc.last_target_world
         minimap_projector = build_axis_aligned_projector(
             target_sc.last_spawn_pixel,
@@ -1077,6 +1095,7 @@ def main():
 
 
     last_curr_xy = None
+    last_world_xz = None
 
     step_count = 0            # decision steps (frame ticks)
     forward_count = 0         # count of "forward" actions
@@ -1142,9 +1161,12 @@ def main():
             vector_obs = decision_steps.obs[-1]
             if vector_obs.shape[1] >= 3:
                 pos_x, pos_y, pos_z = vector_obs[0, 0], vector_obs[0, 1], vector_obs[0, 2]
+                last_world_xz = (float(pos_x), float(pos_z))
             else:
-                logger.warning(f"Vector obs size is only {vector_obs.shape[1]}, setting position to 0.")
-                pos_x, pos_y, pos_z = 0.0, 0.0, 0.0
+                raise RuntimeError(
+                    f"Vector observation has only {vector_obs.shape[1]} values; "
+                    "world-coordinate navigation requires X/Y/Z."
+                )
 
             if vector_obs.shape[1] >= 6:
                 rot_x, rot_y, rot_z = vector_obs[0, 3], vector_obs[0, 4], vector_obs[0, 5]
@@ -1303,9 +1325,14 @@ def main():
                     logger.info("User requested quit.")
                     break
 
-            if (curr_xy is not None) and (state["target_xy"] is not None):
-                distance = pix_dist(curr_xy, state["target_xy"])
-                if distance <= runtime_reach_px:
+            if state["target_world_x"] is not None and state["target_world_z"] is not None:
+                distance_world = float(
+                    np.hypot(
+                        float(pos_x) - state["target_world_x"],
+                        float(pos_z) - state["target_world_z"],
+                    )
+                )
+                if distance_world <= args.reach_m:
                     chosen_action = "stop"
                 else:
                     chosen_action = last_keyboard_action
@@ -1391,13 +1418,26 @@ def main():
                 #     time.sleep(args.frame_sleep)
 
             # Early stop when near goal (same logic)
-            if (state["target_xy"] is not None) and (last_curr_xy is not None):
+            if (
+                state["target_world_x"] is not None
+                and state["target_world_z"] is not None
+                and last_world_xz is not None
+            ):
+                distance_world = float(
+                    np.hypot(
+                        last_world_xz[0] - state["target_world_x"],
+                        last_world_xz[1] - state["target_world_z"],
+                    )
+                )
                 if (
-                    pix_dist(last_curr_xy, state["target_xy"]) <= runtime_reach_px
+                    distance_world <= args.reach_m
                     and chosen_action == "stop"
                 ):
                     stop_reason = "reached_vicinity"
-                    logger.info(f"[Step:{step_count}] Reached target. Stopping.")
+                    logger.info(
+                        f"[Step:{step_count}] Reached target at "
+                        f"{distance_world:.2f}m. Stopping."
+                    )
                     break
 
         # ===== End of loop: compute final distance & log =====
@@ -1420,6 +1460,18 @@ def main():
             if state["target_xy"] is not None
             else None
         )
+        distance_world = (
+            float(
+                np.hypot(
+                    last_world_xz[0] - state["target_world_x"],
+                    last_world_xz[1] - state["target_world_z"],
+                )
+            )
+            if last_world_xz is not None
+            and state["target_world_x"] is not None
+            and state["target_world_z"] is not None
+            else None
+        )
 
         result = {
             "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
@@ -1427,15 +1479,18 @@ def main():
             "provider": "openrouter",
             "model": args.model_id,
             "max_steps": int(args.max_steps),
-            "reach_px": float(args.reach_px),
+            "reach_m": float(args.reach_m),
             "init_direction": float(args.init_curr_direction)
             if args.init_curr_direction is not None
             else None,
             "target_x": round(target_xy_canonical[0]) if target_xy_canonical is not None else None,
             "target_y": round(target_xy_canonical[1]) if target_xy_canonical is not None else None,
+            "target_world_x": state["target_world_x"],
+            "target_world_z": state["target_world_z"],
             "final_x": round(final_xy_canonical[0]) if final_xy_canonical is not None else None,
             "final_y": round(final_xy_canonical[1]) if final_xy_canonical is not None else None,
             "distance_px": distance_px,
+            "distance_world": distance_world,
             "stop_reason": stop_reason or "loop_end",
             "steps_taken": forward_count,
             "frame_sleep": float(args.frame_sleep),
@@ -1444,11 +1499,18 @@ def main():
             "marker_source": args.marker_source,
             "spline_speed_multiplier": float(args.spline_speed_multiplier),
             "dynamic_objects": args.dynamic_objects,
+            **lighting_result_fields(args),
         }
 
+        distance_label = (
+            f"{distance_world:.2f}m"
+            if distance_world is not None
+            else "unavailable"
+        )
         logger.info(
             f"[FINAL RESULT] Stop={result['stop_reason']} | Steps={result['steps_taken']} | "
-            f"FinalPos={final_xy} | Target={state['target_xy']} | Distance={distance_px:.2f}px"
+            f"FinalPos={final_xy} | Target={state['target_xy']} | "
+            f"Distance={distance_label}"
         )
         append_results_csv(args.results_csv, result)
         logger.info(f"Results saved to: {os.path.abspath(args.results_csv)}")

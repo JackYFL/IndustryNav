@@ -1,9 +1,9 @@
 """Smoke-test Unity scenes and export RGB/depth/minimap GIFs.
 
 Each scene is launched in a fresh Unity process because ``SceneSwitcher`` reads
-``scene_id`` during scene startup. The validator uses the scene's unprimed
-random-spawn path, applies reproducible random agent actions, and checks that
-all three camera observations remain non-blank.
+``scene_id`` during scene startup. The validator uses either a fixed world pose
+or the scene's unprimed random-spawn path, applies reproducible random agent
+actions, and checks that all three camera observations remain non-blank.
 """
 
 from __future__ import annotations
@@ -45,6 +45,11 @@ from nav.harness.observations import (
     get_obs_safe,
     patch_observation_decoding,
 )
+from nav.harness.lighting import (
+    add_lighting_args,
+    configure_unity_lighting,
+    resolve_lighting_config,
+)
 from nav.harness.side_channels import BoundsSideChannel, TargetSideChannel
 from nav.scripts.run_benchmark_cell import (
     build_axis_aligned_projector,
@@ -52,7 +57,12 @@ from nav.scripts.run_benchmark_cell import (
     remove_unity_red_marker_rgb,
     vector_marker_from_obs,
 )
-from nav.utils import action2signal, decode_depth_observation_meters, obs_to_rgb
+from nav.utils import (
+    action2signal,
+    decode_depth_observation_meters,
+    depth_observation_to_visualization,
+    obs_to_rgb,
+)
 
 
 ALL_SCENES = (
@@ -117,6 +127,9 @@ class SceneResult:
     gif_path: str | None = None
     unity_log: str | None = None
     error: str | None = None
+    light_randomization_mode: str = "disabled"
+    light_intensity_multiplier: float = 1.0
+    light_fixed_exposure: float | None = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -151,11 +164,30 @@ def parse_args() -> argparse.Namespace:
         help="Target y in canonical 862x512 minimap pixels.",
     )
     parser.add_argument(
+        "--init-world-x",
+        type=float,
+        default=None,
+        help="Optional fixed Unity world X used for reproducible comparisons.",
+    )
+    parser.add_argument(
+        "--init-world-z",
+        type=float,
+        default=None,
+        help="Optional fixed Unity world Z used for reproducible comparisons.",
+    )
+    parser.add_argument(
+        "--init-direction",
+        type=float,
+        default=180.0,
+        help="Initial Unity yaw in degrees when fixed world coordinates are set.",
+    )
+    parser.add_argument(
         "--dynamic-objects",
         choices=("moving", "static"),
         default="moving",
         help="Run non-agent Unity objects normally or keep them frozen.",
     )
+    add_lighting_args(parser)
     parser.add_argument("--screen-width", type=int, default=1724)
     parser.add_argument("--screen-height", type=int, default=1024)
     parser.add_argument("--base-port", type=int, default=5507)
@@ -192,15 +224,8 @@ def image_stats(rgb: np.ndarray) -> tuple[float, int]:
 
 
 def depth_to_rgb(depth_obs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Return the project-standard grayscale visualization and metric depth."""
-    depth = np.asarray(depth_obs)
-    if depth.ndim == 3:
-        if depth.shape[0] != 1:
-            raise ValueError(f"Expected C=1 depth, got {depth.shape}")
-        depth = depth[0]
-    if depth.dtype == np.uint8:
-        depth = depth.astype(np.float32) / 255.0
-    depth_gray = (np.clip(depth, 0.0, 1.0) * 255).astype(np.uint8)
+    """Return a smoothed grayscale preview and the untouched metric depth."""
+    depth_gray = depth_observation_to_visualization(depth_obs)
     depth_rgb = np.repeat(depth_gray[:, :, None], 3, axis=2)
     return depth_rgb, decode_depth_observation_meters(depth_obs)
 
@@ -374,8 +399,29 @@ def validate_scene(
             "dynamic_objects_enabled",
             1.0 if args.dynamic_objects == "moving" else 0.0,
         )
+        lighting_args = argparse.Namespace(
+            scene_id=scene_id,
+            scene_name=scene_name,
+            point_id="scene_validation",
+            seed_id=str(args.random_seed),
+            global_light_intensity=args.global_light_intensity,
+            light_intensity_multiplier=args.light_intensity_multiplier,
+            light_intensity_min=args.light_intensity_min,
+            light_intensity_max=args.light_intensity_max,
+            light_random_seed=args.light_random_seed,
+            light_fixed_exposure=args.light_fixed_exposure,
+        )
+        lighting = configure_unity_lighting(env_params, lighting_args, logger)
+        result.light_randomization_mode = lighting.mode
+        result.light_intensity_multiplier = lighting.multiplier
+        result.light_fixed_exposure = lighting.fixed_exposure
         env_params.set_float_parameter("minimap_px_width", float(args.minimap_width))
         env_params.set_float_parameter("minimap_px_height", float(args.minimap_height))
+        if args.init_world_x is not None:
+            env_params.set_float_parameter("spawn_x", float(args.init_world_x))
+            env_params.set_float_parameter("spawn_y", 0.5)
+            env_params.set_float_parameter("spawn_z", float(args.init_world_z))
+            env_params.set_float_parameter("spawn_rot", float(args.init_direction))
         env.reset()
 
         if BEHAVIOR_NAME not in env.behavior_specs:
@@ -565,10 +611,16 @@ def save_summary(output_dir: Path, results: list[SceneResult]) -> None:
 
 def main() -> int:
     args = parse_args()
+    try:
+        resolve_lighting_config(args)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     if args.frames <= 0:
         raise SystemExit("--frames must be positive")
     if args.max_attempts_per_scene <= 0:
         raise SystemExit("--max-attempts-per-scene must be positive")
+    if (args.init_world_x is None) != (args.init_world_z is None):
+        raise SystemExit("--init-world-x and --init-world-z must be set together")
     app_path = Path(args.file_name).resolve()
     if not app_path.exists():
         raise SystemExit(f"Unity client not found: {app_path}")

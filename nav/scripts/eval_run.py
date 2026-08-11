@@ -45,10 +45,10 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--warning-threshold", type=float, default=None)
     p.add_argument("--collision-threshold", type=int, default=None)
     p.add_argument(
-        "--success-dist-px",
-        type=int,
+        "--success-dist-m",
+        type=float,
         default=None,
-        help="Success threshold in minimap pixels (paper/default: 20; legacy: 65).",
+        help="Success threshold in Unity world meters (default: 2.0).",
     )
     p.add_argument("--bottom-margin", type=float, default=None)
     p.add_argument("--top-margin", type=float, default=None)
@@ -69,7 +69,7 @@ def _opts_from_args(args: argparse.Namespace) -> EvaluateOptions:
     for arg_name, attr_name in [
         ("warning_threshold", "warning_threshold_m"),
         ("collision_threshold", "collision_threshold_px"),
-        ("success_dist_px", "success_dist_px"),
+        ("success_dist_m", "success_dist_m"),
         ("bottom_margin", "bottom_margin"),
         ("top_margin", "top_margin"),
         ("bottom_pad", "bottom_pad"),
@@ -88,6 +88,8 @@ def _log_metrics(metrics: dict) -> None:
     logger.info(f"Success ratio: {metrics['success_ratio']}")
     logger.info(f"Efficiency (total steps): {metrics['efficiency_steps']}")
     logger.info(f"Distance ratio: {metrics['distance_ratio']:.4f}")
+    if metrics["final_distance_world"] is not None:
+        logger.info(f"Final distance world: {metrics['final_distance_world']:.2f} m")
     if metrics["final_distance_px"] is not None:
         logger.info(f"Final distance px: {metrics['final_distance_px']:.2f}")
     if metrics["stop_reason"]:
@@ -127,6 +129,12 @@ def main() -> None:
                 f"Average steps: "
                 f"{np.mean([float(r['efficiency_steps']) for r in ok_rows]):.2f}"
             )
+            world_dists = [
+                float(r['final_distance_world'])
+                for r in ok_rows if r['final_distance_world'] is not None
+            ]
+            if world_dists:
+                logger.info(f"Average final distance world: {np.mean(world_dists):.2f} m")
             dists = [
                 float(r['final_distance_px'])
                 for r in ok_rows if r['final_distance_px'] is not None

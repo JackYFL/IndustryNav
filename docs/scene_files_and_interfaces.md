@@ -86,6 +86,8 @@ Python sends these values through ML-Agents `EnvironmentParametersChannel`; Unit
 | `use_ai_control` | Python -> Unity | Enables action-driven locomotion in `WarehouseAgent`. This is required for windowed Linux launches because `Application.isBatchMode` is false. |
 | `dynamic_objects_enabled` | Python -> Unity | `1` runs environment motion; `0` freezes environment splines, animations, non-agent physics, NavMesh agents, particles, and timelines. The navigation agent is excluded. |
 | `spline_speed_multiplier` | Python -> Unity | Scales `SplineAnimate` speed when dynamic objects are enabled. |
+| `light_intensity_multiplier` | Python -> Unity | Non-negative global multiplier applied to each Light's authored intensity. `global_light_intensity` is accepted as a legacy alias. |
+| `light_fixed_exposure` | Python -> Unity | Switches enabled global HDRP volumes to Fixed exposure at this EV while runtime lighting is active. |
 | `minimap_px_width`, `minimap_px_height` | Python -> Unity | Keeps Unity world/pixel mapping aligned with the selected sensor output size. |
 | `spawn_x`, `spawn_y`, `spawn_z` | Python -> Unity | Preferred spawn path: direct Unity world coordinates. |
 | `spawn_px`, `spawn_py`, `spawn_wy` | Python -> Unity | Legacy spawn path: Unity minimap pixel coordinates converted to world by Unity. |
@@ -220,7 +222,7 @@ There are three coordinate systems in play:
 | Space | Used by | Notes |
 |---|---|---|
 | Unity world X/Z | Unity physics, player spawn, world distance | `start.x/start.z` live here. |
-| Visual minimap pixel | JSON targets, saved debug images, benchmark success distance | User-facing pixel coordinate system. |
+| Visual minimap pixel | JSON targets and saved debug images | User-facing pixel coordinate system; it is not used for success thresholds. |
 | Unity minimap pixel | Unity `MinimapWorldMapper` | Python converts visual pixels into this space after detecting the minimap margin. |
 
 Python detects the visual minimap bounds with `find_exact_map_bounds()` and converts visual pixels through `visual_to_unity_coords()`. Unity then performs pixel/world conversion using the `MinimapWorldMapper` component in the scene.
