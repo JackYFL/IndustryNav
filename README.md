@@ -82,6 +82,14 @@
 
 <p align="center"><em>IndustryNav combines 24 dynamic Unity warehouse benchmarks, egocentric observations with global odometry, action generation, and safety-aware evaluation.</em></p>
 
+## 🧭 Scene & Task Overview
+
+<p align="center">
+  <img src="docs/assets/industrynav_24_scene_points_overview.png" alt="Top-down overview of all 24 IndustryNav scenes and their benchmark start-target pairs" width="1000">
+</p>
+
+<p align="center"><em>Top-down overview of all 24 scenes. Green markers denote starts, red markers denote targets, colored lines pair each task, and arrows indicate initial headings.</em></p>
+
 <a id="preview"></a>
 ## 🎬 Navigation Preview
 

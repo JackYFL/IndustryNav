@@ -187,7 +187,7 @@ def parse_args() -> argparse.Namespace:
         "--scenes",
         nargs="*",
         default=None,
-        help="Optional subset of scene names from the built-in 24-scene list.",
+        help="Optional subset of scene codes from the built-in 24-scene list.",
     )
     return parser.parse_args()
 
@@ -199,7 +199,7 @@ def selected_scenes(names: list[str] | None) -> Iterable[tuple[str, int]]:
     known = {name for name, _ in ALL_SCENES}
     unknown = requested - known
     if unknown:
-        raise ValueError(f"Unknown scene names: {', '.join(sorted(unknown))}")
+        raise ValueError(f"Unknown scene codes: {', '.join(sorted(unknown))}")
     return tuple(item for item in ALL_SCENES if item[0] in requested)
 
 
