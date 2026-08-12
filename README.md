@@ -76,13 +76,13 @@
 <a id="preview"></a>
 ## 🎬 Navigation Preview
 
-<p align="center"><strong>Original A* preview</strong></p>
+<!-- <p align="center"><strong>Original A* preview</strong></p>
 
 <p align="center">
   <img src="docs/assets/industrynav_navigation_example.gif" alt="IndustryNav A-star navigation with RGB, depth, and planned minimap path" width="640">
 </p>
 
-<p align="center"><em>A* navigation in Scene 1, Point 3. The top row shows egocentric RGB and an edge-preserving smoothed depth preview; the minimap shows the planned route, current waypoint, agent, and target.</em></p>
+<p align="center"><em>A* navigation in Scene 1, Point 3. The top row shows egocentric RGB and an edge-preserving smoothed depth preview; the minimap shows the planned route, current waypoint, agent, and target.</em></p> -->
 
 <p align="center"><strong>Dynamic-environment A* preview</strong></p>
 
