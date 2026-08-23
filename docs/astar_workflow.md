@@ -94,7 +94,7 @@ DRY_RUN=1 bash shs/run_Astar.sh scene1 point1
 2. Maps scene code to `scene_id`.
 3. Reads the selected point(s) from `input_points.json`.
 4. Passes start world coordinates and target minimap pixels into `run_benchmark_cell`.
-5. Chooses a free `base_port` and unique `worker_id`.
+5. Chooses a free gRPC `base_port` for each sequential Unity process.
 6. Enables Linux `xvfb-run` automatically when needed.
 7. Writes outputs under `outputs/<scene_code>/<point_id>/<run_name>/`.
 
@@ -143,6 +143,7 @@ astar_actions.csv
 astar_depth/
 astar_fp/
 astar_minimap_target/
+astar_paths.jsonl
 results.csv
 unity_log.txt
 ```
@@ -150,6 +151,13 @@ unity_log.txt
 The run summary in `results.csv` is world-coordinate only. It records the
 initial, target, and final Unity X/Z positions plus `distance_world` in meters;
 pixel coordinates remain available in `astar_actions.csv` for visualization.
+
+Each new A* run also stores the exact per-decision route in `astar_paths.jsonl`.
+The GIF exporter draws this route as a yellow line on the top view. For older
+runs without a path log, it reconstructs the route by replaying A* over the
+saved minimap and pose sequence. New records also include `tracking` diagnostics
+with the controller name, path segment, cross-track error, heading error, and
+combined steering angle.
 
 When `ASTAR_DEBUG_VIZ=1`, debug images are written to:
 
@@ -159,17 +167,28 @@ outputs/<scene_code>/<point_id>/astar/astar_debug/
 
 or to `ASTAR_DEBUG_DIR` if explicitly provided.
 
+Export one run or all available runs:
+
+```bash
+python -m nav.scripts.export_astar_preview --run-dir outputs/scene1/point1/astar --output outputs/astar_gifs/scene1/point1/astar.gif
+python -m nav.scripts.export_astar_preview --batch-root outputs --output-dir outputs/astar_gifs
+```
+
 ## Important Runtime Settings
 
 The most useful environment variables are:
 
 | Variable | Default | Meaning |
 |---|---:|---|
-| `MAX_STEPS` | `70` | Per-point decision-step budget. |
+| `MAX_STEPS` | unset | Explicit fixed budget; setting it disables dynamic budgeting unless overridden. |
+| `ASTAR_DYNAMIC_STEP_BUDGET` | `1` | Derive and update the budget from world route length. |
+| `ASTAR_STEP_BUDGET_MIN`, `ASTAR_STEP_BUDGET_MAX` | `50`, `160` | Lower and hard upper bounds for dynamic budgets. |
+| `ASTAR_STEPS_PER_PATH_METER` | `1.25` | Decision steps allocated per meter of route. |
+| `ASTAR_STEP_BUDGET_OVERHEAD` | `20` | Reserve for turns, recovery, and replanning. |
 | `SIM_STEPS_PER_DECISION` | `2` | Unity simulation steps per A* action. |
 | `REACH_M` | `2.0` | Success radius in Unity world meters. |
 | `MODALITIES` | `ego,minimap,depth` | Saved sensor modalities. |
-| `EGO_WIDTH`, `EGO_HEIGHT` | `512`, `512` | Egocentric RGB and depth sensor resolution. |
+| `EGO_WIDTH`, `EGO_HEIGHT` | `640`, `480` | Egocentric RGB and depth sensor resolution (4:3 VGA). |
 | `MINIMAP_WIDTH` | `862` | Optional minimap width; derived from height when only height is set. |
 | `MINIMAP_HEIGHT` | unset | Optional minimap height; derived from width when only width is set. |
 | `DYNAMIC_OBJECTS` | `moving` | `moving` runs environment motion; `static` freezes non-agent scene motion. |
@@ -178,13 +197,19 @@ The most useful environment variables are:
 | `ASTAR_DEBUG_VIZ` | `0` | Saves walkable-grid/path debug frames when enabled. |
 | `ASTAR_DEBUG_DIR` | unset | Explicit debug image directory. |
 | `ASTAR_OBSTACLE_CLEARANCE_M` | `0.6` | Physical clearance around minimap obstacles in Unity world meters. |
+| `ASTAR_DYNAMIC_REPLAN_LOOKAHEAD_M` | `8.0` | Distance ahead checked against each new minimap obstacle grid. |
+| `ASTAR_DYNAMIC_REPLAN_CONFIRM_STEPS` | `2` | Consecutive blocked observations required before replanning. |
 | `ASTAR_PROXY_STOP_DISTANCE_M` | `4.9` | World-distance threshold for switching from a reached proxy to direct terminal approach. |
 | `RUN_NAME` | `astar` | Output subfolder name. |
 | `DRY_RUN` | `0` | Prints the command without launching Unity. |
 
-There is one wrapper-level special case:
-
-- `scene1/point4` uses `MAX_STEPS=100` unless `MAX_STEPS` is explicitly set.
+By default, the initial budget is computed from start-target world distance as
+`ceil(20 + 1.25 * distance_m)`, clamped to `50..160`. Each new A* plan is
+measured in world meters. The total budget may increase to the larger of the
+longest planned-route allowance and the current step plus the new route's
+remaining allowance. This also applies to dynamic-obstacle replans. The budget
+never decreases and never exceeds 160. Setting `MAX_STEPS` selects a fixed
+budget for reproducibility.
 
 World coordinates are required for success, grid resolution, obstacle
 clearance, waypoint spacing, waypoint arrival, off-path replanning, lookahead,
@@ -193,10 +218,17 @@ internal implementation details for raster masks and marker rendering.
 
 ## Tuning Examples
 
-Increase the step budget:
+Use a fixed budget for a reproducibility run:
 
 ```bash
 MAX_STEPS=120 bash shs/run_Astar.sh scene1 point4
+```
+
+Tune the dynamic budget bounds or scaling:
+
+```bash
+ASTAR_STEP_BUDGET_MAX=200 ASTAR_STEPS_PER_PATH_METER=1.4 \
+  bash shs/run_Astar.sh scene1 point4
 ```
 
 Make obstacle avoidance more conservative:
@@ -289,9 +321,19 @@ The planner:
 3. Converts `ASTAR_OBSTACLE_CLEARANCE_M` through the calibrated projection and
    inflates obstacle regions with an axis-aware elliptical kernel.
 4. Finds a path to the target or a reachable proxy near the target.
-5. Converts path samples to world coordinates for metric waypoint spacing,
+5. Smooths the grid path with obstacle-aware line-of-sight string pulling, then
+   rounds validated corners into shorter heading changes. Diagonal grid moves
+   cannot pass between two blocked cardinal neighbors.
+6. Densely resamples each segment so deviation checks remain stable, then
+   converts path samples to world coordinates for metric waypoint spacing,
    lookahead, path-deviation replanning, and heading control.
-6. Selects a waypoint and converts it into one of:
+7. Checks the next 8 meters of the cached route against each new minimap grid.
+   A blockage confirmed for two decisions triggers a new plan and updates the
+   dynamic step budget from the changed route length. This check pauses while
+   the agent is only rotating, which avoids repeated replans from the same view.
+8. Projects the current pose onto the smoothed route and applies Stanley
+   feedback using both heading error and signed cross-track error.
+9. Converts the resulting steering angle into one of:
 
 ```text
 forward

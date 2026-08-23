@@ -32,12 +32,20 @@ class AStarBaseline:
         obstacle_threshold: int = ASTAR_DEFAULTS.obstacle_threshold,
         min_free_ratio: float = ASTAR_DEFAULTS.min_free_ratio,
         obstacle_clearance_m: float = ASTAR_DEFAULTS.obstacle_clearance_m,
+        path_smoothing: bool = ASTAR_DEFAULTS.path_smoothing,
+        path_corner_smoothing_m: float = ASTAR_DEFAULTS.path_corner_smoothing_m,
+        stanley_gain: float = ASTAR_DEFAULTS.stanley_gain,
+        stanley_softening_m: float = ASTAR_DEFAULTS.stanley_softening_m,
+        stanley_max_correction_deg: float = ASTAR_DEFAULTS.stanley_max_correction_deg,
+        stanley_forward_tolerance_deg: float = ASTAR_DEFAULTS.stanley_forward_tolerance_deg,
         turn_tolerance_deg: float = ASTAR_DEFAULTS.turn_tolerance_deg,
         forward_priority_tolerance_deg: float = ASTAR_DEFAULTS.forward_priority_tolerance_deg,
         drive_turn_tolerance_deg: float = ASTAR_DEFAULTS.drive_turn_tolerance_deg,
         waypoint_distance_m: float = ASTAR_DEFAULTS.waypoint_distance_m,
         waypoint_reach_m: float = ASTAR_DEFAULTS.waypoint_reach_m,
         path_replan_distance_m: float = ASTAR_DEFAULTS.path_replan_distance_m,
+        dynamic_replan_lookahead_m: float = ASTAR_DEFAULTS.dynamic_replan_lookahead_m,
+        dynamic_replan_confirm_steps: int = ASTAR_DEFAULTS.dynamic_replan_confirm_steps,
         terminal_approach_m: float = ASTAR_DEFAULTS.terminal_approach_m,
         lookahead_m: float = ASTAR_DEFAULTS.lookahead_m,
         front_cone_deg: float = ASTAR_DEFAULTS.front_cone_deg,
@@ -67,6 +75,23 @@ class AStarBaseline:
         self.obstacle_clearance_m = self._nonnegative(
             obstacle_clearance_m, "obstacle_clearance_m"
         )
+        self.path_smoothing = bool(path_smoothing)
+        self.path_corner_smoothing_m = self._nonnegative(
+            path_corner_smoothing_m, "path_corner_smoothing_m"
+        )
+        self.stanley_gain = self._nonnegative(stanley_gain, "stanley_gain")
+        self.stanley_softening_m = self._positive(
+            stanley_softening_m,
+            "stanley_softening_m",
+        )
+        self.stanley_max_correction_deg = self._positive(
+            stanley_max_correction_deg,
+            "stanley_max_correction_deg",
+        )
+        self.stanley_forward_tolerance_deg = self._nonnegative(
+            stanley_forward_tolerance_deg,
+            "stanley_forward_tolerance_deg",
+        )
         self.marker_clear_px = scaled_int(
             self._MARKER_RADIUS_CANONICAL_PX * self._MARKER_CLEAR_RADIUS_FACTOR
         )
@@ -76,6 +101,13 @@ class AStarBaseline:
         self.waypoint_distance_m = float(waypoint_distance_m)
         self.waypoint_reach_m = float(waypoint_reach_m)
         self.path_replan_distance_m = float(path_replan_distance_m)
+        self.dynamic_replan_lookahead_m = self._positive(
+            dynamic_replan_lookahead_m,
+            "dynamic_replan_lookahead_m",
+        )
+        self.dynamic_replan_confirm_steps = int(dynamic_replan_confirm_steps)
+        if self.dynamic_replan_confirm_steps <= 0:
+            raise ValueError("dynamic_replan_confirm_steps must be positive.")
         self.terminal_approach_m = float(terminal_approach_m)
         self.lookahead_m = float(lookahead_m)
         self.front_cone_deg = float(front_cone_deg)
@@ -106,6 +138,8 @@ class AStarBaseline:
         self.stuck_block_radius_y_px = 1
         self.world_per_pixel = np.eye(2, dtype=np.float64)
         self.last_path: List[Point] = []
+        self.tracking_path: List[Point] = []
+        self.path_segment_index = 0
         self.follow_waypoints: List[Point] = []
         self.follow_waypoint_index = 0
         self.last_turn_sign = 0
@@ -116,7 +150,10 @@ class AStarBaseline:
         self.recovery_turn_sign = 1
         self.last_effective_target_xy: Optional[Point] = None
         self.last_debug = {}
+        self.last_tracking_metrics = {}
         self.last_plan_status = "not_planned"
+        self.plan_revision = 0
+        self.dynamic_blocked_count = 0
         self.virtual_obstacles: List[Tuple[int, int, int, int, int]] = []
 
     @staticmethod
@@ -193,6 +230,7 @@ class AStarBaseline:
         target_world_xz: Optional[WorldPoint] = None,
         point_to_world: Optional[PointToWorld] = None,
     ) -> Tuple[str, str, List[Point]]:
+        self.last_tracking_metrics = {}
         distance_m = self._world_distance(curr_world_xz, target_world_xz)
         if distance_m is None:
             raise ValueError(
@@ -208,6 +246,8 @@ class AStarBaseline:
             self._update_pixel_geometry(curr_xy, point_to_world)
         if distance_m <= reach_m:
             self.last_path = [curr_xy, target_xy]
+            self.tracking_path = list(self.last_path)
+            self.path_segment_index = 0
             self.last_action_was_move = False
             return (
                 "stop",
@@ -241,17 +281,21 @@ class AStarBaseline:
                 target_world_xz=target_world_xz,
             )
             self.last_path = [curr_xy, target_xy]
+            self.tracking_path = list(self.last_path)
+            self.path_segment_index = 0
             self._record_action(action)
             return action, f"Astar fallback without minimap: {reasoning}", self.last_path
 
         walkable = self._build_walkable_grid(minimap_rgb, curr_xy, target_xy)
         should_replan, replan_reason = self._should_replan(
             curr_xy,
+            walkable=walkable,
             curr_world_xz=curr_world_xz,
             point_to_world=point_to_world,
         )
         path = self.last_path
         if should_replan:
+            self.plan_revision += 1
             path = self._plan_path(walkable, curr_xy, target_xy)
             self.follow_waypoints = self._build_follow_waypoints(
                 path,
@@ -273,6 +317,8 @@ class AStarBaseline:
             )
             fallback_path = [curr_xy, target_xy]
             self.last_path = []
+            self.tracking_path = []
+            self.path_segment_index = 0
             self.follow_waypoints = []
             self.follow_waypoint_index = 0
             self.last_effective_target_xy = None
@@ -347,6 +393,10 @@ class AStarBaseline:
             and distance_m <= self.terminal_approach_m
             and waypoint == target_xy
         )
+        action_waypoint = waypoint
+        heading_error = 0.0
+        cross_track_m = 0.0
+        segment_idx = self.path_segment_index
         if terminal_approach:
             waypoint_idx = len(self.follow_waypoints) - 1
             waypoint_reason = "terminal_align_then_forward"
@@ -357,18 +407,30 @@ class AStarBaseline:
                 curr_world_xz=curr_world_xz,
                 target_world_xz=target_world_xz,
             )
+            heading_error = relative
+            controller = "terminal"
         else:
-            action, relative = self._action_toward(
+            (
+                action,
+                relative,
+                heading_error,
+                cross_track_m,
+                segment_idx,
+                action_waypoint,
+            ) = self._stanley_action(
+                path,
                 curr_xy,
-                waypoint,
                 agent_theta,
                 curr_world_xz=curr_world_xz,
-                waypoint_world_xz=(
-                    point_to_world(waypoint) if point_to_world is not None else None
-                ),
+                point_to_world=point_to_world,
+            )
+            controller = "stanley"
+            waypoint_reason = (
+                f"{waypoint_reason};stanley_segment_{segment_idx}_"
+                f"of_{max(0, len(self.tracking_path) - 2)}"
             )
         self._save_debug_visualization(
-            minimap_rgb, curr_xy, target_xy, path, waypoint, step
+            minimap_rgb, curr_xy, target_xy, path, action_waypoint, step
         )
         self._record_action(action)
         return (
@@ -376,6 +438,9 @@ class AStarBaseline:
             "Astar "
             f"{'replanned' if should_replan else 'tracking'}({replan_reason}) "
             f"stuck={self.stuck_count} "
+            f"controller={controller} segment={segment_idx} "
+            f"cte={cross_track_m:.2f}m heading_error={heading_error:.1f}deg "
+            f"steering={relative:.1f}deg "
             f"plan_status={self.last_plan_status} "
             f"path_len={len(path)} closest_idx={closest_idx} "
             f"closest_dist={closest_dist:.2f}{closest_unit} "
@@ -558,7 +623,8 @@ class AStarBaseline:
             if current == goal:
                 self.last_plan_status = "target_reachable"
                 self.last_effective_target_xy = target_xy
-                return self._reconstruct_path(came_from, current, target_xy)
+                raw_path = self._reconstruct_path(came_from, current, target_xy)
+                return self._smooth_path(walkable, raw_path)
 
             cy, cx = current
             for dy, dx, move_cost in neighbors:
@@ -566,6 +632,11 @@ class AStarBaseline:
                 if not (0 <= ny < walkable.shape[0] and 0 <= nx < walkable.shape[1]):
                     continue
                 if not walkable[ny, nx]:
+                    continue
+                if dy != 0 and dx != 0 and (
+                    not walkable[cy, nx]
+                    or not walkable[ny, cx]
+                ):
                     continue
                 nxt = (ny, nx)
                 new_cost = current_cost + move_cost
@@ -593,7 +664,8 @@ class AStarBaseline:
             f"target_unreachable_proxy={proxy_xy}_"
             f"grid_dist={self._heuristic(best_reachable, goal):.1f}"
         )
-        return self._reconstruct_path(came_from, best_reachable, proxy_xy)
+        raw_path = self._reconstruct_path(came_from, best_reachable, proxy_xy)
+        return self._smooth_path(walkable, raw_path)
 
     def _using_unreachable_proxy(self) -> bool:
         return self.last_plan_status.startswith("target_unreachable_proxy=")
@@ -637,6 +709,186 @@ class AStarBaseline:
             path[-1] = (int(target_xy[0]), int(target_xy[1]))
         return path
 
+    def _smooth_path(
+        self,
+        walkable: np.ndarray,
+        raw_path: List[Point],
+    ) -> List[Point]:
+        if len(raw_path) < 3 or not self.path_smoothing:
+            control_points = list(raw_path)
+        else:
+            control_points = [raw_path[0]]
+            anchor_idx = 0
+            while anchor_idx < len(raw_path) - 1:
+                next_idx = anchor_idx + 1
+                for candidate_idx in range(
+                    len(raw_path) - 1,
+                    anchor_idx,
+                    -1,
+                ):
+                    if self._line_is_walkable(
+                        walkable,
+                        raw_path[anchor_idx],
+                        raw_path[candidate_idx],
+                    ):
+                        next_idx = candidate_idx
+                        break
+                control_points.append(raw_path[next_idx])
+                anchor_idx = next_idx
+
+            string_pull_points = list(control_points)
+            control_points = self._round_path_corners(
+                walkable,
+                string_pull_points,
+            )
+            self.last_debug["string_pull_control_points"] = string_pull_points
+
+        smoothed_path = self._densify_path(control_points)
+        self.tracking_path = list(control_points)
+        self.path_segment_index = 0
+        self.last_debug["raw_path_len"] = len(raw_path)
+        self.last_debug["smoothed_control_points"] = list(control_points)
+        self.last_debug["smoothed_path_len"] = len(smoothed_path)
+        return smoothed_path
+
+    def _round_path_corners(
+        self,
+        walkable: np.ndarray,
+        control_points: List[Point],
+    ) -> List[Point]:
+        if len(control_points) < 3 or self.path_corner_smoothing_m <= 0:
+            return list(control_points)
+
+        rounded = [control_points[0]]
+        for previous, corner, following in zip(
+            control_points,
+            control_points[1:-1],
+            control_points[2:],
+        ):
+            incoming_m = self._pixel_segment_length_m(previous, corner)
+            outgoing_m = self._pixel_segment_length_m(corner, following)
+            trim_in_m = min(
+                self.path_corner_smoothing_m,
+                0.25 * incoming_m,
+            )
+            trim_out_m = min(
+                self.path_corner_smoothing_m,
+                0.25 * outgoing_m,
+            )
+            incoming_tangent = self._point_along_segment(
+                corner,
+                previous,
+                trim_in_m,
+                incoming_m,
+            )
+            outgoing_tangent = self._point_along_segment(
+                corner,
+                following,
+                trim_out_m,
+                outgoing_m,
+            )
+            if (
+                incoming_tangent != outgoing_tangent
+                and self._line_is_walkable(
+                    walkable,
+                    incoming_tangent,
+                    outgoing_tangent,
+                )
+            ):
+                for point in (incoming_tangent, outgoing_tangent):
+                    if point != rounded[-1]:
+                        rounded.append(point)
+            elif corner != rounded[-1]:
+                rounded.append(corner)
+
+        if control_points[-1] != rounded[-1]:
+            rounded.append(control_points[-1])
+        if all(
+            self._line_is_walkable(walkable, start, end)
+            for start, end in zip(rounded, rounded[1:])
+        ):
+            return rounded
+        return list(control_points)
+
+    def _pixel_segment_length_m(self, start: Point, end: Point) -> float:
+        pixel_delta = np.array(
+            [float(end[0] - start[0]), float(end[1] - start[1])],
+            dtype=np.float64,
+        )
+        return float(np.linalg.norm(self.world_per_pixel @ pixel_delta))
+
+    @staticmethod
+    def _point_along_segment(
+        start: Point,
+        end: Point,
+        distance_m: float,
+        segment_length_m: float,
+    ) -> Point:
+        if segment_length_m <= 1e-9:
+            return start
+        fraction = min(1.0, max(0.0, distance_m / segment_length_m))
+        return (
+            int(round(start[0] + fraction * (end[0] - start[0]))),
+            int(round(start[1] + fraction * (end[1] - start[1]))),
+        )
+
+    def _line_is_walkable(
+        self,
+        walkable: np.ndarray,
+        start_xy: Point,
+        end_xy: Point,
+    ) -> bool:
+        start_y, start_x = self._point_to_cell(start_xy)
+        end_y, end_x = self._point_to_cell(end_xy)
+        height, width = walkable.shape
+        if not (
+            0 <= start_y < height
+            and 0 <= start_x < width
+            and 0 <= end_y < height
+            and 0 <= end_x < width
+        ):
+            return False
+
+        delta_y = end_y - start_y
+        delta_x = end_x - start_x
+        sample_count = 2 * max(abs(delta_y), abs(delta_x))
+        if sample_count == 0:
+            return bool(walkable[start_y, start_x])
+
+        previous_cell: Optional[Tuple[int, int]] = None
+        for sample_idx in range(sample_count + 1):
+            fraction = sample_idx / sample_count
+            cell_y = int(round(start_y + delta_y * fraction))
+            cell_x = int(round(start_x + delta_x * fraction))
+            if not walkable[cell_y, cell_x]:
+                return False
+            if previous_cell is not None and previous_cell != (cell_y, cell_x):
+                prev_y, prev_x = previous_cell
+                if cell_y != prev_y and cell_x != prev_x:
+                    if not walkable[prev_y, cell_x] or not walkable[cell_y, prev_x]:
+                        return False
+            previous_cell = (cell_y, cell_x)
+        return True
+
+    def _densify_path(self, control_points: List[Point]) -> List[Point]:
+        if not control_points:
+            return []
+
+        dense_path = [control_points[0]]
+        for start, end in zip(control_points, control_points[1:]):
+            span_x = abs(end[0] - start[0]) / self.grid_step_x_px
+            span_y = abs(end[1] - start[1]) / self.grid_step_y_px
+            sample_count = max(1, int(math.ceil(max(span_x, span_y))))
+            for sample_idx in range(1, sample_count + 1):
+                fraction = sample_idx / sample_count
+                point = (
+                    int(round(start[0] + (end[0] - start[0]) * fraction)),
+                    int(round(start[1] + (end[1] - start[1]) * fraction)),
+                )
+                if point != dense_path[-1]:
+                    dense_path.append(point)
+        return dense_path
+
     @staticmethod
     def _world_distance(
         first: Optional[WorldPoint], second: Optional[WorldPoint]
@@ -668,10 +920,12 @@ class AStarBaseline:
         self,
         curr_xy: Point,
         *,
+        walkable: np.ndarray,
         curr_world_xz: Optional[WorldPoint] = None,
         point_to_world: Optional[PointToWorld] = None,
     ) -> Tuple[bool, str]:
         if not self.last_path:
+            self.dynamic_blocked_count = 0
             return True, "no_cached_path"
 
         closest_idx, closest_dist, unit = self._closest_path_index(
@@ -681,10 +935,89 @@ class AStarBaseline:
             point_to_world=point_to_world,
         )
         if closest_dist > self.path_replan_distance_m:
+            self.dynamic_blocked_count = 0
             return True, f"off_path_{closest_dist:.2f}{unit}"
         if closest_idx >= len(self.last_path) - 1:
+            self.dynamic_blocked_count = 0
             return True, "path_exhausted"
+        if not self.last_action_was_move:
+            self.dynamic_blocked_count = 0
+            return False, (
+                f"cached_path_dist_{closest_dist:.2f}{unit}_dynamic_check_paused"
+            )
+        blockage = self._remaining_path_blockage(
+            walkable,
+            self.last_path,
+            closest_idx,
+            curr_world_xz=curr_world_xz,
+            point_to_world=point_to_world,
+        )
+        if blockage is not None:
+            blocked_idx, blocked_xy, blocked_distance_m = blockage
+            self.dynamic_blocked_count += 1
+            blocked_reason = (
+                f"dynamic_obstacle_idx_{blocked_idx}_at_{blocked_xy}_"
+                f"dist_{blocked_distance_m:.2f}m"
+            )
+            if self.dynamic_blocked_count >= self.dynamic_replan_confirm_steps:
+                self.dynamic_blocked_count = 0
+                return True, blocked_reason
+            return False, (
+                f"{blocked_reason}_pending_"
+                f"{self.dynamic_blocked_count}_of_"
+                f"{self.dynamic_replan_confirm_steps}"
+            )
+
+        self.dynamic_blocked_count = 0
         return False, f"cached_path_dist_{closest_dist:.2f}{unit}"
+
+    def _remaining_path_blockage(
+        self,
+        walkable: np.ndarray,
+        path: List[Point],
+        closest_idx: int,
+        *,
+        curr_world_xz: Optional[WorldPoint],
+        point_to_world: Optional[PointToWorld],
+    ) -> Optional[Tuple[int, Point, float]]:
+        if curr_world_xz is None or point_to_world is None:
+            return None
+
+        distance_ahead_m = 0.0
+        previous_point: Optional[Point] = None
+        previous_world = (
+            float(curr_world_xz[0]),
+            float(curr_world_xz[1]),
+        )
+        for path_idx in range(closest_idx + 1, len(path)):
+            point = path[path_idx]
+            point_world = point_to_world(point)
+            if point_world is None:
+                return None
+            segment_m = self._world_distance(previous_world, point_world)
+            if segment_m is None:
+                return None
+            distance_ahead_m += segment_m
+            if distance_ahead_m > self.dynamic_replan_lookahead_m:
+                break
+
+            cell_y, cell_x = self._point_to_cell(point)
+            blocked = not (
+                0 <= cell_y < walkable.shape[0]
+                and 0 <= cell_x < walkable.shape[1]
+                and walkable[cell_y, cell_x]
+            )
+            if not blocked and previous_point is not None:
+                blocked = not self._line_is_walkable(
+                    walkable,
+                    previous_point,
+                    point,
+                )
+            if blocked:
+                return path_idx, point, distance_ahead_m
+            previous_point = point
+            previous_world = point_world
+        return None
 
     def _build_follow_waypoints(
         self,
@@ -842,6 +1175,140 @@ class AStarBaseline:
                 best_unit = unit
         return best_idx, best_dist, best_unit
 
+    def _stanley_action(
+        self,
+        path: List[Point],
+        curr_xy: Point,
+        agent_theta: float,
+        *,
+        curr_world_xz: WorldPoint,
+        point_to_world: PointToWorld,
+    ) -> Tuple[str, float, float, float, int, Point]:
+        tracking_path = self.tracking_path if len(self.tracking_path) >= 2 else path
+        segment = self._nearest_tracking_segment(
+            tracking_path,
+            curr_world_xz,
+            point_to_world,
+        )
+        if segment is None:
+            fallback_waypoint = path[-1]
+            action, steering_error = self._action_toward(
+                curr_xy,
+                fallback_waypoint,
+                agent_theta,
+                curr_world_xz=curr_world_xz,
+                waypoint_world_xz=point_to_world(fallback_waypoint),
+            )
+            self.last_tracking_metrics = {
+                "controller": "waypoint_fallback",
+                "segment": -1,
+                "cross_track_m": 0.0,
+                "heading_error_deg": float(steering_error),
+                "steering_deg": float(steering_error),
+            }
+            return (
+                action,
+                steering_error,
+                steering_error,
+                0.0,
+                -1,
+                fallback_waypoint,
+            )
+
+        segment_idx, closest_world, segment_vector, segment_length = segment
+        segment_dx, segment_dz = segment_vector
+        path_yaw = math.degrees(math.atan2(segment_dx, segment_dz)) % 360.0
+        heading_error = self._normalize_angle_deg(path_yaw - float(agent_theta))
+        offset_x = float(curr_world_xz[0]) - closest_world[0]
+        offset_z = float(curr_world_xz[1]) - closest_world[1]
+        cross_track_m = (
+            segment_dx * offset_z - segment_dz * offset_x
+        ) / segment_length
+        correction_deg = math.degrees(
+            math.atan2(
+                self.stanley_gain * cross_track_m,
+                self.stanley_softening_m,
+            )
+        )
+        correction_deg = max(
+            -self.stanley_max_correction_deg,
+            min(self.stanley_max_correction_deg, correction_deg),
+        )
+        steering_error = self._normalize_angle_deg(
+            heading_error + correction_deg
+        )
+        action = self._action_from_steering_error(
+            steering_error,
+            forward_tolerance_deg=self.stanley_forward_tolerance_deg,
+            drive_turn_tolerance_deg=self.drive_turn_tolerance_deg,
+        )
+        self.last_tracking_metrics = {
+            "controller": "stanley",
+            "segment": int(segment_idx),
+            "cross_track_m": float(cross_track_m),
+            "heading_error_deg": float(heading_error),
+            "steering_deg": float(steering_error),
+        }
+        tracking_waypoint = tracking_path[min(segment_idx + 1, len(tracking_path) - 1)]
+        return (
+            action,
+            steering_error,
+            heading_error,
+            cross_track_m,
+            segment_idx,
+            tracking_waypoint,
+        )
+
+    def _nearest_tracking_segment(
+        self,
+        tracking_path: List[Point],
+        curr_world_xz: WorldPoint,
+        point_to_world: PointToWorld,
+    ) -> Optional[Tuple[int, WorldPoint, WorldPoint, float]]:
+        if len(tracking_path) < 2:
+            return None
+
+        start_idx = min(self.path_segment_index, len(tracking_path) - 2)
+        best_segment = None
+        best_distance_sq = float("inf")
+        curr_x = float(curr_world_xz[0])
+        curr_z = float(curr_world_xz[1])
+        for segment_idx in range(start_idx, len(tracking_path) - 1):
+            start_world = point_to_world(tracking_path[segment_idx])
+            end_world = point_to_world(tracking_path[segment_idx + 1])
+            if start_world is None or end_world is None:
+                continue
+            segment_dx = float(end_world[0]) - float(start_world[0])
+            segment_dz = float(end_world[1]) - float(start_world[1])
+            segment_length_sq = segment_dx * segment_dx + segment_dz * segment_dz
+            if segment_length_sq <= 1e-12:
+                continue
+            projection = (
+                (curr_x - float(start_world[0])) * segment_dx
+                + (curr_z - float(start_world[1])) * segment_dz
+            ) / segment_length_sq
+            projection = max(0.0, min(1.0, projection))
+            closest_world = (
+                float(start_world[0]) + projection * segment_dx,
+                float(start_world[1]) + projection * segment_dz,
+            )
+            distance_sq = (
+                (curr_x - closest_world[0]) ** 2
+                + (curr_z - closest_world[1]) ** 2
+            )
+            if distance_sq < best_distance_sq:
+                best_distance_sq = distance_sq
+                best_segment = (
+                    segment_idx,
+                    closest_world,
+                    (segment_dx, segment_dz),
+                    math.sqrt(segment_length_sq),
+                )
+
+        if best_segment is not None:
+            self.path_segment_index = best_segment[0]
+        return best_segment
+
     def _greedy_action(
         self,
         curr_xy: Point,
@@ -907,32 +1374,55 @@ class AStarBaseline:
         if relative is None:
             return "stop", 0.0
 
-        if abs(relative) <= self.forward_priority_tolerance_deg:
-            if abs(relative) <= self.hysteresis_reset_deg:
-                self.last_turn_sign = 0
-            return "forward", relative
-
-        turn_sign = 1 if relative > 0 else -1
-        if (
-            self.last_turn_sign
-            and turn_sign != self.last_turn_sign
-            and abs(relative) >= self.hysteresis_lock_deg
-        ):
-            turn_sign = self.last_turn_sign
-        self.last_turn_sign = turn_sign
-
         drive_turn_tolerance = (
             self.drive_turn_tolerance_deg
             if drive_turn_tolerance_deg is None
             else float(drive_turn_tolerance_deg)
         )
-        if abs(relative) <= drive_turn_tolerance:
+        action = self._action_from_steering_error(
+            relative,
+            forward_tolerance_deg=self.forward_priority_tolerance_deg,
+            drive_turn_tolerance_deg=drive_turn_tolerance,
+        )
+        return action, relative
+
+    def _action_from_steering_error(
+        self,
+        steering_error_deg: float,
+        *,
+        forward_tolerance_deg: float,
+        drive_turn_tolerance_deg: float,
+    ) -> str:
+        if abs(steering_error_deg) <= forward_tolerance_deg:
+            if abs(steering_error_deg) <= self.hysteresis_reset_deg:
+                self.last_turn_sign = 0
+            return "forward"
+
+        turn_sign = 1 if steering_error_deg > 0 else -1
+        if (
+            self.last_turn_sign
+            and turn_sign != self.last_turn_sign
+            and abs(steering_error_deg) >= self.hysteresis_lock_deg
+        ):
+            turn_sign = self.last_turn_sign
+        self.last_turn_sign = turn_sign
+
+        if abs(steering_error_deg) <= drive_turn_tolerance_deg:
             if turn_sign > 0:
-                return "astar forward turn right", relative
-            return "astar forward turn left", relative
+                return "astar forward turn right"
+            return "astar forward turn left"
         if turn_sign > 0:
-            return "astar turn right", relative
-        return "astar turn left", relative
+            return "astar turn right"
+        return "astar turn left"
+
+    @staticmethod
+    def _normalize_angle_deg(angle_deg: float) -> float:
+        normalized = float(angle_deg)
+        while normalized > 180.0:
+            normalized -= 360.0
+        while normalized < -180.0:
+            normalized += 360.0
+        return normalized
 
     def _relative_angle_to_point(
         self,
@@ -1012,6 +1502,8 @@ class AStarBaseline:
             self.stuck_count = 0
             self.last_turn_sign = 0
             self.last_path = []
+            self.tracking_path = []
+            self.path_segment_index = 0
             self.follow_waypoints = []
             self.follow_waypoint_index = 0
             reason = f"{reason}_start_recovery"

@@ -25,6 +25,24 @@ from nav.config import LLM_ERROR_SENTINELS
 from nav.harness.llm_provider import llm_openrouter
 
 
+def astar_path_length_m(path, point_to_world) -> float | None:
+    """Return the world-space length of an A* pixel path when calibrated."""
+    if point_to_world is None or len(path) < 2:
+        return None
+    world_points = [point_to_world(point) for point in path]
+    if any(point is None for point in world_points):
+        return None
+    return float(
+        sum(
+            np.hypot(
+                float(current[0]) - float(previous[0]),
+                float(current[1]) - float(previous[1]),
+            )
+            for previous, current in zip(world_points, world_points[1:])
+        )
+    )
+
+
 def execute_decision(baseline: str, payload: dict, result_container: dict) -> None:
     """Run one decision and record it into ``result_container``.
 
@@ -79,6 +97,23 @@ def execute_decision(baseline: str, payload: dict, result_container: dict) -> No
             )
             result_container["action"] = action
             result_container["reasoning"] = reasoning
+            result_container["astar_path_length_m"] = astar_path_length_m(
+                _path,
+                payload.get("point_to_world"),
+            )
+            result_container["astar_path"] = [
+                [int(point[0]), int(point[1])] for point in _path
+            ]
+            result_container["astar_step"] = int(payload["step"])
+            result_container["astar_plan_revision"] = (
+                payload["astar_planner"].plan_revision
+            )
+            result_container["astar_plan_status"] = (
+                payload["astar_planner"].last_plan_status
+            )
+            result_container["astar_tracking"] = dict(
+                payload["astar_planner"].last_tracking_metrics
+            )
         else:
             raise ValueError(f"Unsupported baseline: {baseline}")
     except Exception as e:  # noqa: BLE001 — degrade any failure to a safe stop

@@ -388,6 +388,10 @@ bash shs/run_Astar.sh all
 ASTAR_DEBUG_VIZ=1 bash shs/run_Astar.sh scene1 point1
 ```
 
+A* uses a dynamic per-point step budget by default. Short routes receive fewer
+decision steps, while long or replanned routes can grow up to 160 steps. Set
+`MAX_STEPS=<N>` to force a fixed budget for a reproducibility run.
+
 A* outputs are written under:
 
 ```text

@@ -12,6 +12,7 @@ pixel — no interactive selection.
 import argparse
 import csv
 import datetime
+import json
 import os
 import sys
 import threading
@@ -210,6 +211,51 @@ def parse_args():
         type=float,
         default=ASTAR_DEFAULTS.proxy_stop_distance_m,
         help="Blocked-target proxy threshold in Unity world meters.",
+    )
+    p.add_argument(
+        "--astar_dynamic_replan_lookahead_m",
+        type=float,
+        default=ASTAR_DEFAULTS.dynamic_replan_lookahead_m,
+        help="Ahead distance checked for newly blocked A* path segments.",
+    )
+    p.add_argument(
+        "--astar_dynamic_replan_confirm_steps",
+        type=int,
+        default=ASTAR_DEFAULTS.dynamic_replan_confirm_steps,
+        help="Consecutive blocked observations required before replanning.",
+    )
+    p.add_argument(
+        "--astar_dynamic_step_budget",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Scale the A* step budget from world distance and planned path length. "
+            "The budget may increase after replanning, up to the configured cap."
+        ),
+    )
+    p.add_argument(
+        "--astar_step_budget_min",
+        type=int,
+        default=ASTAR_DEFAULTS.step_budget_min,
+        help="Minimum dynamic A* decision-step budget.",
+    )
+    p.add_argument(
+        "--astar_step_budget_max",
+        type=int,
+        default=ASTAR_DEFAULTS.step_budget_max,
+        help="Hard maximum dynamic A* decision-step budget.",
+    )
+    p.add_argument(
+        "--astar_steps_per_path_meter",
+        type=float,
+        default=ASTAR_DEFAULTS.steps_per_path_meter,
+        help="Dynamic decision steps allocated per meter of remaining A* path.",
+    )
+    p.add_argument(
+        "--astar_step_budget_overhead",
+        type=int,
+        default=ASTAR_DEFAULTS.step_budget_overhead,
+        help="Extra dynamic steps reserved for turning, recovery, and replanning.",
     )
     p.add_argument("--astar_debug_viz", action="store_true",
                    help="Dump A* walkable-grid / path overlays per step.")
@@ -544,10 +590,72 @@ def target_reached(
     return distance_m <= float(reach_m), distance_m
 
 
+def astar_step_allowance(
+    path_length_m,
+    minimum,
+    maximum,
+    steps_per_meter,
+    overhead,
+):
+    """Convert a world-space route length into a bounded decision budget."""
+    path_length_m = float(path_length_m)
+    if not np.isfinite(path_length_m) or path_length_m < 0:
+        raise ValueError("A* path length must be finite and nonnegative.")
+    raw_budget = int(np.ceil(float(overhead) + float(steps_per_meter) * path_length_m))
+    return max(int(minimum), min(int(maximum), raw_budget))
+
+
+def astar_dynamic_total_budget(
+    longest_path_m,
+    remaining_path_m,
+    step_count,
+    minimum,
+    maximum,
+    steps_per_meter,
+    overhead,
+):
+    """Combine longest-route and elapsed-plus-remaining A* allowances."""
+    longest_route_budget = astar_step_allowance(
+        longest_path_m,
+        minimum,
+        maximum,
+        steps_per_meter,
+        overhead,
+    )
+    remaining_allowance = astar_step_allowance(
+        remaining_path_m,
+        0,
+        maximum,
+        steps_per_meter,
+        overhead,
+    )
+    return min(
+        int(maximum),
+        max(longest_route_budget, int(step_count) + remaining_allowance),
+    )
+
+
 def main():
     args = parse_args()
     if args.reach_m <= 0:
         raise SystemExit("--reach_m must be positive.")
+    if args.astar_dynamic_replan_lookahead_m <= 0:
+        raise SystemExit("--astar_dynamic_replan_lookahead_m must be positive.")
+    if args.astar_dynamic_replan_confirm_steps <= 0:
+        raise SystemExit("--astar_dynamic_replan_confirm_steps must be positive.")
+    if args.astar_dynamic_step_budget and args.baseline != "astar":
+        raise SystemExit("--astar_dynamic_step_budget requires --baseline astar.")
+    if args.astar_step_budget_min <= 0:
+        raise SystemExit("--astar_step_budget_min must be positive.")
+    if args.astar_step_budget_max < args.astar_step_budget_min:
+        raise SystemExit(
+            "--astar_step_budget_max must be greater than or equal to "
+            "--astar_step_budget_min."
+        )
+    if args.astar_steps_per_path_meter <= 0:
+        raise SystemExit("--astar_steps_per_path_meter must be positive.")
+    if args.astar_step_budget_overhead < 0:
+        raise SystemExit("--astar_step_budget_overhead must be nonnegative.")
     try:
         args.minimap_width, args.minimap_height = resolve_minimap_resolution(
             args.minimap_width,
@@ -590,6 +698,10 @@ def main():
         astar_planner = AStarBaseline(
             obstacle_clearance_m=args.astar_obstacle_clearance_m,
             proxy_stop_distance_m=args.astar_proxy_stop_distance_m,
+            dynamic_replan_lookahead_m=(
+                args.astar_dynamic_replan_lookahead_m
+            ),
+            dynamic_replan_confirm_steps=args.astar_dynamic_replan_confirm_steps,
             pixel_scale=pixel_scale,
             debug_viz=args.astar_debug_viz,
             debug_dir=astar_debug_dir,
@@ -599,6 +711,10 @@ def main():
             f"grid_cell_m={ASTAR_DEFAULTS.grid_cell_m:g} | "
             f"obstacle_clearance_m={args.astar_obstacle_clearance_m:g} | "
             f"proxy_stop_distance_m={args.astar_proxy_stop_distance_m:g} | "
+            f"dynamic_replan_lookahead_m="
+            f"{args.astar_dynamic_replan_lookahead_m:g} | "
+            f"dynamic_replan_confirm_steps="
+            f"{args.astar_dynamic_replan_confirm_steps} | "
             f"pixel_scale={pixel_scale:.4f} | "
             f"debug_viz={args.astar_debug_viz} | debug_dir={astar_debug_dir}"
         )
@@ -630,6 +746,36 @@ def main():
         f"Minimap runtime space: {minimap_size[0]}x{minimap_size[1]} | "
         f"reach_m={args.reach_m:g}"
     )
+    step_budget_mode = (
+        "dynamic" if args.baseline == "astar" and args.astar_dynamic_step_budget
+        else "fixed"
+    )
+    step_budget = int(args.max_steps)
+    initial_step_budget = step_budget
+    astar_max_planned_path_m = None
+    last_budget_plan_revision = -1
+    if step_budget_mode == "dynamic":
+        direct_distance_m = float(
+            np.hypot(
+                float(init_world_x) - float(target_world_x),
+                float(init_world_z) - float(target_world_z),
+            )
+        )
+        step_budget = astar_step_allowance(
+            direct_distance_m,
+            args.astar_step_budget_min,
+            args.astar_step_budget_max,
+            args.astar_steps_per_path_meter,
+            args.astar_step_budget_overhead,
+        )
+        initial_step_budget = step_budget
+        logger.info(
+            "A* dynamic step budget initialized | "
+            f"direct_distance={direct_distance_m:.2f}m | budget={step_budget} | "
+            f"range={args.astar_step_budget_min}-{args.astar_step_budget_max} | "
+            f"steps_per_meter={args.astar_steps_per_path_meter:g} | "
+            f"overhead={args.astar_step_budget_overhead}"
+        )
     minimap_projector = build_axis_aligned_projector(
         primed.target_sc.last_spawn_pixel,
         primed.target_sc.last_spawn_world,
@@ -671,6 +817,13 @@ def main():
     _action_csv_file.flush()
     action_log = []
 
+    astar_paths_path = os.path.join(args.frame_save_dir, "astar_paths.jsonl")
+    _astar_paths_file = (
+        open(astar_paths_path, "w", encoding="utf-8")
+        if args.baseline == "astar"
+        else None
+    )
+
     agent_qa_path = os.path.join(args.frame_save_dir, "agent_qa.txt")
     _qa_file = open(agent_qa_path, "w", encoding="utf-8")
 
@@ -688,9 +841,12 @@ def main():
 
     try:
         while True:
-            if args.max_steps > 0 and step_count >= args.max_steps:
+            if step_budget > 0 and step_count >= step_budget:
                 stop_reason = "max_steps"
-                logger.info(f"Max steps reached: {step_count} >= {args.max_steps}")
+                logger.info(
+                    f"Step budget reached: {step_count} >= {step_budget} "
+                    f"(mode={step_budget_mode})"
+                )
                 break
 
             decision_steps, _ = env.get_steps(BEHAVIOR_NAME)
@@ -833,6 +989,57 @@ def main():
                     stop_reason = "decision_error"
                     logger.error(f"Decision error at step {step_count}: {reasoning}")
                     break
+                if args.baseline == "astar" and _astar_paths_file is not None:
+                    path_record = {
+                        "step": int(decision_result.get("astar_step", step_count - 1)),
+                        "plan_revision": int(
+                            decision_result.get("astar_plan_revision", -1)
+                        ),
+                        "plan_status": decision_result.get(
+                            "astar_plan_status",
+                            "unknown",
+                        ),
+                        "tracking": decision_result.get("astar_tracking", {}),
+                        "path": decision_result.get("astar_path", []),
+                    }
+                    _astar_paths_file.write(
+                        json.dumps(path_record, separators=(",", ":")) + "\n"
+                    )
+                    _astar_paths_file.flush()
+                if step_budget_mode == "dynamic":
+                    planned_path_m = decision_result.get("astar_path_length_m")
+                    plan_revision = int(
+                        decision_result.get("astar_plan_revision", -1)
+                    )
+                    if planned_path_m is not None and np.isfinite(planned_path_m):
+                        planned_path_m = float(planned_path_m)
+                        astar_max_planned_path_m = max(
+                            astar_max_planned_path_m or 0.0,
+                            planned_path_m,
+                        )
+                        if plan_revision > last_budget_plan_revision:
+                            last_budget_plan_revision = plan_revision
+                            proposed_budget = astar_dynamic_total_budget(
+                                astar_max_planned_path_m,
+                                planned_path_m,
+                                step_count,
+                                args.astar_step_budget_min,
+                                args.astar_step_budget_max,
+                                args.astar_steps_per_path_meter,
+                                args.astar_step_budget_overhead,
+                            )
+                            if proposed_budget > step_budget:
+                                previous_budget = step_budget
+                                step_budget = proposed_budget
+                                logger.info(
+                                    "A* dynamic step budget increased | "
+                                    f"revision={plan_revision} | "
+                                    f"path={planned_path_m:.2f}m | "
+                                    f"longest_path="
+                                    f"{astar_max_planned_path_m:.2f}m | "
+                                    f"step={step_count} | "
+                                    f"budget={previous_budget}->{step_budget}"
+                                )
                 if args.baseline == "llm":
                     _qa_file.write(
                         f"=== Step {step_count} ===\n"
@@ -1079,7 +1286,10 @@ def main():
                 "provider": "openrouter",
                 "model": args.model_id,
                 "vision_input": bool(args.vision_input),
-                "max_steps": int(args.max_steps),
+                "max_steps": int(step_budget),
+                "step_budget_mode": step_budget_mode,
+                "initial_step_budget": int(initial_step_budget),
+                "astar_max_planned_path_m": astar_max_planned_path_m,
                 "reach_m": args.reach_m,
                 "init_world_x": init_world_x,
                 "init_world_z": init_world_z,
@@ -1106,6 +1316,7 @@ def main():
             )
             logger.info(
                 f"[FINAL] stop={result['stop_reason']} steps={result['steps_taken']} "
+                f"budget={step_budget} mode={step_budget_mode} "
                 f"world_final={last_world_xz} "
                 f"world_target={(target_world_x, target_world_z)} "
                 f"world_dist={world_distance_label}"
@@ -1124,9 +1335,13 @@ def main():
         except Exception:
             pass
         _action_csv_file.close()
+        if _astar_paths_file is not None:
+            _astar_paths_file.close()
         _qa_file.close()
         if action_log:
             logger.info(f"Actions saved to: {os.path.abspath(actions_csv_path)}")
+        if _astar_paths_file is not None:
+            logger.info(f"A* paths saved to: {os.path.abspath(astar_paths_path)}")
         logger.info(f"Agent Q&A saved to: {os.path.abspath(agent_qa_path)}")
 
 

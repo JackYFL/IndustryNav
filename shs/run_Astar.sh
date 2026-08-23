@@ -18,7 +18,17 @@
 #   PYTHON_BIN
 #       Python interpreter. Defaults to <repo>/.venv/bin/python.
 #   MAX_STEPS
-#       Per-point decision-step cap. Default: 70.
+#       Explicit fixed per-point decision-step cap. Setting this disables the
+#       default dynamic A* budget unless ASTAR_DYNAMIC_STEP_BUDGET=1 is also set.
+#   ASTAR_DYNAMIC_STEP_BUDGET
+#       1 | 0. Default: 1 when MAX_STEPS is unset, otherwise 0.
+#   ASTAR_STEP_BUDGET_MIN / ASTAR_STEP_BUDGET_MAX
+#       Dynamic budget bounds. Defaults: 50 / 160 decisions.
+#   ASTAR_STEPS_PER_PATH_METER / ASTAR_STEP_BUDGET_OVERHEAD
+#       Dynamic budget formula. Defaults: 1.25 steps/m + 20 reserve steps.
+#   ASTAR_DYNAMIC_REPLAN_LOOKAHEAD_M / ASTAR_DYNAMIC_REPLAN_CONFIRM_STEPS
+#       Ahead-path blockage check. Defaults: 8.0 meters and 2 consecutive
+#       blocked observations before replanning.
 #   SIM_STEPS_PER_DECISION
 #       Unity simulation steps per A* action. Default: 2.
 #   REACH_M
@@ -26,7 +36,7 @@
 #   MODALITIES
 #       Sensor modalities to save. Default: ego,minimap,depth.
 #   EGO_WIDTH / EGO_HEIGHT
-#       Egocentric RGB/depth sensor resolution. Defaults: 512 / 512.
+#       Egocentric RGB/depth sensor resolution. Defaults: 640 / 480 (4:3 VGA).
 #   MINIMAP_WIDTH / MINIMAP_HEIGHT
 #       Minimap sensor resolution. Set either value and the other is derived to
 #       preserve 862:512. Both omitted defaults to 862x512.
@@ -182,11 +192,29 @@ fi
 
 MAX_STEPS_WAS_SET="${MAX_STEPS+x}"
 MAX_STEPS="${MAX_STEPS:-70}"
+ASTAR_DYNAMIC_STEP_BUDGET="${ASTAR_DYNAMIC_STEP_BUDGET:-}"
+if [[ -z "$ASTAR_DYNAMIC_STEP_BUDGET" ]]; then
+  if [[ -n "$MAX_STEPS_WAS_SET" ]]; then
+    ASTAR_DYNAMIC_STEP_BUDGET=0
+  else
+    ASTAR_DYNAMIC_STEP_BUDGET=1
+  fi
+fi
+if [[ "$ASTAR_DYNAMIC_STEP_BUDGET" != "0" && "$ASTAR_DYNAMIC_STEP_BUDGET" != "1" ]]; then
+  echo "ASTAR_DYNAMIC_STEP_BUDGET must be 1 or 0, got: $ASTAR_DYNAMIC_STEP_BUDGET"
+  exit 1
+fi
+ASTAR_STEP_BUDGET_MIN="${ASTAR_STEP_BUDGET_MIN:-50}"
+ASTAR_STEP_BUDGET_MAX="${ASTAR_STEP_BUDGET_MAX:-160}"
+ASTAR_STEPS_PER_PATH_METER="${ASTAR_STEPS_PER_PATH_METER:-1.25}"
+ASTAR_STEP_BUDGET_OVERHEAD="${ASTAR_STEP_BUDGET_OVERHEAD:-20}"
+ASTAR_DYNAMIC_REPLAN_LOOKAHEAD_M="${ASTAR_DYNAMIC_REPLAN_LOOKAHEAD_M:-8.0}"
+ASTAR_DYNAMIC_REPLAN_CONFIRM_STEPS="${ASTAR_DYNAMIC_REPLAN_CONFIRM_STEPS:-2}"
 SIM_STEPS_PER_DECISION="${SIM_STEPS_PER_DECISION:-2}"
 REACH_M="${REACH_M:-2.0}"
 MODALITIES="${MODALITIES:-ego,minimap,depth}"
-EGO_WIDTH="${EGO_WIDTH:-512}"
-EGO_HEIGHT="${EGO_HEIGHT:-512}"
+EGO_WIDTH="${EGO_WIDTH:-640}"
+EGO_HEIGHT="${EGO_HEIGHT:-480}"
 MINIMAP_WIDTH="${MINIMAP_WIDTH:-}"
 MINIMAP_HEIGHT="${MINIMAP_HEIGHT:-}"
 DYNAMIC_OBJECTS="${DYNAMIC_OBJECTS:-moving}"
@@ -259,7 +287,9 @@ echo "[astar] scenes=${SCENES[*]}"
 if [[ -n "$POINT_FILTER" ]]; then
   echo "[astar] point_filter=${POINT_FILTER}"
 fi
-echo "[astar] max_steps=${MAX_STEPS} sim_steps_per_decision=${SIM_STEPS_PER_DECISION} reach_m=${REACH_M} ego=${EGO_WIDTH}x${EGO_HEIGHT} minimap=${MINIMAP_WIDTH:-auto}x${MINIMAP_HEIGHT:-auto} dynamic_objects=${DYNAMIC_OBJECTS}"
+echo "[astar] max_steps=${MAX_STEPS} dynamic_step_budget=${ASTAR_DYNAMIC_STEP_BUDGET} budget_range=${ASTAR_STEP_BUDGET_MIN}-${ASTAR_STEP_BUDGET_MAX} steps_per_path_meter=${ASTAR_STEPS_PER_PATH_METER} budget_overhead=${ASTAR_STEP_BUDGET_OVERHEAD}"
+echo "[astar] dynamic_replan_lookahead_m=${ASTAR_DYNAMIC_REPLAN_LOOKAHEAD_M} dynamic_replan_confirm_steps=${ASTAR_DYNAMIC_REPLAN_CONFIRM_STEPS}"
+echo "[astar] sim_steps_per_decision=${SIM_STEPS_PER_DECISION} reach_m=${REACH_M} ego=${EGO_WIDTH}x${EGO_HEIGHT} minimap=${MINIMAP_WIDTH:-auto}x${MINIMAP_HEIGHT:-auto} dynamic_objects=${DYNAMIC_OBJECTS}"
 echo "[astar] absolute_speed_mps=human:${HUMAN_SPEED_MPS:-default}[${HUMAN_SPEED_MIN_MPS:-}-${HUMAN_SPEED_MAX_MPS:-}] vehicle:${VEHICLE_SPEED_MPS:-default}[${VEHICLE_SPEED_MIN_MPS:-}-${VEHICLE_SPEED_MAX_MPS:-}] robot:${ROBOT_SPEED_MPS:-default}[${ROBOT_SPEED_MIN_MPS:-}-${ROBOT_SPEED_MAX_MPS:-}] seed=${MOTION_RANDOM_SEED:-default}"
 echo "[astar] lighting=fixed:${LIGHT_INTENSITY_MULTIPLIER:-none} range:${LIGHT_INTENSITY_MIN:-none}-${LIGHT_INTENSITY_MAX:-none} seed=${LIGHT_RANDOM_SEED:-default} exposure=${LIGHT_FIXED_EXPOSURE:-default}"
 echo "[astar] marker_source=${MARKER_SOURCE}"
@@ -301,11 +331,11 @@ PY
     echo "[astar] scene=${scene_name} scene_id=${scene_id} point=${point_id}"
     echo "[astar] init_world=(${init_wx},${init_wz},dir=${init_dir}) target_px=(${target_x},${target_y})"
 
-    worker_id=$((31 + idx))
+    worker_id=0
     base_port="$(pick_base_port "$((BASE_PORT_START + idx))")"
     frame_save_dir="outputs/${scene_name}/${point_id}/${RUN_NAME}"
     max_steps_for_point="$MAX_STEPS"
-    if [[ -z "$MAX_STEPS_WAS_SET" && "$scene_name" == "scene1" && "$point_id" == "point4" ]]; then
+    if [[ "$ASTAR_DYNAMIC_STEP_BUDGET" == "0" && -z "$MAX_STEPS_WAS_SET" && "$scene_name" == "scene1" && "$point_id" == "point4" ]]; then
       max_steps_for_point=100
     fi
     cmd=("$PYTHON_BIN" -m nav.scripts.run_benchmark_cell
@@ -328,11 +358,21 @@ PY
          --model_id astar
          --astar_obstacle_clearance_m "$ASTAR_OBSTACLE_CLEARANCE_M"
          --astar_proxy_stop_distance_m "$ASTAR_PROXY_STOP_DISTANCE_M"
+         --astar_dynamic_replan_lookahead_m "$ASTAR_DYNAMIC_REPLAN_LOOKAHEAD_M"
+         --astar_dynamic_replan_confirm_steps "$ASTAR_DYNAMIC_REPLAN_CONFIRM_STEPS"
          --init_world_x "$init_wx"
          --init_world_z "$init_wz"
          --init_curr_direction "$init_dir"
          --target_x "$target_x"
          --target_y "$target_y")
+
+    if [[ "$ASTAR_DYNAMIC_STEP_BUDGET" == "1" ]]; then
+      cmd+=(--astar_dynamic_step_budget
+            --astar_step_budget_min "$ASTAR_STEP_BUDGET_MIN"
+            --astar_step_budget_max "$ASTAR_STEP_BUDGET_MAX"
+            --astar_steps_per_path_meter "$ASTAR_STEPS_PER_PATH_METER"
+            --astar_step_budget_overhead "$ASTAR_STEP_BUDGET_OVERHEAD")
+    fi
 
     if [[ -n "$MINIMAP_WIDTH" ]]; then
       cmd+=(--minimap_width "$MINIMAP_WIDTH")
@@ -391,7 +431,7 @@ PY
     fi
 
     echo "[astar] output=${frame_save_dir}"
-    echo "[astar] max_steps_for_point=${max_steps_for_point}"
+    echo "[astar] max_steps_for_point=${max_steps_for_point} dynamic_step_budget=${ASTAR_DYNAMIC_STEP_BUDGET}"
     echo "[astar] obstacle_clearance_m=${ASTAR_OBSTACLE_CLEARANCE_M} proxy_terminal_dist_m=${ASTAR_PROXY_STOP_DISTANCE_M}"
     if [[ "$DRY_RUN" == "1" || "$DRY_RUN" == "true" || "$DRY_RUN" == "on" ]]; then
       printf '[astar] dry-run command:'

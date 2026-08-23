@@ -121,12 +121,20 @@ class AStarParams:
     obstacle_threshold: int = 55
     min_free_ratio: float = 0.55
     obstacle_clearance_m: float = 0.6
+    path_smoothing: bool = True
+    path_corner_smoothing_m: float = 1.0
+    stanley_gain: float = 1.0
+    stanley_softening_m: float = 1.5
+    stanley_max_correction_deg: float = 45.0
+    stanley_forward_tolerance_deg: float = 8.0
     turn_tolerance_deg: float = 25.0
     forward_priority_tolerance_deg: float = 20.0
     drive_turn_tolerance_deg: float = 30.0
     waypoint_distance_m: float = 2.0
     waypoint_reach_m: float = 1.2
     path_replan_distance_m: float = 2.4
+    dynamic_replan_lookahead_m: float = 8.0
+    dynamic_replan_confirm_steps: int = 2
     terminal_approach_m: float = 3.0
     lookahead_m: float = 3.0
     front_cone_deg: float = 140.0
@@ -139,6 +147,10 @@ class AStarParams:
     stuck_block_radius_m: float = 1.35
     stuck_block_ttl_steps: int = 24
     proxy_stop_distance_m: float = 4.9
+    step_budget_min: int = 50
+    step_budget_max: int = 160
+    steps_per_path_meter: float = 1.25
+    step_budget_overhead: int = 20
 
 
 ASTAR_DEFAULTS = AStarParams()
@@ -179,6 +191,9 @@ RESULTS_CSV_FIELDS: List[str] = [
     "model",
     "vision_input",
     "max_steps",
+    "step_budget_mode",
+    "initial_step_budget",
+    "astar_max_planned_path_m",
     "reach_m",
     "init_world_x",
     "init_world_z",

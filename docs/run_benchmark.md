@@ -130,7 +130,10 @@ This is a convenience wrapper around `run_benchmark_cell --baseline astar`. It s
 | Variable | Default | Meaning |
 |---|---|---|
 | `INPUT_FILE` | `<repo>/input_points.json` | Alternate point JSON. |
-| `MAX_STEPS` | `70` | Per-point step budget. `scene1/point4` defaults to `100` unless this is explicitly set. |
+| `MAX_STEPS` | unset | Explicit fixed A* budget; setting it disables the wrapper's dynamic default. |
+| `ASTAR_DYNAMIC_STEP_BUDGET` | `1` | Scale the budget from direct distance and A* route length. |
+| `ASTAR_STEP_BUDGET_MIN`, `ASTAR_STEP_BUDGET_MAX` | `50`, `160` | Dynamic budget bounds. |
+| `ASTAR_STEPS_PER_PATH_METER`, `ASTAR_STEP_BUDGET_OVERHEAD` | `1.25`, `20` | Dynamic budget slope and turn/recovery reserve. |
 | `SIM_STEPS_PER_DECISION` | `2` | Unity simulation steps per A* action. |
 | `REACH_M` | `2.0` | Success radius in Unity world meters. |
 | `MODALITIES` | `ego,minimap,depth` | Saved sensor streams. |
@@ -172,7 +175,8 @@ python -m nav.scripts.run_benchmark_cell --dynamic_objects static ...
 ```bash
 ASTAR_DEBUG_VIZ=1 bash shs/run_Astar.sh scene1 point1
 ASTAR_OBSTACLE_CLEARANCE_M=0.9 RUN_NAME=astar_clearance09 bash shs/run_Astar.sh scene1 point1
-MAX_STEPS=120 bash shs/run_Astar.sh all
+ASTAR_STEP_BUDGET_MAX=200 bash shs/run_Astar.sh all
+MAX_STEPS=120 bash shs/run_Astar.sh all  # fixed-budget override
 ```
 
 #### `shs/train_bc.sh`
