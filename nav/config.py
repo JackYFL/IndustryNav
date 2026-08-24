@@ -119,6 +119,13 @@ class AStarParams:
 
     grid_cell_m: float = 0.6
     obstacle_threshold: int = 55
+    obstacle_bright_threshold: int = 190
+    # Low-contrast structures (painted rails, partition tops) render at almost
+    # exactly the floor gray, so no global band separates them. They are found
+    # instead by local deviation from a median-filtered background.
+    contrast_background_px: int = 21
+    contrast_threshold: int = 35
+    contrast_min_area_px: int = 300
     min_free_ratio: float = 0.55
     obstacle_clearance_m: float = 0.6
     path_smoothing: bool = True
@@ -315,6 +322,7 @@ SCENE_ALL_BUILDS: Dict[str, List[str]] = {
         str(REPO_ROOT / "scene_files" / "mac" / "scene_all.app"),
     ],
     "Linux": [
+        str(REPO_ROOT / "clients" / "scene_all_24scenes_latest" / "scene_all.x86_64"),
         str(UNITY_CLIENT_DIR / "scene_all" / "scene_all.x86_64"),
         "/mnt/ss2/devops/sandbox/industrynav2/client/scene_all/scene_all.x86_64",
     ],

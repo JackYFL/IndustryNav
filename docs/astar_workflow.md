@@ -316,24 +316,46 @@ At each decision step, the planner receives:
 
 The planner:
 
-1. Converts the minimap into a walkable/blocked grid.
-2. Clears marker artifacts around the current and target pixels.
-3. Converts `ASTAR_OBSTACLE_CLEARANCE_M` through the calibrated projection and
+1. Converts the minimap into a walkable/blocked grid. A pixel is blocked if
+   *either* test fires:
+   - its gray falls outside the band
+     `(obstacle_threshold, obstacle_bright_threshold]`, currently `(55, 190]`.
+     The floor sits near gray 133, so this catches the dark racks and crates
+     *and* the bright partition walls, which are brighter than the floor and
+     would otherwise be planned straight through;
+   - it deviates from a median-filtered background by more than
+     `contrast_threshold` (default 35, window `contrast_background_px`=21) and
+     belongs to a connected component of at least `contrast_min_area_px` (300)
+     pixels. Painted rails and partition tops render at almost exactly the floor
+     gray — measured 125 against a floor of 127 — so no global band can separate
+     them; what does separate them is the bright highlight and dark shadow edges
+     a few pixels apart. The area filter keeps floor texture speckle out.
+2. Forces a disc of roughly 1.2 x 1.6 world meters free around the target
+   pixel. This is the goal-tolerance region: about a fifth of the benchmark
+   targets are annotated at or just inside rack geometry, and the planner always
+   terminates its route at the raw target pixel, so without the disc the final
+   segment would dive into a shelf.
+3. Forces the same disc free around the agent pixel *only* when the incoming
+   minimap still has markers painted into it. Under `MARKER_SOURCE=vector` with
+   `HIDE_UNITY_RED_MARKER=1` the planner receives a marker-free minimap, so this
+   is skipped — otherwise the disc deletes whatever obstacle the agent is
+   currently touching and the planner routes straight back into it.
+4. Converts `ASTAR_OBSTACLE_CLEARANCE_M` through the calibrated projection and
    inflates obstacle regions with an axis-aware elliptical kernel.
-4. Finds a path to the target or a reachable proxy near the target.
-5. Smooths the grid path with obstacle-aware line-of-sight string pulling, then
+5. Finds a path to the target or a reachable proxy near the target.
+6. Smooths the grid path with obstacle-aware line-of-sight string pulling, then
    rounds validated corners into shorter heading changes. Diagonal grid moves
    cannot pass between two blocked cardinal neighbors.
-6. Densely resamples each segment so deviation checks remain stable, then
+7. Densely resamples each segment so deviation checks remain stable, then
    converts path samples to world coordinates for metric waypoint spacing,
    lookahead, path-deviation replanning, and heading control.
-7. Checks the next 8 meters of the cached route against each new minimap grid.
+8. Checks the next 8 meters of the cached route against each new minimap grid.
    A blockage confirmed for two decisions triggers a new plan and updates the
    dynamic step budget from the changed route length. This check pauses while
    the agent is only rotating, which avoids repeated replans from the same view.
-8. Projects the current pose onto the smoothed route and applies Stanley
+9. Projects the current pose onto the smoothed route and applies Stanley
    feedback using both heading error and signed cross-track error.
-9. Converts the resulting steering angle into one of:
+10. Converts the resulting steering angle into one of:
 
 ```text
 forward
@@ -356,7 +378,17 @@ If A* immediately stops:
 If A* drives into shelves or corners:
 
 - Increase `ASTAR_OBSTACLE_CLEARANCE_M`.
-- Check whether the obstacle appears in the minimap mask.
+- Check whether the obstacle appears in the minimap mask. Sample its gray value
+  in `astar_minimap/<step>.png`. An obstacle whose gray sits inside `(55, 190]`
+  is only caught by the local-contrast test, so it needs either a visible
+  highlight/shadow edge or a connected component of at least
+  `contrast_min_area_px` pixels. Lower `contrast_threshold` or
+  `contrast_min_area_px` in `ASTAR_DEFAULTS` rather than raising clearance —
+  and note that tightening the gray band instead is not viable: the floor itself
+  spans roughly gray 116-147, so any narrower band blocks the aisles as well.
+- A 1-pixel-wide structure only survives the `min_free_ratio` grid pooling
+  because the clearance dilation widens it first, so do not run thin-wall
+  scenes with `ASTAR_OBSTACLE_CLEARANCE_M=0`.
 - Verify `MARKER_SOURCE=vector` unless you explicitly need legacy red-marker detection.
 
 If the target is unreachable:

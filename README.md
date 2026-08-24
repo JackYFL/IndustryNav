@@ -35,6 +35,11 @@
 <a id="news"></a>
 ## 📰 News
 
+- **2026-08-24**
+  - Fixed three A* minimap obstacle-detection defects: bright partition walls
+    read as free floor, a marker-clearing disc erased obstacles next to the
+    agent, and low-contrast painted rails were indistinguishable from the floor.
+  - A* success on the 96-point benchmark improved from 84/96 to 88/96.
 - **2026-08-11**
   - Added a cached interactive benchmark-point editor and a 24-scene task overview.
   - Updated the 96 benchmark start-target pairs and added a dynamic A* preview.

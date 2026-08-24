@@ -695,6 +695,12 @@ def main():
             if args.astar_debug_dir.strip()
             else os.path.join(args.frame_save_dir, "astar_debug")
         )
+        # The planner only needs to mask out marker pixels when they are still
+        # painted into the minimap it receives. In vector mode with the Unity
+        # red marker removed, `true_minimap_rgb` is marker-free.
+        astar_baked_markers = not (
+            args.marker_source == "vector" and args.hide_unity_red_marker
+        )
         astar_planner = AStarBaseline(
             obstacle_clearance_m=args.astar_obstacle_clearance_m,
             proxy_stop_distance_m=args.astar_proxy_stop_distance_m,
@@ -703,12 +709,19 @@ def main():
             ),
             dynamic_replan_confirm_steps=args.astar_dynamic_replan_confirm_steps,
             pixel_scale=pixel_scale,
+            minimap_has_baked_markers=astar_baked_markers,
             debug_viz=args.astar_debug_viz,
             debug_dir=astar_debug_dir,
         )
         logger.info(
             "A* baseline ready | "
             f"grid_cell_m={ASTAR_DEFAULTS.grid_cell_m:g} | "
+            f"obstacle_gray_band=({ASTAR_DEFAULTS.obstacle_threshold},"
+            f"{ASTAR_DEFAULTS.obstacle_bright_threshold}] | "
+            f"low_contrast=dev>{ASTAR_DEFAULTS.contrast_threshold}"
+            f"@k{ASTAR_DEFAULTS.contrast_background_px}"
+            f"/area>={ASTAR_DEFAULTS.contrast_min_area_px} | "
+            f"baked_markers={astar_baked_markers} | "
             f"obstacle_clearance_m={args.astar_obstacle_clearance_m:g} | "
             f"proxy_stop_distance_m={args.astar_proxy_stop_distance_m:g} | "
             f"dynamic_replan_lookahead_m="

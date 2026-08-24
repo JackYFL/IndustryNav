@@ -30,6 +30,10 @@ class AStarBaseline:
         self,
         grid_cell_m: float = ASTAR_DEFAULTS.grid_cell_m,
         obstacle_threshold: int = ASTAR_DEFAULTS.obstacle_threshold,
+        obstacle_bright_threshold: int = ASTAR_DEFAULTS.obstacle_bright_threshold,
+        contrast_background_px: int = ASTAR_DEFAULTS.contrast_background_px,
+        contrast_threshold: int = ASTAR_DEFAULTS.contrast_threshold,
+        contrast_min_area_px: int = ASTAR_DEFAULTS.contrast_min_area_px,
         min_free_ratio: float = ASTAR_DEFAULTS.min_free_ratio,
         obstacle_clearance_m: float = ASTAR_DEFAULTS.obstacle_clearance_m,
         path_smoothing: bool = ASTAR_DEFAULTS.path_smoothing,
@@ -59,6 +63,7 @@ class AStarBaseline:
         stuck_block_ttl_steps: int = ASTAR_DEFAULTS.stuck_block_ttl_steps,
         proxy_stop_distance_m: float = ASTAR_DEFAULTS.proxy_stop_distance_m,
         pixel_scale: float = 1.0,
+        minimap_has_baked_markers: bool = False,
         debug_viz: bool = False,
         debug_dir: Optional[str] = None,
     ):
@@ -71,6 +76,17 @@ class AStarBaseline:
 
         self.grid_cell_m = self._positive(grid_cell_m, "grid_cell_m")
         self.obstacle_threshold = int(obstacle_threshold)
+        self.obstacle_bright_threshold = int(obstacle_bright_threshold)
+        if self.obstacle_bright_threshold <= self.obstacle_threshold:
+            raise ValueError(
+                "obstacle_bright_threshold must exceed obstacle_threshold."
+            )
+        # medianBlur needs an odd kernel; area scales with the pixel count.
+        self.contrast_background_px = max(3, scaled_int(contrast_background_px) | 1)
+        self.contrast_threshold = int(contrast_threshold)
+        self.contrast_min_area_px = max(
+            1, int(round(float(contrast_min_area_px) * self.pixel_scale ** 2))
+        )
         self.min_free_ratio = float(min_free_ratio)
         self.obstacle_clearance_m = self._nonnegative(
             obstacle_clearance_m, "obstacle_clearance_m"
@@ -92,6 +108,7 @@ class AStarBaseline:
             stanley_forward_tolerance_deg,
             "stanley_forward_tolerance_deg",
         )
+        self.minimap_has_baked_markers = bool(minimap_has_baked_markers)
         self.marker_clear_px = scaled_int(
             self._MARKER_RADIUS_CANONICAL_PX * self._MARKER_CLEAR_RADIUS_FACTOR
         )
@@ -451,19 +468,77 @@ class AStarBaseline:
             path,
         )
 
+    def _low_contrast_obstacles(self, gray: np.ndarray) -> np.ndarray:
+        """Find structures whose gray sits inside the free band.
+
+        Painted rails and partition tops render at almost exactly the floor gray
+        (measured: rail top 125 vs floor 127), so the global band cannot separate
+        them. What does separate them is *local* contrast: the rail carries a
+        bright highlight edge and a dark shadow edge a few pixels apart. Pixels
+        deviating from a median-filtered background are collected, then small
+        connected components are dropped so floor texture speckle does not
+        become an obstacle.
+        """
+        if self.contrast_threshold <= 0:
+            return np.zeros(gray.shape, dtype=bool)
+
+        background = cv2.medianBlur(gray, self.contrast_background_px)
+        deviating = cv2.absdiff(gray, background) > self.contrast_threshold
+        mask = deviating.astype(np.uint8)
+        if self.contrast_min_area_px <= 1:
+            return mask > 0
+
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(mask, 8)
+        keep = np.zeros(count, dtype=bool)
+        keep[1:] = stats[1:, cv2.CC_STAT_AREA] >= self.contrast_min_area_px
+        return keep[labels]
+
+    def _clear_discs(self, free: np.ndarray, points: Tuple[Point, ...]) -> np.ndarray:
+        free_u8 = free.astype(np.uint8)
+        for point in points:
+            cv2.circle(
+                free_u8,
+                (int(point[0]), int(point[1])),
+                self.marker_clear_px,
+                1,
+                -1,
+            )
+        return free_u8.astype(bool)
+
+    def _forced_free_points(self, curr_xy: Point, target_xy: Point) -> Tuple[Point, ...]:
+        """Points whose surroundings are forced free before grid pooling.
+
+        The target disc is the goal-tolerance region: ~20% of benchmark targets
+        are annotated at or just inside rack geometry, and ``_plan_path`` always
+        terminates the route at the raw target pixel, so without this the final
+        segment dives into a shelf.
+
+        The agent disc is only a marker artifact mask. It spans roughly
+        1.2 x 1.6 world meters, so applying it when the minimap carries no baked
+        marker just deletes the obstacle the agent is currently touching and
+        lets the planner route straight back into it.
+        """
+        if self.minimap_has_baked_markers:
+            return (curr_xy, target_xy)
+        return (target_xy,)
+
     def _build_walkable_grid(
         self, minimap_rgb: np.ndarray, curr_xy: Point, target_xy: Point
     ) -> np.ndarray:
         rgb = self._to_uint8_rgb(minimap_rgb)
         gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-        threshold_free = gray > self.obstacle_threshold
+        # Obstacles are whatever deviates from the mid-gray floor in either
+        # direction: dark racks/crates *and* bright partition walls, which are
+        # brighter than the floor and would otherwise read as free space.
+        threshold_free = (gray > self.obstacle_threshold) & (
+            gray <= self.obstacle_bright_threshold
+        )
+        low_contrast = self._low_contrast_obstacles(gray)
+        threshold_free = threshold_free & ~low_contrast
         free = threshold_free.copy()
 
-        # Keep the colored spawn/target markers from becoming obstacles.
-        free_u8 = free.astype(np.uint8)
-        for point in (curr_xy, target_xy):
-            cv2.circle(free_u8, (int(point[0]), int(point[1])), self.marker_clear_px, 1, -1)
-        free = free_u8.astype(bool)
+        forced_free = self._forced_free_points(curr_xy, target_xy)
+        free = self._clear_discs(free, forced_free)
 
         if self.obstacle_clearance_x_px > 0 or self.obstacle_clearance_y_px > 0:
             kernel = cv2.getStructuringElement(
@@ -475,10 +550,7 @@ class AStarBaseline:
             )
             obstacles = cv2.dilate((~free).astype(np.uint8), kernel, iterations=1)
             free = obstacles == 0
-            free_u8 = free.astype(np.uint8)
-            for point in (curr_xy, target_xy):
-                cv2.circle(free_u8, (int(point[0]), int(point[1])), self.marker_clear_px, 1, -1)
-            free = free_u8.astype(bool)
+            free = self._clear_discs(free, forced_free)
 
         if self.virtual_obstacles:
             free_u8 = free.astype(np.uint8)
@@ -510,6 +582,7 @@ class AStarBaseline:
         self.last_debug = {
             "gray": gray,
             "threshold_free": threshold_free,
+            "low_contrast_obstacles": low_contrast,
             "inflated_free": free,
             "walkable": walkable,
             "grid_step_px": (self.grid_step_x_px, self.grid_step_y_px),
