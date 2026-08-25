@@ -1027,8 +1027,8 @@
     {
       "point_id": "point3",
       "start": {
-        "x": 11.45,
-        "z": 7.31,
+        "x": 11.75,
+        "z": 10.72,
         "direction": 270.0
       },
       "target": {
@@ -1115,8 +1115,8 @@
     {
       "point_id": "point2",
       "start": {
-        "x": 11.45,
-        "z": 47.57,
+        "x": 8.97,
+        "z": 48.16,
         "direction": 0.0
       },
       "target": {
