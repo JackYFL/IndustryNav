@@ -213,15 +213,15 @@ Place the compiled `scene_all` client under one of the auto-discovery folders (`
 
 macOS scene runtime:
 
-- [Download `scene_all.app` from Google Drive](https://drive.google.com/file/d/1cXPMzZKMsKAtiJgEWT4DbbTMBZ9d8aqk/view?usp=share_link)
+- [Download `scene_all.app` from Google Drive](https://drive.google.com/file/d/1s_LG6sRiedzZTZQBwHQiSkP5kyeAJopC/view?usp=drive_link)
 
 Windows scene runtime:
 
-- [Download `IndustryNav.exe` from Google Drive](https://drive.google.com/file/d/1aYzw3o37jG4pHMVZnUfbUliaSrG-Lj0H/view?usp=share_link)
+- [Download `IndustryNav.exe` from Google Drive](https://drive.google.com/file/d/192xgG022LImjUTzDgTBOdMpnw7B8L5mc/view?usp=drive_link)
 
 Linux scene runtime:
 
-- [Download `scene_all.x86_64` from Google Drive](https://drive.google.com/file/d/1upKROW5BI7wIsp_n6d_2us67Sny8WjpG/view?usp=share_link)
+- [Download `scene_all.x86_64` from Google Drive](https://drive.google.com/file/d/1-mLh74uHOzXYHcSb8699ueFfB82Uz2h3/view?usp=sharing)
 
 Expected default locations:
 
