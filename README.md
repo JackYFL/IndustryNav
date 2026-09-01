@@ -42,6 +42,11 @@
     read as free floor, a marker-clearing disc erased obstacles next to the
     agent, and low-contrast painted rails were indistinguishable from the floor.
   - A* success on the 96-point benchmark improved from 84/96 to 88/96.
+- **2026-08-22**
+  - Improved A* with obstacle-aware path smoothing, Stanley tracking, and dynamic-obstacle replanning.
+  - Added route-aware step budgets, per-step path logs, and batch A* GIF export.
+  - Updated the default egocentric RGB/depth resolution to 640 x 480.
+  - Clarified Unity 6 Linux requirements and Ubuntu 22.04+ or container deployment options.
 - **2026-08-11**
   - Added a cached interactive benchmark-point editor and a 24-scene task overview.
   - Updated the 96 benchmark start-target pairs and added a dynamic A* preview.
@@ -423,4 +428,13 @@ For tuning parameters, debug visualizations, direct Python invocation, troublesh
 7. Frame rate issues: light, shadow (at least 20fps).
 8. Physics simulation (explosion).
 9. Interactions with scene objects (NPC first, then ego).
+10. Smoke + safety
+
+ICLR submission to-do list:
+
+1. observation history
+2. agent setting
+3. metric design
+4. science (theory of space, feifei)
+
 -->
