@@ -35,6 +35,8 @@
 <a id="news"></a>
 ## 📰 News
 
+- **2026-09-01**
+  - Refined collision and action-aware depth-warning metrics for more reliable safety evaluation.
 - **2026-08-24**
   - Fixed three A* minimap obstacle-detection defects: bright partition walls
     read as free floor, a marker-clearing disc erased obstacles next to the
