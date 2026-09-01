@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import csv
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 
@@ -80,6 +80,27 @@ def load_action_steps(actions_csv: Path) -> List[int]:
             except (ValueError, KeyError, TypeError):
                 continue
     return steps
+
+
+def load_action_moves(actions_csv: Path) -> Dict[int, float]:
+    """Return ``{step: move_command}`` for valid action rows.
+
+    Warning evaluation uses the positive forward command to extend its base
+    safety margin by the distance that the agent is about to travel.
+    Malformed rows are skipped rather than silently treated as stationary.
+    """
+    moves: Dict[int, float] = {}
+    with open(actions_csv, newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            try:
+                step = int(float(row["step"]))
+                move = float(row["move"])
+            except (ValueError, KeyError, TypeError):
+                continue
+            if np.isfinite(move):
+                moves[step] = move
+    return moves
 
 
 def read_latest_results_row(results_csv: Path) -> dict:

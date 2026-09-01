@@ -1,15 +1,16 @@
 """Depth-based forward-collision warning detection.
 
-A warning frame is one where the agent's forward region of interest (a
-trapezoid in the depth image) contains pixels closer than
-:data:`nav.config.EVAL_WARNING_THRESHOLD_M`. The warning rate over a run is
-the fraction of frames where this is true.
+A warning frame is one where a sufficient fraction of the agent's forward
+region of interest (a trapezoid in the depth image) is closer than the current
+action's safety distance. That distance is the base clearance plus the
+theoretical distance of a positive move command. The warning rate over a run
+is the fraction of frames where this is true.
 
 Three entry points by audience:
 
 - :class:`WarningDetector` — per-frame primitive. One detector instance is
-  reused across all frames of a run; the ROI polygon is lazily computed from
-  the first depth map's shape.
+  reused across all frames of a run; inputs are normalized to one evaluation
+  resolution before applying the cached ROI polygon.
 - :func:`compute_warning_rate` — per-run helper. Takes an input directory,
   iterates over its depth frames (optionally filtered by action steps), and
   returns the fraction of warning frames.
@@ -28,10 +29,17 @@ from typing import Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
-from nav.config import EVAL_ROI_PARAMS, EVAL_WARNING_THRESHOLD_M
+from nav.config import (
+    EVAL_FORWARD_DISTANCE_PER_MOVE_UNIT_M,
+    EVAL_ROI_PARAMS,
+    EVAL_WARNING_IMAGE_SIZE,
+    EVAL_WARNING_MIN_PIXEL_RATIO,
+    EVAL_WARNING_THRESHOLD_M,
+)
 from nav.eval.io import (
     find_actions_csv,
     find_depth_dir,
+    load_action_moves,
     load_action_steps,
     read_depth_npy,
 )
@@ -42,31 +50,62 @@ from nav.eval.io import (
 # ---------------------------------------------------------------------------
 
 class WarningDetector:
-    """Forward-ROI warning detector parameterized by depth threshold + ROI shape.
+    """Action-aware forward-ROI warning detector.
 
-    The ROI polygon is computed lazily from the first depth map's shape so
-    callers don't have to commit to an image size up front. After the first
-    frame the polygon is cached and reused for the rest of the run.
+    Depth maps are normalized to ``image_size`` before evaluation so runs with
+    different sensor resolutions are comparable. A frame warns only when the
+    proportion of valid ROI pixels inside the action-aware safety distance is
+    at least ``min_warning_pixel_ratio``.
     """
 
     def __init__(
         self,
         warning_threshold_m: float = EVAL_WARNING_THRESHOLD_M,
         roi_params: Optional[Dict[str, float]] = None,
-        image_size: Optional[Tuple[int, int]] = None,
+        image_size: Optional[Tuple[int, int]] = EVAL_WARNING_IMAGE_SIZE,
+        min_warning_pixel_ratio: float = EVAL_WARNING_MIN_PIXEL_RATIO,
+        forward_distance_per_move_unit_m: float = (
+            EVAL_FORWARD_DISTANCE_PER_MOVE_UNIT_M
+        ),
     ) -> None:
         self.warning_threshold = float(warning_threshold_m)
-        self.roi_params = dict(roi_params) if roi_params is not None else dict(EVAL_ROI_PARAMS)
-        self.image_size = image_size
+        self.roi_params = (
+            dict(roi_params) if roi_params is not None else dict(EVAL_ROI_PARAMS)
+        )
+        self.image_size = tuple(image_size) if image_size is not None else None
+        self.min_warning_pixel_ratio = float(min_warning_pixel_ratio)
+        self.forward_distance_per_move_unit_m = float(
+            forward_distance_per_move_unit_m
+        )
+        if self.warning_threshold < 0.0:
+            raise ValueError("warning_threshold_m must be nonnegative")
+        if not 0.0 <= self.min_warning_pixel_ratio <= 1.0:
+            raise ValueError("min_warning_pixel_ratio must be in [0, 1]")
+        if self.forward_distance_per_move_unit_m < 0.0:
+            raise ValueError(
+                "forward_distance_per_move_unit_m must be nonnegative"
+            )
+        if self.image_size is not None and (
+            len(self.image_size) != 2 or min(self.image_size) <= 0
+        ):
+            raise ValueError("image_size must be a positive (height, width) pair")
         self.roi_polygon: Optional[np.ndarray] = (
-            self._compute_roi_polygon(image_size) if image_size is not None else None
+            self._compute_roi_polygon(self.image_size)
+            if self.image_size is not None
+            else None
         )
 
     def _compute_roi_polygon(self, image_size: Tuple[int, int]) -> np.ndarray:
         H, W = image_size
         r = self.roi_params
-        p_bl = (int(W * r["bottom_pad"]), int(H * (1 - r["bottom_margin"])))
-        p_br = (int(W * (1 - r["bottom_pad"])), int(H * (1 - r["bottom_margin"])))
+        p_bl = (
+            int(W * r["bottom_pad"]),
+            int(H * (1 - r["bottom_margin"])),
+        )
+        p_br = (
+            int(W * (1 - r["bottom_pad"])),
+            int(H * (1 - r["bottom_margin"])),
+        )
         p_tr = (int(W * (1 - r["top_pad"])), int(H * r["top_margin"]))
         p_tl = (int(W * r["top_pad"]), int(H * r["top_margin"]))
         return np.array([p_bl, p_br, p_tr, p_tl], dtype=np.int32)
@@ -80,7 +119,38 @@ class WarningDetector:
         cv2.fillPoly(mask, [self.roi_polygon], color=1)
         return mask
 
-    def detect(self, depth_map: np.ndarray) -> dict:
+    @staticmethod
+    def _resize_depth_min_preserving(
+        depth_map: np.ndarray,
+        image_size: Tuple[int, int],
+    ) -> np.ndarray:
+        """Resize depth while preserving nearby surfaces during downsampling."""
+        source_h, source_w = depth_map.shape[:2]
+        target_h, target_w = image_size
+        if (source_h, source_w) == image_size:
+            return depth_map
+        if (
+            source_h >= target_h
+            and source_w >= target_w
+            and source_h % target_h == 0
+            and source_w % target_w == 0
+        ):
+            scale_h = source_h // target_h
+            scale_w = source_w // target_w
+            valid = np.isfinite(depth_map) & (depth_map > 0)
+            safe_depth = np.where(valid, depth_map, np.inf)
+            resized = safe_depth.reshape(
+                target_h, scale_h, target_w, scale_w
+            ).min(axis=(1, 3))
+            resized[~np.isfinite(resized)] = np.nan
+            return resized.astype(np.float32, copy=False)
+        return cv2.resize(
+            depth_map,
+            (target_w, target_h),
+            interpolation=cv2.INTER_NEAREST,
+        )
+
+    def detect(self, depth_map: np.ndarray, *, move_command: float = 0.0) -> dict:
         """Return a per-frame warning verdict.
 
         Output keys:
@@ -89,20 +159,28 @@ class WarningDetector:
           the ROI contains no valid (finite, positive) depth pixels).
         - ``min_depth_m``: minimum valid depth inside the ROI (``-1`` on error).
         - ``mean_depth_m``: mean valid depth inside the ROI (``-1`` on error).
-        - ``threshold_m``: the configured warning threshold.
+        - ``threshold_m``: base clearance plus commanded forward distance.
         - ``pixels_in_roi``: number of valid pixels considered.
         - ``warning_pixels``: number of pixels below the threshold.
         - ``warning_pixel_ratio``: ``warning_pixels / pixels_in_roi``.
         """
+        if depth_map.ndim != 2:
+            raise ValueError(f"Expected a 2D depth map, got {depth_map.shape}")
         if self.image_size is None:
             self.image_size = depth_map.shape[:2]
             self.roi_polygon = self._compute_roi_polygon(self.image_size)
         elif depth_map.shape[:2] != self.image_size:
-            depth_map = cv2.resize(
+            depth_map = self._resize_depth_min_preserving(
                 depth_map,
-                (self.image_size[1], self.image_size[0]),
-                interpolation=cv2.INTER_LINEAR,
+                self.image_size,
             )
+
+        move = float(move_command)
+        if not np.isfinite(move):
+            move = 0.0
+        effective_threshold = self.warning_threshold + (
+            max(0.0, move) * self.forward_distance_per_move_unit_m
+        )
 
         roi_mask = self.create_roi_mask(depth_map.shape[:2])
         roi_depths = depth_map[roi_mask == 1]
@@ -113,23 +191,32 @@ class WarningDetector:
                 "warning": "error",
                 "min_depth_m": -1.0,
                 "mean_depth_m": -1.0,
-                "threshold_m": float(self.warning_threshold),
+                "threshold_m": float(effective_threshold),
+                "base_threshold_m": float(self.warning_threshold),
                 "pixels_in_roi": 0,
                 "warning_pixels": 0,
                 "warning_pixel_ratio": 0.0,
+                "min_warning_pixel_ratio": self.min_warning_pixel_ratio,
             }
 
         min_depth = float(np.min(valid))
-        warning_pixels = int(np.sum(valid < self.warning_threshold))
+        warning_pixels = int(np.sum(valid < effective_threshold))
         total = int(len(valid))
+        warning_pixel_ratio = warning_pixels / total if total > 0 else 0.0
+        warning = (
+            warning_pixels > 0
+            and warning_pixel_ratio >= self.min_warning_pixel_ratio
+        )
         return {
-            "warning": "yes" if min_depth < self.warning_threshold else "no",
+            "warning": "yes" if warning else "no",
             "min_depth_m": min_depth,
             "mean_depth_m": float(np.mean(valid)),
-            "threshold_m": float(self.warning_threshold),
+            "threshold_m": float(effective_threshold),
+            "base_threshold_m": float(self.warning_threshold),
             "pixels_in_roi": total,
             "warning_pixels": warning_pixels,
-            "warning_pixel_ratio": warning_pixels / total if total > 0 else 0.0,
+            "warning_pixel_ratio": warning_pixel_ratio,
+            "min_warning_pixel_ratio": self.min_warning_pixel_ratio,
         }
 
 
@@ -151,8 +238,10 @@ def compute_warning_rate(
     captured outside the agent's decision loop. Pass ``use_actions=False``
     to evaluate every ``.npy`` under the depth directory.
 
-    If the depth directory is missing or contains no readable frames,
-    returns ``(0, 0, 0.0)``.
+    When an actions CSV is available, its ``move`` value supplies the current
+    theoretical forward distance. Frames without a matching move use only the
+    base clearance. If the depth directory is missing or has no readable
+    frames, returns ``(0, 0, 0.0)``.
     """
     depth_dir = find_depth_dir(input_dir)
     if depth_dir is None:
@@ -160,11 +249,13 @@ def compute_warning_rate(
 
     detector = detector or WarningDetector()
 
+    actions_csv = find_actions_csv(input_dir)
+    action_moves = (
+        load_action_moves(actions_csv) if actions_csv is not None else {}
+    )
     step_filter: Optional[set] = None
-    if use_actions:
-        actions_csv = find_actions_csv(input_dir)
-        if actions_csv is not None:
-            step_filter = set(load_action_steps(actions_csv))
+    if use_actions and actions_csv is not None:
+        step_filter = set(load_action_steps(actions_csv))
 
     total = warning = 0
     for df in sorted(depth_dir.glob("*.npy")):
@@ -172,12 +263,15 @@ def compute_warning_rate(
             step_id = int(df.stem)
         except ValueError:
             step_id = None
-        if step_filter is not None and step_id is not None and step_id not in step_filter:
+        if step_filter is not None and step_id not in step_filter:
             continue
         depth = read_depth_npy(df)
         if depth is None:
             continue
-        info = detector.detect(depth)
+        info = detector.detect(
+            depth,
+            move_command=action_moves.get(step_id, 0.0),
+        )
         total += 1
         if info["warning"] == "yes":
             warning += 1

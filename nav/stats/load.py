@@ -27,7 +27,7 @@ from typing import Dict, Iterable, List, Optional
 
 import numpy as np
 
-from nav.config import EVAL_COLLISION_PX_THRESH
+from nav.config import EVAL_COLLISION_MIN_FORWARD_RATIO
 from nav.eval.collision import compute_collision_rate
 from nav.eval.metrics import compute_success_efficiency_distance
 
@@ -162,7 +162,10 @@ def _rows_from_seed_dir(
     if actions_csv.exists():
         try:
             sr_canon, eff_steps, dr = compute_success_efficiency_distance(actions_csv)
-            _, _, cr = compute_collision_rate(actions_csv, EVAL_COLLISION_PX_THRESH)
+            _, _, cr = compute_collision_rate(
+                actions_csv,
+                min_forward_ratio=EVAL_COLLISION_MIN_FORWARD_RATIO,
+            )
         except Exception:
             sr_canon, eff_steps, dr, cr = 0, 0, float("nan"), float("nan")
     else:

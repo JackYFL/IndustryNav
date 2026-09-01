@@ -62,8 +62,32 @@ def _parse_args() -> argparse.Namespace:
         default="",
         help="Directory for run log file (default: sibling 'logs/' next to --out).",
     )
-    p.add_argument("--warning-threshold", type=float, default=None)
-    p.add_argument("--collision-threshold", type=int, default=None)
+    p.add_argument(
+        "--warning-threshold",
+        type=float,
+        default=None,
+        help=(
+            "Base warning clearance in meters; positive move distance is added "
+            "per frame (default: 0.4)."
+        ),
+    )
+    p.add_argument(
+        "--warning-min-pixel-ratio",
+        type=float,
+        default=None,
+        help="Minimum near-depth fraction of the ROI (default: 0.005).",
+    )
+    p.add_argument("--warning-eval-width", type=int, default=None)
+    p.add_argument("--warning-eval-height", type=int, default=None)
+    p.add_argument(
+        "--collision-min-forward-ratio",
+        type=float,
+        default=None,
+        help=(
+            "Count a positive move as a collision when observed/theoretical "
+            "world displacement is below this ratio (default: 0.95)."
+        ),
+    )
     p.add_argument(
         "--success-dist-m",
         type=float,
@@ -87,8 +111,14 @@ def main() -> None:
     opts = EvaluateOptions()
     if args.warning_threshold is not None:
         opts.warning_threshold_m = args.warning_threshold
-    if args.collision_threshold is not None:
-        opts.collision_threshold_px = args.collision_threshold
+    if args.warning_min_pixel_ratio is not None:
+        opts.warning_min_pixel_ratio = args.warning_min_pixel_ratio
+    if args.warning_eval_width is not None:
+        opts.warning_image_width = args.warning_eval_width
+    if args.warning_eval_height is not None:
+        opts.warning_image_height = args.warning_eval_height
+    if args.collision_min_forward_ratio is not None:
+        opts.collision_min_forward_ratio = args.collision_min_forward_ratio
     if args.success_dist_m is not None:
         opts.success_dist_m = args.success_dist_m
     if args.no_use_actions:

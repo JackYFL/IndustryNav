@@ -309,18 +309,27 @@ def _render_report(
         "Per-cell binary 0/1.\n"
     )
     md.append("- **DR** (distance ratio): `|start_dist − final_dist| / start_dist`, clamped to 1 on success.\n")
-    md.append("- **CR** (collision rate): forward-action steps with Manhattan pixel change < 34, divided by total forward-action steps.\n")
+    md.append(
+        "- **CR** (collision rate): positive-move steps whose observed world "
+        "displacement is < 95% of the theoretical forward distance, divided "
+        "by all measurable positive-move steps.\n"
+    )
     if has_wr:
-        md.append("- **WR** (warning rate): fraction of depth frames with min ROI depth below the warning threshold.\n")
+        md.append(
+            "- **WR** (warning rate): fraction of depth frames where at least "
+            "0.5% of the normalized 320×240 forward ROI is closer than the "
+            "0.4 m base clearance plus the commanded forward distance.\n"
+        )
     else:
         md.append("- **WR** (warning rate): **DEFERRED** — grid runs did not save raw depth NPYs. Re-enable NPY saving to recover this.\n")
     if has_dist:
         md.append("- **Mean dist (m)**: average final `distance_world` per run.\n")
     md.append("\n")
-    md.append("> **CR caveat.** With the `eval_metrics.py` collision-rate definition, "
-              "CR can sit near ceiling for some model/condition combos — the 34 px "
-              "threshold is tight relative to the per-step movement budget. CR is "
-              "reported for transparency; threshold tuning is queued for the camera-ready.\n\n")
+    md.append(
+        "> **CR calibration.** Theoretical distance is the logged move command × "
+        "0.1 m per command unit (`moveSpeed=5` × `agentStepDeltaTime=0.02`). "
+        "The 5% tolerance absorbs floating-point and curved-motion variation.\n\n"
+    )
 
     md.append("## (4) Per-(model, vision) scene-clustered bootstrap CIs (95%)\n")
     hdr = "| Model | Vision | N runs | N scenes "

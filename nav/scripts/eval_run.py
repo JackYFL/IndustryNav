@@ -42,8 +42,32 @@ def _parse_args() -> argparse.Namespace:
             f"mode, '{EVAL_DEFAULT_LOG_DIR}' for glob mode."
         ),
     )
-    p.add_argument("--warning-threshold", type=float, default=None)
-    p.add_argument("--collision-threshold", type=int, default=None)
+    p.add_argument(
+        "--warning-threshold",
+        type=float,
+        default=None,
+        help=(
+            "Base warning clearance in meters; positive move distance is added "
+            "per frame (default: 0.4)."
+        ),
+    )
+    p.add_argument(
+        "--warning-min-pixel-ratio",
+        type=float,
+        default=None,
+        help="Minimum near-depth fraction of the ROI (default: 0.005).",
+    )
+    p.add_argument("--warning-eval-width", type=int, default=None)
+    p.add_argument("--warning-eval-height", type=int, default=None)
+    p.add_argument(
+        "--collision-min-forward-ratio",
+        type=float,
+        default=None,
+        help=(
+            "Count a positive move as a collision when observed/theoretical "
+            "world displacement is below this ratio (default: 0.95)."
+        ),
+    )
     p.add_argument(
         "--success-dist-m",
         type=float,
@@ -68,7 +92,10 @@ def _opts_from_args(args: argparse.Namespace) -> EvaluateOptions:
     opts = EvaluateOptions()
     for arg_name, attr_name in [
         ("warning_threshold", "warning_threshold_m"),
-        ("collision_threshold", "collision_threshold_px"),
+        ("warning_min_pixel_ratio", "warning_min_pixel_ratio"),
+        ("warning_eval_width", "warning_image_width"),
+        ("warning_eval_height", "warning_image_height"),
+        ("collision_min_forward_ratio", "collision_min_forward_ratio"),
         ("success_dist_m", "success_dist_m"),
         ("bottom_margin", "bottom_margin"),
         ("top_margin", "top_margin"),

@@ -22,9 +22,11 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 from nav.config import (
-    EVAL_COLLISION_PX_THRESH,
+    EVAL_COLLISION_MIN_FORWARD_RATIO,
     EVAL_ROI_PARAMS,
     EVAL_SUCCESS_DIST_M,
+    EVAL_WARNING_IMAGE_SIZE,
+    EVAL_WARNING_MIN_PIXEL_RATIO,
     EVAL_WARNING_THRESHOLD_M,
 )
 from nav.eval.collision import compute_collision_rate
@@ -41,7 +43,10 @@ class EvaluateOptions:
     """Per-run evaluation knobs. Defaults pulled from :mod:`nav.config`."""
 
     warning_threshold_m: float = EVAL_WARNING_THRESHOLD_M
-    collision_threshold_px: int = EVAL_COLLISION_PX_THRESH
+    warning_min_pixel_ratio: float = EVAL_WARNING_MIN_PIXEL_RATIO
+    warning_image_height: int = EVAL_WARNING_IMAGE_SIZE[0]
+    warning_image_width: int = EVAL_WARNING_IMAGE_SIZE[1]
+    collision_min_forward_ratio: float = EVAL_COLLISION_MIN_FORWARD_RATIO
     success_dist_m: float = EVAL_SUCCESS_DIST_M
     bottom_margin: float = EVAL_ROI_PARAMS["bottom_margin"]
     top_margin: float = EVAL_ROI_PARAMS["top_margin"]
@@ -136,12 +141,15 @@ def evaluate_run(
     detector = WarningDetector(
         warning_threshold_m=opts.warning_threshold_m,
         roi_params=opts.roi_params(),
+        image_size=(opts.warning_image_height, opts.warning_image_width),
+        min_warning_pixel_ratio=opts.warning_min_pixel_ratio,
     )
     total_steps, warning_steps, warning_rate = compute_warning_rate(
         input_dir, detector=detector, use_actions=opts.use_actions,
     )
     forward_steps, collision_steps, collision_rate = compute_collision_rate(
-        actions_csv, collision_px_thresh=opts.collision_threshold_px,
+        actions_csv,
+        min_forward_ratio=opts.collision_min_forward_ratio,
     )
     success, efficiency_steps, distance_ratio = compute_success_efficiency_distance(
         actions_csv,

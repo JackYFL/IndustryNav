@@ -1,31 +1,38 @@
 """Collision-rate detection from agent trajectories.
 
-A collision is operationally defined as a ``forward`` action that resulted
-in negligible pixel-space displacement. Two input paths are supported:
+For an actions CSV, a collision is operationally defined as a positive move
+command whose observed world displacement is less than 95% of its theoretical
+forward distance. Two input paths are supported:
 
 - :func:`compute_collision_rate` — the canonical workflow: reads the
   per-frame ``*_actions.csv`` produced by ``run_headless_benchmark.py``.
-  Each row carries the chosen action plus pre-action ``(curr_px, curr_py)``;
-  consecutive rows give the displacement.
+  Each row carries the chosen move speed plus pre-action
+  ``(curr_world_x, curr_world_z)``; consecutive rows give the displacement.
 - :func:`parse_log_file_collisions` — legacy: parses ``*.log`` files where
   the same trajectory was emitted as regex-matchable lines. Kept for
   backward compatibility with archived run dirs that no longer carry the
   actions CSV. Walked over a (scene, point, model) tree by
   :func:`walk_logs_for_collisions`.
 
-Both implementations share the same definition of "collision" (Manhattan
-pixel-distance below :data:`nav.config.EVAL_COLLISION_PX_THRESH`).
+The legacy log path cannot use the canonical definition because those logs do
+not carry move speeds and world positions. It therefore retains the archived
+minimap-pixel threshold for backward compatibility only.
 """
 
 from __future__ import annotations
 
 import csv
+import math
 import os
 import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from nav.config import EVAL_COLLISION_PX_THRESH
+from nav.config import (
+    EVAL_COLLISION_MIN_FORWARD_RATIO,
+    EVAL_FORWARD_DISTANCE_PER_MOVE_UNIT_M,
+    EVAL_LEGACY_COLLISION_PX_THRESH,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -34,15 +41,34 @@ from nav.config import EVAL_COLLISION_PX_THRESH
 
 def compute_collision_rate(
     actions_csv: Path,
-    collision_px_thresh: int = EVAL_COLLISION_PX_THRESH,
+    *,
+    min_forward_ratio: float = EVAL_COLLISION_MIN_FORWARD_RATIO,
+    forward_distance_per_move_unit_m: float = (
+        EVAL_FORWARD_DISTANCE_PER_MOVE_UNIT_M
+    ),
 ) -> Tuple[int, int, float]:
     """Compute the collision rate from one run's actions CSV.
+
+    The row at step ``t`` records the pose *before* applying that row's move
+    command. Its observed movement is therefore the Euclidean world-space
+    displacement from row ``t`` to row ``t + 1``. The expected distance is::
+
+        move * forward_distance_per_move_unit_m
+
+    Every row with ``move > 0`` is eligible, including compound A* actions
+    such as forward-left/forward-right. The last row cannot be evaluated
+    because it has no following pose.
 
     Returns ``(total_forward_steps, total_collision_steps, collision_rate)``.
     ``collision_rate`` is 0.0 when there were no forward steps (avoids
     divide-by-zero; the caller can decide whether NaN would be more
     appropriate for downstream aggregation).
     """
+    if not 0.0 < min_forward_ratio <= 1.0:
+        raise ValueError("min_forward_ratio must be in (0, 1]")
+    if forward_distance_per_move_unit_m <= 0.0:
+        raise ValueError("forward_distance_per_move_unit_m must be positive")
+
     rows: List[dict] = []
     with open(actions_csv, newline="") as f:
         reader = csv.DictReader(f)
@@ -51,26 +77,42 @@ def compute_collision_rate(
                 step_num = int(float(row["step"]))
             except (ValueError, KeyError, TypeError):
                 continue
-            action = (row.get("action") or "").strip()
-            pos: Optional[Tuple[int, int]] = None
             try:
-                pos = (int(float(row["curr_px"])), int(float(row["curr_py"])))
+                move = float(row["move"])
+            except (ValueError, KeyError, TypeError):
+                move = 0.0
+            pos: Optional[Tuple[float, float]] = None
+            try:
+                world_x = float(row["curr_world_x"])
+                world_z = float(row["curr_world_z"])
+                if math.isfinite(world_x) and math.isfinite(world_z):
+                    pos = (world_x, world_z)
             except (ValueError, KeyError, TypeError):
                 pos = None
-            rows.append({"step": step_num, "action": action, "pos": pos})
+            rows.append({"step": step_num, "move": move, "pos": pos})
 
     rows.sort(key=lambda r: r["step"])
     total_forward_steps = 0
     total_collision_steps = 0
     for i in range(len(rows) - 1):
         cur, nxt = rows[i], rows[i + 1]
-        if cur["action"] == "forward" and cur["pos"] and nxt["pos"]:
+        move = cur["move"]
+        if (
+            math.isfinite(move)
+            and move > 0.0
+            and cur["pos"] is not None
+            and nxt["pos"] is not None
+            and nxt["step"] == cur["step"] + 1
+        ):
             total_forward_steps += 1
-            pixel_change = (
-                abs(nxt["pos"][0] - cur["pos"][0])
-                + abs(nxt["pos"][1] - cur["pos"][1])
+            actual_distance = math.hypot(
+                nxt["pos"][0] - cur["pos"][0],
+                nxt["pos"][1] - cur["pos"][1],
             )
-            if pixel_change < collision_px_thresh:
+            theoretical_distance = (
+                move * forward_distance_per_move_unit_m
+            )
+            if actual_distance < theoretical_distance * min_forward_ratio:
                 total_collision_steps += 1
 
     rate = (
@@ -98,7 +140,7 @@ _RE_LLM_ACTION = re.compile(
 
 def parse_log_file_collisions(
     log_filepath: Path,
-    collision_px_thresh: int = EVAL_COLLISION_PX_THRESH,
+    collision_px_thresh: int = EVAL_LEGACY_COLLISION_PX_THRESH,
 ) -> Optional[dict]:
     """Parse a run's ``.log`` file and compute collision metrics.
 
@@ -175,7 +217,7 @@ def walk_logs_for_collisions(
     benchmark_root: Path,
     output_dir: Path,
     *,
-    collision_px_thresh: int = EVAL_COLLISION_PX_THRESH,
+    collision_px_thresh: int = EVAL_LEGACY_COLLISION_PX_THRESH,
 ) -> Dict[str, List[dict]]:
     """Walk ``benchmark_root/<scene>/<point>/<model>/*.log`` and write per-scene CSVs.
 

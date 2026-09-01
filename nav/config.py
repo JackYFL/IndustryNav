@@ -167,8 +167,21 @@ ASTAR_DEFAULTS = AStarParams()
 
 DEFAULT_REACH_DISTANCE_M: float = 2.0
 EVAL_SUCCESS_DIST_M: float = DEFAULT_REACH_DISTANCE_M
-EVAL_COLLISION_PX_THRESH: int = 34
-EVAL_WARNING_THRESHOLD_M: float = 0.3
+# A commanded forward movement is counted as a collision when its observed
+# world displacement is less than this fraction of its theoretical distance.
+EVAL_COLLISION_MIN_FORWARD_RATIO: float = 0.95
+# PlayerController.MoveAgent uses moveSpeed=5 and agentStepDeltaTime=0.02,
+# yielding 0.1 world meters per unit of the logged ``move`` command.
+EVAL_FORWARD_DISTANCE_PER_MOVE_UNIT_M: float = 0.1
+# Archived log files do not contain commanded speeds/world poses, so their
+# compatibility-only parser retains the old minimap-pixel definition.
+EVAL_LEGACY_COLLISION_PX_THRESH: int = 34
+# Base clearance added to the distance commanded by the current forward action.
+EVAL_WARNING_THRESHOLD_M: float = 0.4
+# A warning requires a non-trivial near-depth area, not a single outlier pixel.
+EVAL_WARNING_MIN_PIXEL_RATIO: float = 0.005
+# Normalize all warning evaluation to one resolution (height, width).
+EVAL_WARNING_IMAGE_SIZE: Tuple[int, int] = (240, 320)
 EVAL_ROI_PARAMS: Dict[str, float] = {
     "bottom_margin": 0.20,
     "top_margin": 0.55,
@@ -469,6 +482,7 @@ EVAL_RUN_PREFIXES: List[str] = [
     "random",
     "agent",
     "bc_agent",
+    "cli_agent",
     "manual",
 ]
 EVAL_DEPTH_DIR_CANDIDATES: List[str] = [f"{p}_depth" for p in EVAL_RUN_PREFIXES]
