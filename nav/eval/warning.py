@@ -9,8 +9,8 @@ is the fraction of frames where this is true.
 Three entry points by audience:
 
 - :class:`WarningDetector` — per-frame primitive. One detector instance is
-  reused across all frames of a run; inputs are normalized to one evaluation
-  resolution before applying the cached ROI polygon.
+  reused across all frames of a run; the ROI polygon is derived from fixed
+  normalized coordinates for each input resolution.
 - :func:`compute_warning_rate` — per-run helper. Takes an input directory,
   iterates over its depth frames (optionally filtered by action steps), and
   returns the fraction of warning frames.
@@ -32,7 +32,6 @@ import numpy as np
 from nav.config import (
     EVAL_FORWARD_DISTANCE_PER_MOVE_UNIT_M,
     EVAL_ROI_PARAMS,
-    EVAL_WARNING_IMAGE_SIZE,
     EVAL_WARNING_MIN_PIXEL_RATIO,
     EVAL_WARNING_THRESHOLD_M,
 )
@@ -52,17 +51,21 @@ from nav.eval.io import (
 class WarningDetector:
     """Action-aware forward-ROI warning detector.
 
-    Depth maps are normalized to ``image_size`` before evaluation so runs with
-    different sensor resolutions are comparable. A frame warns only when the
-    proportion of valid ROI pixels inside the action-aware safety distance is
-    at least ``min_warning_pixel_ratio``.
+    The trapezoidal ROI is expressed entirely as fractions of image width and
+    height, then rasterized independently for every input resolution. A frame
+    warns only when the proportion of valid ROI pixels inside the action-aware
+    safety distance is at least ``min_warning_pixel_ratio``.
+
+    ``image_size`` remains available as an explicit compatibility option for
+    callers that need to normalize inputs first. By default, depth maps are
+    evaluated at their native resolution.
     """
 
     def __init__(
         self,
         warning_threshold_m: float = EVAL_WARNING_THRESHOLD_M,
         roi_params: Optional[Dict[str, float]] = None,
-        image_size: Optional[Tuple[int, int]] = EVAL_WARNING_IMAGE_SIZE,
+        image_size: Optional[Tuple[int, int]] = None,
         min_warning_pixel_ratio: float = EVAL_WARNING_MIN_PIXEL_RATIO,
         forward_distance_per_move_unit_m: float = (
             EVAL_FORWARD_DISTANCE_PER_MOVE_UNIT_M
@@ -72,6 +75,7 @@ class WarningDetector:
         self.roi_params = (
             dict(roi_params) if roi_params is not None else dict(EVAL_ROI_PARAMS)
         )
+        self._validate_roi_params()
         self.image_size = tuple(image_size) if image_size is not None else None
         self.min_warning_pixel_ratio = float(min_warning_pixel_ratio)
         self.forward_distance_per_move_unit_m = float(
@@ -89,34 +93,67 @@ class WarningDetector:
             len(self.image_size) != 2 or min(self.image_size) <= 0
         ):
             raise ValueError("image_size must be a positive (height, width) pair")
-        self.roi_polygon: Optional[np.ndarray] = (
-            self._compute_roi_polygon(self.image_size)
-            if self.image_size is not None
-            else None
-        )
+        self._roi_polygons: dict[Tuple[int, int], np.ndarray] = {}
+        self.roi_polygon: Optional[np.ndarray] = None
+        if self.image_size is not None:
+            self.roi_polygon = self._compute_roi_polygon(self.image_size)
+            self._roi_polygons[self.image_size] = self.roi_polygon
+
+    def _validate_roi_params(self) -> None:
+        required = {"bottom_margin", "top_margin", "bottom_pad", "top_pad"}
+        missing = required - self.roi_params.keys()
+        if missing:
+            raise ValueError(f"roi_params is missing: {', '.join(sorted(missing))}")
+        if any(
+            not np.isfinite(float(self.roi_params[key]))
+            for key in required
+        ):
+            raise ValueError("roi_params values must be finite")
+        if not 0.0 <= float(self.roi_params["top_margin"]) < 1.0:
+            raise ValueError("top_margin must be in [0, 1)")
+        if not 0.0 <= float(self.roi_params["bottom_margin"]) < 1.0:
+            raise ValueError("bottom_margin must be in [0, 1)")
+        for key in ("top_pad", "bottom_pad"):
+            if not 0.0 <= float(self.roi_params[key]) < 0.5:
+                raise ValueError(f"{key} must be in [0, 0.5)")
+        if float(self.roi_params["top_margin"]) >= (
+            1.0 - float(self.roi_params["bottom_margin"])
+        ):
+            raise ValueError("ROI top must be above its bottom")
 
     def _compute_roi_polygon(self, image_size: Tuple[int, int]) -> np.ndarray:
         H, W = image_size
         r = self.roi_params
         p_bl = (
-            int(W * r["bottom_pad"]),
-            int(H * (1 - r["bottom_margin"])),
+            int(round((W - 1) * r["bottom_pad"])),
+            int(round((H - 1) * (1 - r["bottom_margin"]))),
         )
         p_br = (
-            int(W * (1 - r["bottom_pad"])),
-            int(H * (1 - r["bottom_margin"])),
+            int(round((W - 1) * (1 - r["bottom_pad"]))),
+            int(round((H - 1) * (1 - r["bottom_margin"]))),
         )
-        p_tr = (int(W * (1 - r["top_pad"])), int(H * r["top_margin"]))
-        p_tl = (int(W * r["top_pad"]), int(H * r["top_margin"]))
+        p_tr = (
+            int(round((W - 1) * (1 - r["top_pad"]))),
+            int(round((H - 1) * r["top_margin"])),
+        )
+        p_tl = (
+            int(round((W - 1) * r["top_pad"])),
+            int(round((H - 1) * r["top_margin"])),
+        )
         return np.array([p_bl, p_br, p_tr, p_tl], dtype=np.int32)
 
     def create_roi_mask(self, shape: Tuple[int, int]) -> np.ndarray:
         """Return a uint8 mask (1 inside the ROI, 0 outside) for ``shape``."""
-        if self.roi_polygon is None:
-            self.image_size = shape
-            self.roi_polygon = self._compute_roi_polygon(shape)
+        shape = tuple(shape)
+        if len(shape) != 2 or min(shape) <= 0:
+            raise ValueError("shape must be a positive (height, width) pair")
+        polygon = self._roi_polygons.get(shape)
+        if polygon is None:
+            polygon = self._compute_roi_polygon(shape)
+            self._roi_polygons[shape] = polygon
+        self.roi_polygon = polygon
         mask = np.zeros(shape, dtype=np.uint8)
-        cv2.fillPoly(mask, [self.roi_polygon], color=1)
+        cv2.fillPoly(mask, [polygon], color=1)
         return mask
 
     @staticmethod
@@ -166,10 +203,7 @@ class WarningDetector:
         """
         if depth_map.ndim != 2:
             raise ValueError(f"Expected a 2D depth map, got {depth_map.shape}")
-        if self.image_size is None:
-            self.image_size = depth_map.shape[:2]
-            self.roi_polygon = self._compute_roi_polygon(self.image_size)
-        elif depth_map.shape[:2] != self.image_size:
+        if self.image_size is not None and depth_map.shape[:2] != self.image_size:
             depth_map = self._resize_depth_min_preserving(
                 depth_map,
                 self.image_size,

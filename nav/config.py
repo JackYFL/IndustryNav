@@ -19,9 +19,9 @@ UNITY_CLIENT_DIR: Path = REPO_ROOT / "unity_client"
 # Action spaces
 
 ACTION_SPACE_AGENTS: Dict[str, float] = {
-    "forward": 25.5,
-    "turn right": 45,
-    "turn left": -45,
+    "forward": 15,
+    "turn right": 22.5,
+    "turn left": -22.5,
     "stop": 0,
 }
 
@@ -79,7 +79,7 @@ LLM_ERROR_SENTINELS: Tuple[str, ...] = (
 )
 LLM_DEFAULT_MAX_TOKENS: int = 20000
 LLM_SUBAGENT_MAX_TOKENS: int = 50000
-LLM_REQUEST_TIMEOUT_SEC: int = 120
+LLM_REQUEST_TIMEOUT_SEC: int = 300  # Historical Kiro CLI request timeout.
 LLM_DEFAULT_HISTORY_SIZE: int = 5
 
 
@@ -167,6 +167,10 @@ ASTAR_DEFAULTS = AStarParams()
 
 DEFAULT_REACH_DISTANCE_M: float = 2.0
 EVAL_SUCCESS_DIST_M: float = DEFAULT_REACH_DISTANCE_M
+# Report fixed-radius success variants alongside the legacy/default success
+# metric. These are evaluated post-hoc from the final Unity world distance, so
+# adding or changing reporting thresholds never requires rerunning an episode.
+EVAL_SUCCESS_THRESHOLDS_M: Tuple[float, ...] = (2.0, 5.0, 10.0)
 # A commanded forward movement is counted as a collision when its observed
 # world displacement is less than this fraction of its theoretical distance.
 EVAL_COLLISION_MIN_FORWARD_RATIO: float = 0.95
@@ -180,13 +184,18 @@ EVAL_LEGACY_COLLISION_PX_THRESH: int = 34
 EVAL_WARNING_THRESHOLD_M: float = 0.4
 # A warning requires a non-trivial near-depth area, not a single outlier pixel.
 EVAL_WARNING_MIN_PIXEL_RATIO: float = 0.005
-# Normalize all warning evaluation to one resolution (height, width).
+# Legacy opt-in warning evaluation resolution (height, width). The default
+# detector evaluates at the depth map's native resolution using normalized ROI
+# coordinates, so this size is not used unless a caller explicitly requests it.
 EVAL_WARNING_IMAGE_SIZE: Tuple[int, int] = (240, 320)
+# Resolution-independent trapezoid coordinates, expressed as fractions of the
+# depth image. The expanded ROI spans x=28%-72% at the top, x=8%-92% at the
+# bottom, and y=45%-90% vertically.
 EVAL_ROI_PARAMS: Dict[str, float] = {
-    "bottom_margin": 0.20,
-    "top_margin": 0.55,
-    "bottom_pad": 0.12,
-    "top_pad": 0.36,
+    "bottom_margin": 0.10,
+    "top_margin": 0.45,
+    "bottom_pad": 0.08,
+    "top_pad": 0.28,
 }
 EVAL_AGGREGATE_DEFAULT_OUT: str = "analysis/aggregate_eval.xlsx"
 EVAL_DEFAULT_LOG_DIR: str = "logs/eval"

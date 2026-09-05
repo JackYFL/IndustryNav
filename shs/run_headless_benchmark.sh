@@ -18,6 +18,8 @@
 #                                  which prefers the in-repo unity_client/ build, no path needed)
 #   SCENE_ID     override the scene_code->scene_id mapping
 #   MAX_STEPS    per-point decision-step cap               (default: 70)
+#   DYNAMIC_STEP_BUDGET  distance-conditioned step budget; defaults to 1 for
+#                       LLM and 0 for other baselines. Set 0 for fixed MAX_STEPS.
 #   REACH_M      success radius in Unity world meters       (default: 2.0)
 #   EGO_WIDTH / EGO_HEIGHT  egocentric RGB/depth sensor size (default: 512 / 512)
 #   MINIMAP_WIDTH / MINIMAP_HEIGHT  minimap size; set either value and derive
@@ -120,9 +122,26 @@ if [[ ! -f "$INPUT_FILE" ]]; then
 fi
 
 MAX_STEPS="${MAX_STEPS:-70}"
+DYNAMIC_STEP_BUDGET="${DYNAMIC_STEP_BUDGET:-}"
+if [[ -z "$DYNAMIC_STEP_BUDGET" ]]; then
+  if [[ "$BASELINE" == "llm" ]]; then
+    DYNAMIC_STEP_BUDGET=1
+  else
+    DYNAMIC_STEP_BUDGET=0
+  fi
+fi
+if [[ "$DYNAMIC_STEP_BUDGET" != "0" && "$DYNAMIC_STEP_BUDGET" != "1" ]]; then
+  echo "DYNAMIC_STEP_BUDGET must be 1 or 0, got: $DYNAMIC_STEP_BUDGET"
+  exit 1
+fi
 REACH_M="${REACH_M:-2.0}"
-EGO_WIDTH="${EGO_WIDTH:-512}"
-EGO_HEIGHT="${EGO_HEIGHT:-512}"
+if [[ "$BASELINE" == "llm" ]]; then
+  EGO_WIDTH="${EGO_WIDTH:-320}"
+  EGO_HEIGHT="${EGO_HEIGHT:-240}"
+else
+  EGO_WIDTH="${EGO_WIDTH:-512}"
+  EGO_HEIGHT="${EGO_HEIGHT:-512}"
+fi
 MINIMAP_WIDTH="${MINIMAP_WIDTH:-}"
 MINIMAP_HEIGHT="${MINIMAP_HEIGHT:-}"
 DYNAMIC_OBJECTS="${DYNAMIC_OBJECTS:-moving}"
@@ -168,7 +187,11 @@ if [[ -n "$LIGHT_INTENSITY_MIN" && -z "$LIGHT_INTENSITY_MAX" ]] || [[ -z "$LIGHT
   exit 1
 fi
 if [[ -z "$MINIMAP_WIDTH" && -z "$MINIMAP_HEIGHT" ]]; then
-  MINIMAP_WIDTH=862
+  if [[ "$BASELINE" == "llm" ]]; then
+    MINIMAP_WIDTH=431
+  else
+    MINIMAP_WIDTH=862
+  fi
 fi
 
 idx=0
@@ -198,7 +221,7 @@ PY
 
   WORKER_ID=$((1 + idx))
   BASE_PORT="$($PYTHON_BIN -c 'import socket; s=socket.socket(); s.bind(("localhost",0)); print(s.getsockname()[1]); s.close()')"
-  FRAME_SAVE_DIR="outputs/${SCENE_CODE}/${point_id}/${RUN_NAME}"
+  FRAME_SAVE_DIR="${OUTPUT_ROOT:-outputs}/${SCENE_CODE}/${point_id}/${RUN_NAME}"
 
   CMD=("$PYTHON_BIN" -m nav.scripts.run_benchmark_cell
        --baseline "$BASELINE"
@@ -220,6 +243,11 @@ PY
        --init_curr_direction "$init_dir"
        --target_x "$target_x"
        --target_y "$target_y")
+  if [[ "$DYNAMIC_STEP_BUDGET" == "1" ]]; then
+    CMD+=(--dynamic_step_budget)
+  else
+    CMD+=(--no-dynamic_step_budget)
+  fi
   if [[ -n "$MINIMAP_WIDTH" ]]; then
     CMD+=(--minimap_width "$MINIMAP_WIDTH")
   fi

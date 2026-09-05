@@ -28,6 +28,8 @@ Design choices:
     outputs/ stays per-cell telemetry only.
   * --resume skips cells whose results.csv already has a row, so re-launching
     after a partial completion is safe.
+  * --skip_existing_dirs skips every cell whose output directory already
+    exists, including interrupted/partial runs.
   * --max_retries N retries a failed cell up to N times before recording a
     permanent failure in failures.csv.
 """
@@ -52,15 +54,21 @@ from typing import List, Optional
 
 from nav.config import (
     ANALYSIS_ROOT,
+    ASTAR_DEFAULTS,
     DEFAULT_REACH_DISTANCE_M,
     DEFAULT_PROMPT_NOVISION,
     DEFAULT_PROMPT_VISION,
     GRID_CSV_FIELDS,
     LLM_DEFAULT_HISTORY_SIZE,
+    LLM_DEFAULT_MAX_TOKENS,
     SCENE_ID_MAP,
     SCENE_CODES,
 )
-from nav.harness.coordinates import resolve_minimap_resolution
+from nav.harness.navigation_protocol import (
+    NAVIGATION_PROTOCOL_VERSION, check_navigation_run_config, navigation_run_config,
+    resolve_navigation_sensors,
+)
+from nav.utils import load_prompt_template
 from nav.harness.lighting import (
     add_lighting_args,
     lighting_result_fields,
@@ -96,6 +104,7 @@ class Cell:
     init_direction: float
     target_x: int
     target_y: int
+    output_root: Optional[str] = None
 
     @property
     def model_short(self) -> str:
@@ -110,10 +119,9 @@ class Cell:
     def frame_save_dir(self) -> Path:
         # Default-history runs use the canonical tree the stats loader reads;
         # other sizes go under outputs/_history_size/hs<k>/ to stay out of it.
-        if self.history_size == LLM_DEFAULT_HISTORY_SIZE:
-            base = REPO_ROOT / "outputs"
-        else:
-            base = HISTORY_SWEEP_ROOT / f"hs{self.history_size}"
+        base = Path(self.output_root) if self.output_root else REPO_ROOT / "outputs"
+        if self.history_size != LLM_DEFAULT_HISTORY_SIZE:
+            base = base / "_history_size" / f"hs{self.history_size}"
         return base / self.scene_name / self.point_id / self.model_dir / f"seed{self.seed_id}"
 
     @property
@@ -140,6 +148,7 @@ def build_grid(
     vision_modes: List[bool],
     history_sizes: List[int],
     points: Optional[List[str]] = None,
+    output_root: Optional[str] = None,
 ) -> List[Cell]:
     pts = load_input_points()
     unknown_scenes = [scene for scene in scenes if scene not in SCENE_ID_MAP]
@@ -176,6 +185,7 @@ def build_grid(
                                 init_world_z=init_world_z,
                                 init_direction=init_dir,
                                 target_x=tx, target_y=ty,
+                                output_root=output_root,
                             ))
     return cells
 
@@ -191,12 +201,42 @@ def free_tcp_port() -> int:
     return port
 
 
+def cell_run_config(args, cell: Cell, file_name: str) -> dict:
+    settings = argparse.Namespace(**{
+        **vars(args),
+        "model_id": cell.model, "scene_id": SCENE_ID_MAP[cell.scene_name],
+        "scene_name": cell.scene_name, "point_id": cell.point_id,
+        "seed_id": cell.seed_id, "vision_input": cell.vision_input,
+        "history_size": cell.history_size, "init_world_x": cell.init_world_x,
+        "init_world_z": cell.init_world_z, "init_curr_direction": cell.init_direction,
+        "target_x": cell.target_x, "target_y": cell.target_y, "file_name": file_name,
+    })
+    prompt = DEFAULT_PROMPT_VISION if cell.vision_input else DEFAULT_PROMPT_NOVISION
+    return navigation_run_config(settings, load_prompt_template(prompt))
+
+
+def cell_completed(cell: Cell) -> bool:
+    if not cell.results_csv.exists():
+        return False
+    with cell.results_csv.open(newline="") as stream:
+        rows = list(csv.DictReader(stream))
+    return bool(rows) and rows[-1].get("stop_reason") in {"max_steps", "reached_vicinity"}
+
+
 def run_cell(args_dict: dict) -> dict:
     """Worker function. Runs in a child process; returns a status dict."""
     cell = Cell(**args_dict["cell"])
     file_name = args_dict["file_name"]
     python_bin = args_dict["python_bin"]
+    llm_provider = args_dict["llm_provider"]
+    llm_min_request_interval_sec = args_dict["llm_min_request_interval_sec"]
+    max_tokens = args_dict["max_tokens"]
     max_steps = args_dict["max_steps"]
+    dynamic_step_budget = args_dict["dynamic_step_budget"]
+    step_budget_min = args_dict["step_budget_min"]
+    step_budget_max = args_dict["step_budget_max"]
+    steps_per_path_meter = args_dict["steps_per_path_meter"]
+    step_budget_overhead = args_dict["step_budget_overhead"]
     reach_m = args_dict["reach_m"]
     use_xvfb = args_dict["use_xvfb"]
     xvfb_screen = args_dict["xvfb_screen"]
@@ -236,6 +276,9 @@ def run_cell(args_dict: dict) -> dict:
     lighting = resolve_lighting_config(lighting_args)
     lighting_fields = lighting_result_fields(lighting_args)
 
+    check_navigation_run_config(
+        cell.frame_save_dir, cell_run_config(argparse.Namespace(**args_dict), cell, file_name),
+    )
     cell.frame_save_dir.mkdir(parents=True, exist_ok=True)
     log_path = cell.frame_save_dir / "run.log"
 
@@ -258,6 +301,15 @@ def run_cell(args_dict: dict) -> dict:
         "--worker_id", "0",
         "--base_port", str(base_port),
         "--max_steps", str(max_steps),
+        (
+            "--dynamic_step_budget"
+            if dynamic_step_budget
+            else "--no-dynamic_step_budget"
+        ),
+        "--step_budget_min", str(step_budget_min),
+        "--step_budget_max", str(step_budget_max),
+        "--steps_per_path_meter", str(steps_per_path_meter),
+        "--step_budget_overhead", str(step_budget_overhead),
         "--reach_m", str(reach_m),
         "--ego_width", str(ego_width),
         "--ego_height", str(ego_height),
@@ -267,28 +319,27 @@ def run_cell(args_dict: dict) -> dict:
         "--frame_save_dir", str(cell.frame_save_dir),
         "--prompt_file", prompt_file,
         "--model_id", cell.model,
+        "--llm_provider", llm_provider,
+        "--llm_min_request_interval_sec", str(llm_min_request_interval_sec),
+        "--max_tokens", str(max_tokens),
         "--init_world_x", str(cell.init_world_x),
         "--init_world_z", str(cell.init_world_z),
         "--init_curr_direction", str(cell.init_direction),
         "--target_x", str(cell.target_x),
         "--target_y", str(cell.target_y),
     ]
-    motion_configured = False
     for category in MOTION_CATEGORIES:
         fixed = args_dict[f"{category}_speed_mps"]
         minimum = args_dict[f"{category}_speed_min_mps"]
         maximum = args_dict[f"{category}_speed_max_mps"]
         if fixed is not None:
             cmd += [f"--{category}_speed_mps", str(fixed)]
-            motion_configured = True
         elif minimum is not None:
             cmd += [
                 f"--{category}_speed_min_mps", str(minimum),
                 f"--{category}_speed_max_mps", str(maximum),
             ]
-            motion_configured = True
-    if motion_configured:
-        cmd += ["--motion_random_seed", str(args_dict["motion_random_seed"])]
+    cmd += ["--motion_random_seed", str(args_dict["motion_random_seed"])]
     if args_dict["global_light_intensity"] is not None:
         cmd += ["--global_light_intensity", str(args_dict["global_light_intensity"])]
     if args_dict["light_intensity_multiplier"] is not None:
@@ -301,11 +352,10 @@ def run_cell(args_dict: dict) -> dict:
             "--light_intensity_min", str(args_dict["light_intensity_min"]),
             "--light_intensity_max", str(args_dict["light_intensity_max"]),
         ]
-    if lighting.enabled:
-        cmd += [
-            "--light_random_seed", str(args_dict["light_random_seed"]),
-            "--light_fixed_exposure", str(args_dict["light_fixed_exposure"]),
-        ]
+    cmd += [
+        "--light_random_seed", str(args_dict["light_random_seed"]),
+        "--light_fixed_exposure", str(args_dict["light_fixed_exposure"]),
+    ]
 
     started = time.time()
     try:
@@ -321,7 +371,7 @@ def run_cell(args_dict: dict) -> dict:
                 timeout=args_dict.get("per_cell_timeout_sec"),
             )
         duration = time.time() - started
-        ok = (proc.returncode == 0) and cell.results_csv.exists()
+        ok = (proc.returncode == 0) and cell_completed(cell)
         return {
             "label": cell.label,
             "ok": ok,
@@ -333,6 +383,7 @@ def run_cell(args_dict: dict) -> dict:
             "dynamic_objects": dynamic_objects,
             "motion": motion_fields,
             "lighting": lighting_fields,
+            "error": "" if ok else "cell did not complete a valid navigation episode",
         }
     except subprocess.TimeoutExpired:
         return {
@@ -430,7 +481,19 @@ def append_failure_row(failures_csv: Path, status: dict, attempts: int):
 def parse_args():
     p = argparse.ArgumentParser(description="Grid runner for nav.scripts.run_benchmark_cell.")
     p.add_argument("--models", nargs="+", required=True,
-                   help="OpenRouter model ids to benchmark. Example: anthropic/claude-sonnet-4.6 google/gemini-3-flash-preview")
+                   help="Model ids to benchmark. Example: google/gemini-3.8-flash")
+    p.add_argument(
+        "--llm_provider",
+        choices=("openrouter", "gemini", "openai"),
+        default="openrouter",
+        help="LLM transport for every cell in this grid.",
+    )
+    p.add_argument(
+        "--llm_min_request_interval_sec",
+        type=float,
+        default=0.0,
+        help="Minimum seconds between direct-provider calls within each cell process.",
+    )
     p.add_argument(
         "--scenes",
         nargs="+",
@@ -450,19 +513,57 @@ def parse_args():
                    help="LLM prompt history depths to sweep (6th grid axis). Default-size cells "
                         "land in the canonical outputs/ tree; other sizes under "
                         "outputs/_history_size/hs<k>/ so the stats loader isn't polluted.")
+    p.add_argument("--output_root", type=str, default=str(REPO_ROOT / "outputs"),
+                   help="Output root; use a fresh directory to preserve older protocol results.")
     p.add_argument("--max_concurrency", type=int, default=4,
                    help="Max parallel cells. Start at 4; bump up if you don't see OpenRouter 429s.")
+    p.add_argument(
+        "--max_tokens",
+        type=int,
+        default=LLM_DEFAULT_MAX_TOKENS,
+        help="Maximum completion tokens for each LLM decision request.",
+    )
     p.add_argument("--max_steps", type=int, default=70)
+    p.add_argument(
+        "--dynamic_step_budget",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Initialize each LLM cell's step budget from its start-target world "
+            "distance (default: enabled). Use --no-dynamic_step_budget with "
+            "--max_steps to reproduce a fixed-budget run."
+        ),
+    )
+    p.add_argument(
+        "--step_budget_min",
+        type=int,
+        default=ASTAR_DEFAULTS.step_budget_min,
+    )
+    p.add_argument(
+        "--step_budget_max",
+        type=int,
+        default=ASTAR_DEFAULTS.step_budget_max,
+    )
+    p.add_argument(
+        "--steps_per_path_meter",
+        type=float,
+        default=ASTAR_DEFAULTS.steps_per_path_meter,
+    )
+    p.add_argument(
+        "--step_budget_overhead",
+        type=int,
+        default=ASTAR_DEFAULTS.step_budget_overhead,
+    )
     p.add_argument(
         "--reach_m",
         type=float,
         default=DEFAULT_REACH_DISTANCE_M,
         help=f"Success radius in Unity world meters (default: {DEFAULT_REACH_DISTANCE_M:g}).",
     )
-    p.add_argument("--ego_width", type=int, default=512,
-                   help="Width of each egocentric RGB and depth observation.")
-    p.add_argument("--ego_height", type=int, default=512,
-                   help="Height of each egocentric RGB and depth observation.")
+    p.add_argument("--ego_width", type=int, default=None,
+                   help="Egocentric RGB/depth width (Kiro default: 320).")
+    p.add_argument("--ego_height", type=int, default=None,
+                   help="Egocentric RGB/depth height (Kiro default: 240).")
     p.add_argument("--minimap_width", type=int, default=None,
                    help="Optional minimap width; derived from height when omitted.")
     p.add_argument("--minimap_height", type=int, default=None,
@@ -478,7 +579,12 @@ def parse_args():
     p.add_argument("--max_retries", type=int, default=2,
                    help="Retry a failed cell this many times before logging it to failures.csv.")
     p.add_argument("--resume", action="store_true",
-                   help="Skip cells whose results.csv already exists.")
+                   help="Skip normally completed cells with matching run_config.json.")
+    p.add_argument(
+        "--skip_existing_dirs",
+        action="store_true",
+        help="Skip cells whose output directory already exists, even without results.csv.",
+    )
     p.add_argument("--grid_csv", type=str, default="",
                    help="Aggregate runs CSV. Default: analysis/grid_runs/<timestamp>/runs.csv.")
     p.add_argument("--failures_csv", type=str, default="",
@@ -524,15 +630,25 @@ def main():
         lighting = resolve_lighting_config(args)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
-    if args.ego_width <= 0 or args.ego_height <= 0:
-        raise SystemExit("--ego_width and --ego_height must be positive integers.")
+    if any(size < 0 for size in args.history_sizes):
+        raise SystemExit("--history_sizes must be nonnegative.")
     if args.reach_m <= 0:
         raise SystemExit("--reach_m must be positive.")
-    try:
-        args.minimap_width, args.minimap_height = resolve_minimap_resolution(
-            args.minimap_width,
-            args.minimap_height,
+    if args.max_tokens <= 0:
+        raise SystemExit("--max_tokens must be positive.")
+    if args.step_budget_min <= 0:
+        raise SystemExit("--step_budget_min must be positive.")
+    if args.step_budget_max < args.step_budget_min:
+        raise SystemExit(
+            "--step_budget_max must be greater than or equal to "
+            "--step_budget_min."
         )
+    if args.steps_per_path_meter <= 0:
+        raise SystemExit("--steps_per_path_meter must be positive.")
+    if args.step_budget_overhead < 0:
+        raise SystemExit("--step_budget_overhead must be nonnegative.")
+    try:
+        resolve_navigation_sensors(args)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
 
@@ -545,6 +661,7 @@ def main():
         vision_modes=vision_modes,
         history_sizes=args.history_sizes,
         points=args.points,
+        output_root=str(Path(args.output_root).resolve()),
     )
 
     # Aggregates default to a per-invocation timestamped dir under analysis/.
@@ -552,11 +669,29 @@ def main():
     grid_csv = Path(args.grid_csv) if args.grid_csv else run_dir / "runs.csv"
     failures_csv = Path(args.failures_csv) if args.failures_csv else run_dir / "failures.csv"
 
-    if args.resume:
+    file_name = resolve_file_name(args.file_name)
+    # Validate before opening any logs or launching a worker. --dry_run remains
+    # read-only; --resume must also validate so it cannot silently skip old runs.
+    if not args.dry_run or args.resume:
+        for cell in cells:
+            try:
+                check_navigation_run_config(cell.frame_save_dir, cell_run_config(args, cell, file_name))
+            except ValueError as exc:
+                raise SystemExit(str(exc)) from exc
+
+    if args.skip_existing_dirs:
         before = len(cells)
-        cells = [c for c in cells if not c.results_csv.exists()]
+        cells = [c for c in cells if not c.frame_save_dir.exists()]
+        print(
+            f"[skip-existing] skipping {before - len(cells)} previously started "
+            f"cells (output directory present); {len(cells)} remain.",
+            flush=True,
+        )
+    elif args.resume:
+        before = len(cells)
+        cells = [c for c in cells if not cell_completed(c)]
         print(f"[resume] skipping {before - len(cells)} already-complete cells "
-              f"(results.csv present); {len(cells)} remain.", flush=True)
+              f"(matching config and normal stop); {len(cells)} remain.", flush=True)
 
     file_name = resolve_file_name(args.file_name)
     if not Path(file_name).exists():
@@ -579,14 +714,21 @@ def main():
         for setting in (motion.for_category(category),)
     )
     print(f"[grid] cells={len(cells)} | concurrency={args.max_concurrency} | "
-          f"max_steps={args.max_steps} | vision={args.vision_input} | "
+          f"protocol={NAVIGATION_PROTOCOL_VERSION} | "
+          f"provider={args.llm_provider} | "
+          f"request_interval={args.llm_min_request_interval_sec:g}s | "
+          f"max_tokens={args.max_tokens} | "
+          f"max_steps={args.max_steps} | dynamic_step_budget={args.dynamic_step_budget} | "
+          f"budget_range={args.step_budget_min}-{args.step_budget_max} | "
+          f"steps_per_meter={args.steps_per_path_meter:g} | "
+          f"budget_overhead={args.step_budget_overhead} | vision={args.vision_input} | "
           f"reach_m={args.reach_m:g} | "
           f"ego={args.ego_width}x{args.ego_height} | "
           f"minimap={args.minimap_width}x{args.minimap_height} | "
           f"dynamic_objects={args.dynamic_objects} | "
           f"motion_speed={motion_label} | "
           f"lighting={lighting.mode} | "
-          f"file={file_name} | xvfb={use_xvfb}", flush=True)
+          f"file={file_name} | xvfb={use_xvfb} | output_root={args.output_root}", flush=True)
 
     if args.dry_run:
         for c in cells:
@@ -612,7 +754,17 @@ def main():
                         "cell": asdict(c),
                         "file_name": file_name,
                         "python_bin": args.python_bin,
+                        "llm_provider": args.llm_provider,
+                        "llm_min_request_interval_sec": (
+                            args.llm_min_request_interval_sec
+                        ),
+                        "max_tokens": args.max_tokens,
                         "max_steps": args.max_steps,
+                        "dynamic_step_budget": args.dynamic_step_budget,
+                        "step_budget_min": args.step_budget_min,
+                        "step_budget_max": args.step_budget_max,
+                        "steps_per_path_meter": args.steps_per_path_meter,
+                        "step_budget_overhead": args.step_budget_overhead,
                         "reach_m": args.reach_m,
                         "ego_width": args.ego_width,
                         "ego_height": args.ego_height,

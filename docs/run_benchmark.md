@@ -77,6 +77,69 @@ The full list of valid `<scene_code>` values (and their `scene_id` mapping) is d
   `outputs/_history_size/hs<k>/` so the stats loader isn't polluted. Omit `--history_sizes` for a normal
   single-history sweep.
 
+### API / Kiro navigation parity
+
+New API runs use the `kiro-aligned-v1` task protocol, reconstructed from the
+archived Kiro `agent_qa.txt` and launch logs:
+
+- The vision navigation prompt body matches the archived Kiro prompt, including
+  world-axis directions (`+X = North`, `+Z = West`), obstacle recovery rules,
+  and the action descriptions (approximately 45° per turn and 1.50 m forward).
+- Each request includes only the latest egocentric RGB image, pose/target state,
+  and the last five actions with the model's `observation` descriptions. The
+  API attaches image bytes instead of asking a CLI tool to read a local file.
+  Depth and minimap are not sent to the model. No-vision runs store no visual memory.
+- Default LLM sensors are RGB/depth **320×240** and minimap **431×256**. A*/BC/random
+  retain their previous defaults. Explicit resolution overrides remain supported.
+- Actions, two simulation steps per decision, the dynamic initial budget
+  `clamp(ceil(20 + 1.25 * direct_distance_m), 50, 160)`, 2 m reach radius,
+  moving-object speeds, and authored lighting match the historical task settings.
+  Provider request timeout is 300 seconds (retries can increase total elapsed time).
+- Each run saves `run_config.json` with the protocol version, prompt hash,
+  effective task settings and OpenRouter inference overrides, never API keys.
+  `--resume` only skips normally completed episodes with matching configuration;
+  API/JSON failures are not successful grid completions.
+
+Use a **fresh output root** to keep old results separate. This command is an
+offline plan only; remove `--dry_run` only when ready to authorize/run API calls:
+
+```bash
+python -m nav.scripts.run_benchmark_grid \
+  --models qwen/qwen3.8-flash --seeds 0 \
+  --output_root outputs/_api_kiro_v1 --dry_run
+```
+
+For the shell wrapper, set `OUTPUT_ROOT=outputs/_api_kiro_v1`. Existing output
+directories with a missing or different configuration are rejected before
+their frames are overwritten. The underscore-prefixed root also keeps these
+new runs out of the legacy default leaderboard until explicitly selected.
+
+This is **task-protocol parity, not identical backend execution**: Kiro's hidden
+system instructions, model routing, reasoning/token limits and image preprocessing
+were not recorded. The API retains the existing `--max_tokens` default of 20000
+and leaves reasoning at the provider default unless explicitly overridden; the
+old DeepSeek/Qwen job-specific `--max_tokens 500` and
+`OPENROUTER_REASONING_ENABLED=false` are not Kiro-equivalent settings. Remove
+those overrides when preparing a new comparison, and record any intentional
+changes. Historical Linux and current macOS Unity builds, target projection
+rounding and API latency during moving-object simulation can still differ.
+No existing experiments are rewritten or automatically rerun by this change.
+
+### English GIF gallery
+
+`python -m nav.scripts.export_llm_gallery` generates English page labels and
+GIF annotations, including success thresholds and warning/collision overlays.
+To refresh only an existing page while preserving its manifest and GIFs:
+
+```bash
+python -m nav.scripts.export_llm_gallery \
+  --output-dir analysis/cli_agent_gif_gallery --html-only \
+  --gallery-title "Navigation Baseline Comparison"
+```
+
+Generated galleries remain local under the gitignored `analysis/` directory;
+the generator and its regression tests are version-controlled.
+
 ### Shell wrapper variables
 
 The shell wrappers use environment variables as lightweight "macros": set them before the command to override defaults without editing the script.
@@ -98,10 +161,13 @@ This is the general benchmark wrapper for `llm`, `astar`, `bc`, and `random`.
 | `SCENE_ALL_APP` | `auto` | macOS Unity runtime path override. |
 | `SCENE_ALL_BIN` | `auto` | Linux Unity runtime path override. |
 | `SCENE_ID` | derived from `scene_code` | Overrides the wrapper's `scene_code -> scene_id` mapping. Useful only if a local runtime build has a different scene order. |
-| `MAX_STEPS` | `70` | Per-point decision-step budget. |
+| `MAX_STEPS` | `70` | Fixed fallback budget; used when dynamic budgeting is disabled. |
+| `DYNAMIC_STEP_BUDGET` | `1` for LLM, `0` otherwise | Initialize the budget as `clamp(ceil(20 + 1.25 * direct_distance_m), 50, 160)`. Set to `0` to use `MAX_STEPS`. |
 | `REACH_M` | `2.0` | Success radius in Unity world meters. |
-| `EGO_WIDTH` | `512` | Width of the egocentric RGB and depth observations and saved frames. |
-| `EGO_HEIGHT` | `512` | Height of the egocentric RGB and depth observations and saved frames. |
+| `EGO_WIDTH` | `320` for LLM, `512` otherwise | Width of the egocentric RGB and depth observations and saved frames. |
+| `EGO_HEIGHT` | `240` for LLM, `512` otherwise | Height of the egocentric RGB and depth observations and saved frames. |
+| `MINIMAP_WIDTH`, `MINIMAP_HEIGHT` | `431×256` for LLM, `862×512` otherwise | Set either dimension to derive the other at the canonical aspect ratio. |
+| `OUTPUT_ROOT` | `outputs` | Use a fresh root such as `outputs/_api_kiro_v1` for the aligned protocol. |
 | `DYNAMIC_OBJECTS` | `moving` | `moving` runs environment motion; `static` freezes environment objects while leaving the navigation agent controllable. |
 | `HUMAN_SPEED_MPS` | `1.2` | Absolute worker and pedestrian speed in meters/second. |
 | `VEHICLE_SPEED_MPS` | `2.5` | Absolute forklift and vehicle speed in meters/second. |
@@ -122,6 +188,12 @@ Output naming:
 
 - `BASELINE=llm` writes to `outputs/<scene_code>/<point_id>/<model_short_name>/`.
 - Non-LLM baselines write to `outputs/<scene_code>/<point_id>/<baseline>/`.
+
+The Python cell and grid runners expose the equivalent
+`--dynamic_step_budget` / `--no-dynamic_step_budget` flags plus
+`--step_budget_min`, `--step_budget_max`, `--steps_per_path_meter`, and
+`--step_budget_overhead`. Ordinary LLM runs enable dynamic initialization by
+default. Unlike A*, their budget is not expanded from a replanned path.
 
 #### `shs/run_Astar.sh`
 
@@ -411,7 +483,11 @@ Pass via `bash shs/run_headless_benchmark.sh <scene_code> <model_id>`.
 Runtime and post-hoc evaluation use the final Unity world distance with a
 default threshold of `2.0 m`. Set `--reach_m` for runtime and
 `--success-dist-m` for post-hoc evaluation. Runs without `distance_world` are
-not assigned success from their pixel distance.
+not assigned success from their pixel distance. Post-hoc evaluation also
+reports `success_at_2m`, `success_at_5m`, and `success_at_10m` together with
+the backward-compatible `success_ratio` column. These variants are derived
+from the saved final world distance and therefore do not require rerunning the
+agent.
 
 Each saved depth step contains two files. `<step>.png` is a fixed-scale
 grayscale view of the Unity sensor output; `<step>.npy` is a float32 depth map

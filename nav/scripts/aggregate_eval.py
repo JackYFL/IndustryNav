@@ -77,8 +77,24 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Minimum near-depth fraction of the ROI (default: 0.005).",
     )
-    p.add_argument("--warning-eval-width", type=int, default=None)
-    p.add_argument("--warning-eval-height", type=int, default=None)
+    p.add_argument(
+        "--warning-eval-width",
+        type=int,
+        default=None,
+        help=(
+            "Optional compatibility resize width; native resolution is used "
+            "by default."
+        ),
+    )
+    p.add_argument(
+        "--warning-eval-height",
+        type=int,
+        default=None,
+        help=(
+            "Optional compatibility resize height; native resolution is used "
+            "by default."
+        ),
+    )
     p.add_argument(
         "--collision-min-forward-ratio",
         type=float,

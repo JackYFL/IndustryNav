@@ -25,6 +25,7 @@ from nav.config import (
     EVAL_COLLISION_MIN_FORWARD_RATIO,
     EVAL_ROI_PARAMS,
     EVAL_SUCCESS_DIST_M,
+    EVAL_SUCCESS_THRESHOLDS_M,
     EVAL_WARNING_IMAGE_SIZE,
     EVAL_WARNING_MIN_PIXEL_RATIO,
     EVAL_WARNING_THRESHOLD_M,
@@ -38,14 +39,41 @@ from nav.eval.io import (
 from nav.eval.warning import WarningDetector, compute_warning_rate
 
 
+def success_threshold_field(threshold_m: float) -> str:
+    """Return the stable output field name for a success radius."""
+    threshold_label = f"{float(threshold_m):g}".replace(".", "_")
+    return f"success_at_{threshold_label}m"
+
+
+SUCCESS_THRESHOLD_FIELDS: Tuple[Tuple[float, str], ...] = tuple(
+    (threshold_m, success_threshold_field(threshold_m))
+    for threshold_m in EVAL_SUCCESS_THRESHOLDS_M
+)
+
+
+def compute_success_at_thresholds(
+    final_distance_world: Optional[float],
+) -> dict[str, int]:
+    """Compute the fixed-radius success indicators from final world distance."""
+    try:
+        distance_m = float(final_distance_world)
+    except (TypeError, ValueError):
+        distance_m = float("nan")
+    valid = math.isfinite(distance_m)
+    return {
+        field: int(valid and distance_m <= threshold_m)
+        for threshold_m, field in SUCCESS_THRESHOLD_FIELDS
+    }
+
+
 @dataclass
 class EvaluateOptions:
     """Per-run evaluation knobs. Defaults pulled from :mod:`nav.config`."""
 
     warning_threshold_m: float = EVAL_WARNING_THRESHOLD_M
     warning_min_pixel_ratio: float = EVAL_WARNING_MIN_PIXEL_RATIO
-    warning_image_height: int = EVAL_WARNING_IMAGE_SIZE[0]
-    warning_image_width: int = EVAL_WARNING_IMAGE_SIZE[1]
+    warning_image_height: Optional[int] = None
+    warning_image_width: Optional[int] = None
     collision_min_forward_ratio: float = EVAL_COLLISION_MIN_FORWARD_RATIO
     success_dist_m: float = EVAL_SUCCESS_DIST_M
     bottom_margin: float = EVAL_ROI_PARAMS["bottom_margin"]
@@ -61,6 +89,15 @@ class EvaluateOptions:
             "bottom_pad": self.bottom_pad,
             "top_pad": self.top_pad,
         }
+
+    def warning_image_size(self) -> Optional[Tuple[int, int]]:
+        """Return an explicit normalization size, or native-resolution mode."""
+        if self.warning_image_height is None and self.warning_image_width is None:
+            return None
+        return (
+            self.warning_image_height or EVAL_WARNING_IMAGE_SIZE[0],
+            self.warning_image_width or EVAL_WARNING_IMAGE_SIZE[1],
+        )
 
 
 def compute_success_efficiency_distance(
@@ -141,7 +178,7 @@ def evaluate_run(
     detector = WarningDetector(
         warning_threshold_m=opts.warning_threshold_m,
         roi_params=opts.roi_params(),
-        image_size=(opts.warning_image_height, opts.warning_image_width),
+        image_size=opts.warning_image_size(),
         min_warning_pixel_ratio=opts.warning_min_pixel_ratio,
     )
     total_steps, warning_steps, warning_rate = compute_warning_rate(
@@ -181,12 +218,15 @@ def evaluate_run(
     if steps_taken is not None:
         efficiency_steps = steps_taken
 
+    threshold_success = compute_success_at_thresholds(final_distance_world)
+
     return {
         "input_dir": str(input_dir),
         "depth_dir": depth_dir.name,
         "actions_csv": actions_csv.name,
         "total_steps": total_steps,
         "success_ratio": success,
+        **threshold_success,
         "efficiency_steps": efficiency_steps,
         "distance_ratio": distance_ratio,
         "final_distance_world": final_distance_world,

@@ -2,7 +2,7 @@
 All prompts for the multi-agent navigation system.
 """
 
-from nav.config import DEFAULT_REACH_DISTANCE_M
+from nav.config import ACTION_SPACE_AGENTS, DEFAULT_REACH_DISTANCE_M
 
 # ========== GLOBAL PLANNER PROMPTS ==========
 
@@ -366,6 +366,7 @@ def format_history_for_prompt(history_deque) -> str:
             f"Step {entry['step']}: {position_label}, "
             f"θ={entry['theta']:.1f}°, Action: '{entry['action']}', "
             f"Distance to target: {distance_label}"
+            + (f", Saw: {entry['observation']}" if entry.get("observation") else "")
         )
     return "\n".join(lines)
 
@@ -384,12 +385,19 @@ def render_nav_prompt(
     distance_m=None,
     reach_m=DEFAULT_REACH_DISTANCE_M,
     dynamic_objects="moving",
+    action_space=None,
+    sim_steps_per_decision=2,
 ) -> str:
     """Fill a navigation prompt template's placeholders.
 
     Pixel placeholders are retained for minimap interpretation. World X/Z and
     metric distance placeholders drive navigation and stopping decisions.
     """
+    action_space = ACTION_SPACE_AGENTS if action_space is None else action_space
+    # Calibrated to the shared Unity action protocol: signal 15 over two
+    # simulation steps advances 1.50 m; look 22.5 over two steps turns 45°.
+    turn_degrees = abs(action_space["turn right"]) * sim_steps_per_decision
+    forward_m = action_space["forward"] * 0.05 * sim_steps_per_decision
     return tmpl.format(
         curr_x=int(curr_xy[0]) if curr_xy else "None",
         curr_y=int(curr_xy[1]) if curr_xy else "None",
@@ -411,4 +419,30 @@ def render_nav_prompt(
         allowed_actions=str(allowed_actions),
         history=history_str,
         dynamic_objects=str(dynamic_objects),
+        turn_degrees=f"{turn_degrees:g}",
+        forward_m=f"{forward_m:.2f}",
+        quarter_turn_decisions=f"{90 / turn_degrees:g}" if turn_degrees else "unavailable",
+    )
+
+
+def add_api_observation_contract(prompt: str, has_image: bool) -> str:
+    """Adapt Kiro's file-read/output wrapper to an inline-image API request.
+
+    The navigation task itself is identical. API models receive image bytes,
+    not a local filename or a file-reading tool.
+    """
+    observations = (
+        "Inspect the attached image before deciding. It is this timestep's sensor reading.\n"
+        "- Egocentric RGB camera (what the agent sees ahead): attached image\n"
+        if has_image else "No camera or map images are attached.\n"
+    )
+    return (
+        "## Observations\n" + observations + "\n" + prompt.rstrip()
+        + "\n\n\n## Output contract\n"
+        "Reply with a single JSON object and NOTHING else — no prose, no markdown fence, "
+        "no summary. Include the `observation` field described above; it is recorded "
+        "in your movement history.\n"
+        '{"observation": "<what the image shows; empty string if no image was provided>", '
+        '"action": "<one of: forward, turn right, turn left, stop>", '
+        '"reasoning": "<one short sentence>"}\n'
     )

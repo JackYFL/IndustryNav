@@ -20,13 +20,19 @@ from typing import Iterable, List, Optional
 
 import numpy as np
 
-from nav.eval.metrics import EvaluateOptions, evaluate_run
+from nav.eval.metrics import (
+    SUCCESS_THRESHOLD_FIELDS,
+    EvaluateOptions,
+    evaluate_run,
+)
 
 
 #: Schema for the per-run rows produced by :func:`aggregate_runs`.
 AGGREGATE_ROW_FIELDS: List[str] = [
     "scene_name", "point_id", "model",
-    "success_ratio", "efficiency_steps", "distance_ratio",
+    "success_ratio",
+    *(field for _, field in SUCCESS_THRESHOLD_FIELDS),
+    "efficiency_steps", "distance_ratio",
     "final_distance_world", "stop_reason",
     "warning_rate", "warning_steps", "total_steps",
     "collision_rate", "collision_steps", "forward_steps",
@@ -49,6 +55,7 @@ def _error_row(input_dir: Path, error: Exception) -> dict:
     base.update({
         "input_dir": str(input_dir),
         "success_ratio": 0,
+        **{field: 0 for _, field in SUCCESS_THRESHOLD_FIELDS},
         "efficiency_steps": 0,
         "distance_ratio": 0.0,
         "final_distance_world": None,
@@ -119,6 +126,13 @@ def summarize_by(rows: List[dict], axis: str) -> List[dict]:
         group = groups[key]
         n = len(group)
         success = sum(int(r["success_ratio"]) for r in group)
+        threshold_success = {
+            f"{field}_%": round(
+                sum(int(r.get(field, 0)) for r in group) / n * 100,
+                2,
+            ) if n else 0.0
+            for _, field in SUCCESS_THRESHOLD_FIELDS
+        }
         dist_vals = [r["distance_ratio"] for r in group if r["distance_ratio"] not in (None, "")]
         warn_vals = [float(r["warning_rate"]) for r in group if r["warning_rate"] not in (None, "")]
         coll_vals = [float(r["collision_rate"]) for r in group]
@@ -127,6 +141,7 @@ def summarize_by(rows: List[dict], axis: str) -> List[dict]:
             axis: key,
             "N": n,
             "success_rate_%": round(success / n * 100, 2) if n else 0.0,
+            **threshold_success,
             "distance_ratio_%": (
                 round(float(np.nanmean(dist_vals)) * 100, 2) if dist_vals else float("nan")
             ),

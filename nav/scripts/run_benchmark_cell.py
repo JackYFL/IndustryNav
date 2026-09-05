@@ -18,6 +18,7 @@ import sys
 import threading
 import time
 from collections import deque
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -34,6 +35,7 @@ from nav.config import (
     DEFAULT_REACH_DISTANCE_M,
     BENCHMARK_BASELINES,
     DEFAULT_PROMPT_VISION,
+    DEFAULT_PROMPT_NOVISION,
     LLM_DEFAULT_HISTORY_SIZE,
     LLM_DEFAULT_MAX_TOKENS,
     UNITY_SCENE_COUNT,
@@ -47,13 +49,18 @@ from nav.harness.coordinates import (
     canonical_to_minimap_coords,
     minimap_pixel_scale,
     minimap_to_canonical_coords,
-    resolve_minimap_resolution,
     runtime_minimap_distance_to_canonical,
     visual_to_unity_coords,
 )
 from nav.harness.observations import get_obs_safe
 from nav.harness.perception import detect_red_point
-from nav.harness.prompt_assembly import format_history_for_prompt, render_nav_prompt
+from nav.harness.prompt_assembly import (
+    add_api_observation_contract, format_history_for_prompt, render_nav_prompt,
+)
+from nav.harness.navigation_protocol import (
+    NAVIGATION_PROTOCOL_VERSION, navigation_run_config, prepare_navigation_run,
+    resolve_navigation_sensors,
+)
 from nav.harness.routing import execute_decision
 from nav.utils import (
     action2signal,
@@ -133,10 +140,10 @@ def parse_args():
                    help="Unity player/window width; does not set sensor resolution.")
     p.add_argument("--screen_height", type=int, default=1024,
                    help="Unity player/window height; does not set sensor resolution.")
-    p.add_argument("--ego_width", type=int, default=512,
-                   help="Width of the egocentric RGB and depth observations.")
-    p.add_argument("--ego_height", type=int, default=512,
-                   help="Height of the egocentric RGB and depth observations.")
+    p.add_argument("--ego_width", type=int, default=None,
+                   help="RGB/depth width: 320 for LLM (Kiro protocol), 512 otherwise.")
+    p.add_argument("--ego_height", type=int, default=None,
+                   help="RGB/depth height: 240 for LLM (Kiro protocol), 512 otherwise.")
     p.add_argument("--minimap_width", type=int, default=None,
                    help="Optional minimap width; derived from height when omitted.")
     p.add_argument("--minimap_height", type=int, default=None,
@@ -188,9 +195,22 @@ def parse_args():
     )
 
     # LLM / BC
-    p.add_argument("--prompt_file", type=str, default=DEFAULT_PROMPT_VISION)
+    p.add_argument("--prompt_file", type=str, default=None,
+                   help="Navigation template; auto-selects vision/no-vision when omitted.")
     p.add_argument("--model_id", type=str, default="openai/gpt-4o-mini")
+    p.add_argument(
+        "--llm_provider",
+        choices=("openrouter", "gemini", "openai"),
+        default="openrouter",
+        help="LLM transport: OpenRouter, direct Google Gemini, or direct OpenAI API.",
+    )
     p.add_argument("--max_tokens", type=int, default=LLM_DEFAULT_MAX_TOKENS)
+    p.add_argument(
+        "--llm_min_request_interval_sec",
+        type=float,
+        default=0.0,
+        help="Minimum seconds between direct-provider requests within this cell.",
+    )
     p.add_argument("--history_size", type=int, default=LLM_DEFAULT_HISTORY_SIZE)
     p.add_argument("--bc_ckpt", type=str,
                    default="ckpts/nav_bc_resnet50_causal_transformer_depth_aug_remove_stop_seq_32_bs4_num_layers3/best.pt")
@@ -225,34 +245,46 @@ def parse_args():
         help="Consecutive blocked observations required before replanning.",
     )
     p.add_argument(
+        "--dynamic_step_budget",
         "--astar_dynamic_step_budget",
+        dest="dynamic_step_budget",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=None,
         help=(
-            "Scale the A* step budget from world distance and planned path length. "
-            "The budget may increase after replanning, up to the configured cap."
+            "Initialize the decision-step budget from start-target world distance. "
+            "Enabled by default for LLM runs. A* may additionally increase the "
+            "budget after replanning. The --astar_* spelling is retained as a "
+            "backward-compatible alias."
         ),
     )
     p.add_argument(
+        "--step_budget_min",
         "--astar_step_budget_min",
+        dest="step_budget_min",
         type=int,
         default=ASTAR_DEFAULTS.step_budget_min,
-        help="Minimum dynamic A* decision-step budget.",
+        help="Minimum dynamically initialized decision-step budget.",
     )
     p.add_argument(
+        "--step_budget_max",
         "--astar_step_budget_max",
+        dest="step_budget_max",
         type=int,
         default=ASTAR_DEFAULTS.step_budget_max,
-        help="Hard maximum dynamic A* decision-step budget.",
+        help="Hard maximum dynamic decision-step budget.",
     )
     p.add_argument(
+        "--steps_per_path_meter",
         "--astar_steps_per_path_meter",
+        dest="steps_per_path_meter",
         type=float,
         default=ASTAR_DEFAULTS.steps_per_path_meter,
-        help="Dynamic decision steps allocated per meter of remaining A* path.",
+        help="Dynamic decision steps allocated per meter of route distance.",
     )
     p.add_argument(
+        "--step_budget_overhead",
         "--astar_step_budget_overhead",
+        dest="step_budget_overhead",
         type=int,
         default=ASTAR_DEFAULTS.step_budget_overhead,
         help="Extra dynamic steps reserved for turning, recovery, and replanning.",
@@ -635,32 +667,40 @@ def astar_dynamic_total_budget(
     )
 
 
+def resolve_dynamic_step_budget(baseline, requested):
+    """Resolve the shared dynamic-budget toggle for a benchmark baseline."""
+    if requested is not None:
+        return bool(requested)
+    return str(baseline).strip().lower() == "llm"
+
+
 def main():
     args = parse_args()
+    if args.prompt_file is None:
+        args.prompt_file = DEFAULT_PROMPT_VISION if args.vision_input else DEFAULT_PROMPT_NOVISION
+    if args.sim_steps_per_decision <= 0:
+        raise SystemExit("--sim_steps_per_decision must be positive.")
+    if args.history_size < 0 or args.max_tokens <= 0:
+        raise SystemExit("--history_size must be nonnegative and --max_tokens positive.")
     if args.reach_m <= 0:
         raise SystemExit("--reach_m must be positive.")
     if args.astar_dynamic_replan_lookahead_m <= 0:
         raise SystemExit("--astar_dynamic_replan_lookahead_m must be positive.")
     if args.astar_dynamic_replan_confirm_steps <= 0:
         raise SystemExit("--astar_dynamic_replan_confirm_steps must be positive.")
-    if args.astar_dynamic_step_budget and args.baseline != "astar":
-        raise SystemExit("--astar_dynamic_step_budget requires --baseline astar.")
-    if args.astar_step_budget_min <= 0:
-        raise SystemExit("--astar_step_budget_min must be positive.")
-    if args.astar_step_budget_max < args.astar_step_budget_min:
+    if args.step_budget_min <= 0:
+        raise SystemExit("--step_budget_min must be positive.")
+    if args.step_budget_max < args.step_budget_min:
         raise SystemExit(
-            "--astar_step_budget_max must be greater than or equal to "
-            "--astar_step_budget_min."
+            "--step_budget_max must be greater than or equal to "
+            "--step_budget_min."
         )
-    if args.astar_steps_per_path_meter <= 0:
-        raise SystemExit("--astar_steps_per_path_meter must be positive.")
-    if args.astar_step_budget_overhead < 0:
-        raise SystemExit("--astar_step_budget_overhead must be nonnegative.")
+    if args.steps_per_path_meter <= 0:
+        raise SystemExit("--steps_per_path_meter must be positive.")
+    if args.step_budget_overhead < 0:
+        raise SystemExit("--step_budget_overhead must be nonnegative.")
     try:
-        args.minimap_width, args.minimap_height = resolve_minimap_resolution(
-            args.minimap_width,
-            args.minimap_height,
-        )
+        resolve_navigation_sensors(args, args.baseline)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
     minimap_size = (int(args.minimap_width), int(args.minimap_height))
@@ -668,6 +708,14 @@ def main():
     # Resolve --file_name="auto" against config.SCENE_ALL_BUILDS so a single
     # invocation works across dev machines without a per-host wrapper hack.
     args.file_name = resolve_scene_all_path(args.file_name)
+    prompt_template = load_prompt_template(args.prompt_file) if args.baseline == "llm" else ""
+    if args.baseline == "llm":
+        try:
+            prepare_navigation_run(
+                Path(args.frame_save_dir), navigation_run_config(args, prompt_template),
+            )
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
     logger = logger_config(args.frame_save_dir)
 
     enabled_modalities = {m.strip() for m in args.modalities.split(",") if m.strip()}
@@ -685,7 +733,13 @@ def main():
         f"{'ACTION_SPACE_ANNOTATION' if action_space is ACTION_SPACE_ANNOTATION else 'ACTION_SPACE_AGENTS'} "
         f"{action_space}"
     )
-    prompt_template = load_prompt_template(args.prompt_file) if args.baseline == "llm" else ""
+    if args.baseline == "llm":
+        logger.info(f"LLM provider: {args.llm_provider} | model={args.model_id}")
+        logger.info(
+            "Navigation protocol: %s | history=%s | max_tokens=%s | config=%s",
+            NAVIGATION_PROTOCOL_VERSION, args.history_size, args.max_tokens,
+            Path(args.frame_save_dir) / "run_config.json",
+        )
     history_deque = deque(maxlen=args.history_size if args.history_size > 0 else None)
 
     astar_planner = None
@@ -759,10 +813,14 @@ def main():
         f"Minimap runtime space: {minimap_size[0]}x{minimap_size[1]} | "
         f"reach_m={args.reach_m:g}"
     )
-    step_budget_mode = (
-        "dynamic" if args.baseline == "astar" and args.astar_dynamic_step_budget
-        else "fixed"
+    # Ordinary LLM runs use the same distance-conditioned initialization as the
+    # historical CLI-agent protocol. Other baselines keep their legacy behavior
+    # unless the generic flag is explicitly enabled.
+    dynamic_step_budget = resolve_dynamic_step_budget(
+        args.baseline,
+        args.dynamic_step_budget,
     )
+    step_budget_mode = "dynamic" if dynamic_step_budget else "fixed"
     step_budget = int(args.max_steps)
     initial_step_budget = step_budget
     astar_max_planned_path_m = None
@@ -776,18 +834,18 @@ def main():
         )
         step_budget = astar_step_allowance(
             direct_distance_m,
-            args.astar_step_budget_min,
-            args.astar_step_budget_max,
-            args.astar_steps_per_path_meter,
-            args.astar_step_budget_overhead,
+            args.step_budget_min,
+            args.step_budget_max,
+            args.steps_per_path_meter,
+            args.step_budget_overhead,
         )
         initial_step_budget = step_budget
         logger.info(
-            "A* dynamic step budget initialized | "
+            f"Dynamic step budget initialized | baseline={args.baseline} | "
             f"direct_distance={direct_distance_m:.2f}m | budget={step_budget} | "
-            f"range={args.astar_step_budget_min}-{args.astar_step_budget_max} | "
-            f"steps_per_meter={args.astar_steps_per_path_meter:g} | "
-            f"overhead={args.astar_step_budget_overhead}"
+            f"range={args.step_budget_min}-{args.step_budget_max} | "
+            f"steps_per_meter={args.steps_per_path_meter:g} | "
+            f"overhead={args.step_budget_overhead}"
         )
     minimap_projector = build_axis_aligned_projector(
         primed.target_sc.last_spawn_pixel,
@@ -1019,7 +1077,7 @@ def main():
                         json.dumps(path_record, separators=(",", ":")) + "\n"
                     )
                     _astar_paths_file.flush()
-                if step_budget_mode == "dynamic":
+                if args.baseline == "astar" and step_budget_mode == "dynamic":
                     planned_path_m = decision_result.get("astar_path_length_m")
                     plan_revision = int(
                         decision_result.get("astar_plan_revision", -1)
@@ -1036,10 +1094,10 @@ def main():
                                 astar_max_planned_path_m,
                                 planned_path_m,
                                 step_count,
-                                args.astar_step_budget_min,
-                                args.astar_step_budget_max,
-                                args.astar_steps_per_path_meter,
-                                args.astar_step_budget_overhead,
+                                args.step_budget_min,
+                                args.step_budget_max,
+                                args.steps_per_path_meter,
+                                args.step_budget_overhead,
                             )
                             if proposed_budget > step_budget:
                                 previous_budget = step_budget
@@ -1057,25 +1115,19 @@ def main():
                     _qa_file.write(
                         f"=== Step {step_count} ===\n"
                         f"[Q]\n{decision_result.get('prompt', last_prompt)}\n\n"
-                        f"[A]\nAction: {chosen_action}\nReasoning: {reasoning}\n"
+                        f"[A]\nObservation: {decision_result.get('observation', '')}\n"
+                        f"Action: {chosen_action}\nReasoning: {reasoning}\n"
                         f"{'=' * 60}\n\n"
                     )
                     _qa_file.flush()
                 if args.baseline == "llm" and args.history_size > 0 and curr_xy is not None:
-                    history_xy = minimap_to_canonical_coords(curr_xy, minimap_size)
-                    history_distance_m = float(
-                        np.hypot(
-                            float(pos_x) - float(target_world_x),
-                            float(pos_z) - float(target_world_z),
-                        )
-                    )
                     history_deque.append({
+                        # The visual observation describes the request-time
+                        # image, not a later pose after API latency/retries.
+                        **decision_result["history_entry"],
                         "step": step_count,
-                        "position": (round(history_xy[0]), round(history_xy[1])),
-                        "world_position": (float(pos_x), float(pos_z)),
-                        "theta": unity_rotation_to_egocentric_theta(rot_y),
                         "action": chosen_action,
-                        "distance_to_target_m": history_distance_m,
+                        "observation": decision_result.get("observation", ""),
                     })
                 logger.info(
                     f"[Step:{step_count}] Action: {chosen_action} | Reasoning: {str(reasoning)[:200]}"
@@ -1139,17 +1191,34 @@ def main():
                                 distance_m=distance_m,
                                 reach_m=args.reach_m,
                                 dynamic_objects=args.dynamic_objects,
+                                action_space=action_space,
+                                sim_steps_per_decision=SIM_STEPS_PER_DECISION,
                             )
-                            last_prompt = prompt
+                            if args.vision_input and ego_rgb is None:
+                                stop_reason = "vision_unavailable"
+                                logger.error("Requested vision but no egocentric RGB observation is available.")
+                                break
                             agent_images = (
                                 [("ego", ego_rgb)] if (args.vision_input and ego_rgb is not None) else []
                             )
+                            prompt = add_api_observation_contract(prompt, bool(agent_images))
+                            last_prompt = prompt
                             payload = {
                                 "prompt": prompt,
                                 "images": agent_images,
                                 "model_id": args.model_id,
+                                "llm_provider": args.llm_provider,
+                                "llm_min_request_interval_sec": (
+                                    args.llm_min_request_interval_sec
+                                ),
                                 "max_tokens": args.max_tokens,
                                 "allowed_actions": allowed_actions,
+                                "history_entry": {
+                                    "position": prompt_curr_xy,
+                                    "world_position": (float(pos_x), float(pos_z)),
+                                    "theta": theta,
+                                    "distance_to_target_m": distance_m,
+                                },
                             }
                     elif args.baseline == "astar":
                         if curr_xy is not None and target_xy is not None:
@@ -1296,7 +1365,7 @@ def main():
                 # Column name kept as exec_mode for RESULTS_CSV_FIELDS / historical
                 # readers; the value is now the --baseline token (llm/bc/astar/...).
                 "exec_mode": args.baseline,
-                "provider": "openrouter",
+                "provider": args.llm_provider if args.baseline == "llm" else "",
                 "model": args.model_id,
                 "vision_input": bool(args.vision_input),
                 "max_steps": int(step_budget),

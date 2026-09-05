@@ -1,4 +1,4 @@
-"""Regression tests for action-aware, resolution-normalized warning rate."""
+"""Regression tests for action-aware, resolution-independent warning rate."""
 
 from __future__ import annotations
 
@@ -63,7 +63,39 @@ class WarningDetectorTest(unittest.TestCase):
         self.assertAlmostEqual(
             low["warning_pixel_ratio"],
             high["warning_pixel_ratio"],
+            delta=0.0001,
         )
+
+    def test_expanded_roi_uses_fixed_normalized_coordinates(self) -> None:
+        detector = WarningDetector()
+        low_shape = (240, 320)
+        high_shape = (480, 640)
+
+        low_polygon = detector._compute_roi_polygon(low_shape).astype(float)
+        high_polygon = detector._compute_roi_polygon(high_shape).astype(float)
+        low_polygon /= np.array([low_shape[1] - 1, low_shape[0] - 1])
+        high_polygon /= np.array([high_shape[1] - 1, high_shape[0] - 1])
+
+        expected = np.array(
+            [
+                [0.08, 0.90],
+                [0.92, 0.90],
+                [0.72, 0.45],
+                [0.28, 0.45],
+            ]
+        )
+        np.testing.assert_allclose(low_polygon, expected, atol=0.003)
+        np.testing.assert_allclose(high_polygon, expected, atol=0.002)
+
+    def test_native_resolution_masks_keep_the_same_area_fraction(self) -> None:
+        detector = WarningDetector()
+        low_mask = detector.create_roi_mask((240, 320))
+        high_mask = detector.create_roi_mask((480, 640))
+
+        self.assertIsNone(detector.image_size)
+        self.assertAlmostEqual(float(low_mask.mean()), 0.2883, places=4)
+        self.assertAlmostEqual(float(high_mask.mean()), 0.2883, places=4)
+        self.assertEqual(set(detector._roi_polygons), {(240, 320), (480, 640)})
 
     def test_run_rate_uses_move_from_matching_action_row(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

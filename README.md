@@ -35,6 +35,8 @@
 <a id="news"></a>
 ## 📰 News
 
+- **2026-09-05**
+  - Aligned API navigation with the Kiro task protocol and visual history; added multi-threshold success metrics and an English GIF gallery with safety overlays.
 - **2026-09-01**
   - Refined collision and action-aware depth-warning metrics for more reliable safety evaluation.
 - **2026-08-24**
@@ -294,6 +296,7 @@ Useful environment variables:
 
 ```bash
 MAX_STEPS=70
+DYNAMIC_STEP_BUDGET=1
 BASELINE=llm
 MODEL_ID=google/gemini-3-flash-preview
 DYNAMIC_OBJECTS=moving
@@ -311,9 +314,14 @@ Example:
 
 ```bash
 OPENROUTER_API_KEY="..." \
-MAX_STEPS=70 \
 bash shs/run_headless_benchmark.sh scene1 google/gemini-3-flash-preview
 ```
+
+LLM runs initialize their per-point decision budget from start-target world
+distance by default: `clamp(ceil(20 + 1.25 * distance_m), 50, 160)`. Use
+`DYNAMIC_STEP_BUDGET=0 MAX_STEPS=70` with the shell wrapper, or
+`--no-dynamic_step_budget --max_steps 70` with the Python runners, to reproduce
+the former fixed-budget protocol.
 
 To run one explicit benchmark cell:
 

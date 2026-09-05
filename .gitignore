@@ -57,7 +57,7 @@ checkpoints/
 runs/
 wandb/
 tensorboard/
-analysis/grid_runs/
+analysis/
 tests/
 clients/
 

@@ -456,7 +456,7 @@ def unity_rotation_to_egocentric_theta(unity_rot_y: float) -> float:
     """Convert Unity's RotY to egocentric theta (0-360, 0°=facing west).
 
     Egocentric theta convention (agent at origin, +Y down):
-        0° = facing WEST, 90° = SOUTH, 180° = EAST, 270° = NORTH.
+        0° = facing WEST, 90° = NORTH, 180° = EAST, 270° = SOUTH.
     """
     return unity_rot_y % 360
 

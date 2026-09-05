@@ -9,7 +9,7 @@ dict — ``action`` / ``reasoning`` always, ``error`` on hard failure, and
 Supported baselines (see :data:`nav.config.BENCHMARK_BASELINES`):
 
 - ``"random"`` — uniform choice over the action space.
-- ``"llm"`` — LLM via :func:`nav.harness.llm_provider.llm_openrouter`.
+- ``"llm"`` — LLM via :func:`nav.harness.llm_provider.llm_generate_decision`.
 - ``"bc"`` — a behavior-cloning controller's ``predict_action``.
 - ``"astar"`` — minimap A* planner (:class:`nav.baselines.astar.AStarBaseline`).
 
@@ -22,7 +22,7 @@ from __future__ import annotations
 import numpy as np
 
 from nav.config import LLM_ERROR_SENTINELS
-from nav.harness.llm_provider import llm_openrouter
+from nav.harness.llm_provider import llm_generate_decision
 
 
 def astar_path_length_m(path, point_to_world) -> float | None:
@@ -55,16 +55,21 @@ def execute_decision(baseline: str, payload: dict, result_container: dict) -> No
             result_container["action"] = str(np.random.choice(payload["action_space"]))
             result_container["reasoning"] = "Random action."
         elif baseline == "llm":
-            chosen_action, reasoning = llm_openrouter(
+            decision = llm_generate_decision(
                 prompt=payload["prompt"],
                 images=payload["images"],
                 model=payload["model_id"],
+                provider=payload.get("llm_provider", "openrouter"),
                 max_tokens=payload["max_tokens"],
+                min_request_interval_sec=payload.get(
+                    "llm_min_request_interval_sec", 0.0
+                ),
                 allowed_actions=payload["allowed_actions"],
             )
-            result_container["action"] = chosen_action
-            result_container["reasoning"] = reasoning
+            result_container.update(decision)
+            reasoning = decision["reasoning"]
             result_container["prompt"] = payload["prompt"]
+            result_container["history_entry"] = payload.get("history_entry", {})
             # Only abort on an explicit provider error sentinel. A bare
             # "failed" substring trips on legitimate chain-of-thought
             # ("forward failed to change position"), spuriously aborting

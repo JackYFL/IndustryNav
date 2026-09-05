@@ -16,7 +16,7 @@ import numpy as np
 
 from nav.config import EVAL_DEFAULT_LOG_DIR
 from nav.eval.aggregate import aggregate_runs, write_aggregate_csv
-from nav.eval.metrics import EvaluateOptions, evaluate_run
+from nav.eval.metrics import SUCCESS_THRESHOLD_FIELDS, EvaluateOptions, evaluate_run
 from nav.utils import logger_config
 
 
@@ -57,8 +57,24 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Minimum near-depth fraction of the ROI (default: 0.005).",
     )
-    p.add_argument("--warning-eval-width", type=int, default=None)
-    p.add_argument("--warning-eval-height", type=int, default=None)
+    p.add_argument(
+        "--warning-eval-width",
+        type=int,
+        default=None,
+        help=(
+            "Optional compatibility resize width; native resolution is used "
+            "by default."
+        ),
+    )
+    p.add_argument(
+        "--warning-eval-height",
+        type=int,
+        default=None,
+        help=(
+            "Optional compatibility resize height; native resolution is used "
+            "by default."
+        ),
+    )
     p.add_argument(
         "--collision-min-forward-ratio",
         type=float,
@@ -113,6 +129,8 @@ def _opts_from_args(args: argparse.Namespace) -> EvaluateOptions:
 def _log_metrics(metrics: dict) -> None:
     logger.info(f"Total steps: {metrics['total_steps']}")
     logger.info(f"Success ratio: {metrics['success_ratio']}")
+    for threshold_m, field in SUCCESS_THRESHOLD_FIELDS:
+        logger.info(f"Success@{threshold_m:g}m: {metrics[field]}")
     logger.info(f"Efficiency (total steps): {metrics['efficiency_steps']}")
     logger.info(f"Distance ratio: {metrics['distance_ratio']:.4f}")
     if metrics["final_distance_world"] is not None:
@@ -149,6 +167,12 @@ def main() -> None:
             success = sum(int(r["success_ratio"]) for r in ok_rows)
             denom = len(ok_rows) if ok_rows else 1
             logger.info(f"Success: {success}/{len(ok_rows)} ({success / denom:.4f})")
+            for threshold_m, field in SUCCESS_THRESHOLD_FIELDS:
+                successes = sum(int(r.get(field, 0)) for r in ok_rows)
+                logger.info(
+                    f"Success@{threshold_m:g}m: {successes}/{len(ok_rows)} "
+                    f"({successes / denom:.4f})"
+                )
         if ok_rows:
             logger.info(
                 f"Average steps: "
