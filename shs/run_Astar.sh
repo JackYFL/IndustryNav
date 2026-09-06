@@ -68,6 +68,11 @@
 #   ASTAR_DEBUG_DIR
 #       Optional explicit debug image directory. Default:
 #       <frame_save_dir>/astar_debug when ASTAR_DEBUG_VIZ=1.
+#   ASTAR_POLICY_ACTIONS
+#       1 | 0. Use the learned policy's four atomic actions (forward=15,
+#       observed turn=+/-22.5 degrees, stop). Default: 0; dataset collection sets 1.
+#   OUTPUT_ROOT
+#       Output root. Default: <repo>/outputs.
 #   ASTAR_OBSTACLE_CLEARANCE_M
 #       Physical obstacle clearance in Unity world meters. Default: 0.6.
 #   ASTAR_PROXY_STOP_DISTANCE_M
@@ -266,10 +271,12 @@ MARKER_SOURCE="${MARKER_SOURCE:-vector}"
 HIDE_UNITY_RED_MARKER="${HIDE_UNITY_RED_MARKER:-1}"
 RUN_NAME="${RUN_NAME:-astar}"
 ASTAR_DEBUG_VIZ="${ASTAR_DEBUG_VIZ:-0}"
+ASTAR_POLICY_ACTIONS="${ASTAR_POLICY_ACTIONS:-0}"
 ASTAR_OBSTACLE_CLEARANCE_M="${ASTAR_OBSTACLE_CLEARANCE_M:-0.6}"
 ASTAR_PROXY_STOP_DISTANCE_M="${ASTAR_PROXY_STOP_DISTANCE_M:-${ASTAR_PROXY_STOP_REAL_DIST_M:-4.9}}"
 DRY_RUN="${DRY_RUN:-0}"
 BASE_PORT_START="${BASE_PORT_START:-5507}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-${REPO_ROOT}/outputs}"
 
 pick_base_port() {
   local fallback="$1"
@@ -333,7 +340,7 @@ PY
 
     worker_id=0
     base_port="$(pick_base_port "$((BASE_PORT_START + idx))")"
-    frame_save_dir="outputs/${scene_name}/${point_id}/${RUN_NAME}"
+    frame_save_dir="${OUTPUT_ROOT}/${scene_name}/${point_id}/${RUN_NAME}"
     max_steps_for_point="$MAX_STEPS"
     if [[ "$ASTAR_DYNAMIC_STEP_BUDGET" == "0" && -z "$MAX_STEPS_WAS_SET" && "$scene_name" == "scene1" && "$point_id" == "point4" ]]; then
       max_steps_for_point=100
@@ -372,6 +379,10 @@ PY
             --astar_step_budget_max "$ASTAR_STEP_BUDGET_MAX"
             --astar_steps_per_path_meter "$ASTAR_STEPS_PER_PATH_METER"
             --astar_step_budget_overhead "$ASTAR_STEP_BUDGET_OVERHEAD")
+    fi
+
+    if [[ "$ASTAR_POLICY_ACTIONS" == "1" || "$ASTAR_POLICY_ACTIONS" == "true" || "$ASTAR_POLICY_ACTIONS" == "on" ]]; then
+      cmd+=(--astar_policy_actions)
     fi
 
     if [[ -n "$MINIMAP_WIDTH" ]]; then

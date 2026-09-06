@@ -49,6 +49,12 @@ outputs/<scene_code>/<point_id>/<model_short_name>/
 ├── llm_minimap_target/   # minimap annotated with curr + target dots
 ├── llm_actions.csv   # per-step action + pose + distance log
 ├── agent_qa.txt      # LLM prompts + responses, per step
+├── run_config.json  # protocol/configuration identity; no credentials
+├── checkpoint.json  # committed pose/steps/budget/history and log boundaries
+├── decision_reply.json # durable model reply, reusable after interruption
+├── .run.lock        # OS-held single-writer lock; the file may remain after exit
+├── resume_events.jsonl # continuation audit, created when resuming
+├── resume-*/        # recoverable pre-resume logs/results and uncommitted frames
 ├── results.csv       # one row summary of this run
 └── unity_log.txt     # Unity-side log
 ```
@@ -77,27 +83,27 @@ The full list of valid `<scene_code>` values (and their `scene_id` mapping) is d
   `outputs/_history_size/hs<k>/` so the stats loader isn't polluted. Omit `--history_sizes` for a normal
   single-history sweep.
 
-### API / Kiro navigation parity
+### API navigation protocol
 
-New API runs use the `kiro-aligned-v1` task protocol, reconstructed from the
-archived Kiro `agent_qa.txt` and launch logs:
+API runs share the following navigation protocol:
 
-- The vision navigation prompt body matches the archived Kiro prompt, including
-  world-axis directions (`+X = North`, `+Z = West`), obstacle recovery rules,
+- The vision navigation prompt specifies world-axis directions
+  (`+X = North`, `+Z = West`), obstacle recovery rules,
   and the action descriptions (approximately 45° per turn and 1.50 m forward).
 - Each request includes only the latest egocentric RGB image, pose/target state,
   and the last five actions with the model's `observation` descriptions. The
-  API attaches image bytes instead of asking a CLI tool to read a local file.
+  API attaches the image bytes directly.
   Depth and minimap are not sent to the model. No-vision runs store no visual memory.
 - Default LLM sensors are RGB/depth **320×240** and minimap **431×256**. A*/BC/random
   retain their previous defaults. Explicit resolution overrides remain supported.
-- Actions, two simulation steps per decision, the dynamic initial budget
-  `clamp(ceil(20 + 1.25 * direct_distance_m), 50, 160)`, 2 m reach radius,
-  moving-object speeds, and authored lighting match the historical task settings.
+- Defaults include two simulation steps per decision, a dynamic initial budget
+  of `clamp(ceil(20 + 1.25 * direct_distance_m), 50, 160)`, a 2 m reach radius,
+  shared moving-object speeds, and authored lighting.
   Provider request timeout is 300 seconds (retries can increase total elapsed time).
 - Each run saves `run_config.json` with the protocol version, prompt hash,
   effective task settings and OpenRouter inference overrides, never API keys.
-  `--resume` only skips normally completed episodes with matching configuration;
+  `--resume` skips normally completed episodes with matching configuration and
+  continues partial LLM episodes from checkpoints (or compatible legacy logs).
   API/JSON failures are not successful grid completions.
 
 Use a **fresh output root** to keep old results separate. This command is an
@@ -106,24 +112,205 @@ offline plan only; remove `--dry_run` only when ready to authorize/run API calls
 ```bash
 python -m nav.scripts.run_benchmark_grid \
   --models qwen/qwen3.8-flash --seeds 0 \
-  --output_root outputs/_api_kiro_v1 --dry_run
+  --output_root outputs/_api_v1 --dry_run
 ```
 
-For the shell wrapper, set `OUTPUT_ROOT=outputs/_api_kiro_v1`. Existing output
+For the shell wrapper, set `OUTPUT_ROOT=outputs/_api_v1`. Existing output
 directories with a missing or different configuration are rejected before
 their frames are overwritten. The underscore-prefixed root also keeps these
 new runs out of the legacy default leaderboard until explicitly selected.
 
-This is **task-protocol parity, not identical backend execution**: Kiro's hidden
-system instructions, model routing, reasoning/token limits and image preprocessing
-were not recorded. The API retains the existing `--max_tokens` default of 20000
-and leaves reasoning at the provider default unless explicitly overridden; the
-old DeepSeek/Qwen job-specific `--max_tokens 500` and
-`OPENROUTER_REASONING_ENABLED=false` are not Kiro-equivalent settings. Remove
-those overrides when preparing a new comparison, and record any intentional
-changes. Historical Linux and current macOS Unity builds, target projection
-rounding and API latency during moving-object simulation can still differ.
-No existing experiments are rewritten or automatically rerun by this change.
+The API uses a `--max_tokens` default of 20000 and leaves reasoning at the
+provider default unless explicitly overridden. Record intentional changes to
+token limits, reasoning options and other inference settings when comparing runs.
+Unity builds, target projection rounding and API latency during moving-object
+simulation can still affect comparisons. Existing experiments are not rewritten
+or automatically rerun when using a new output root.
+
+### Resume an interrupted LLM episode
+
+Checkpointing is enabled by default for `--baseline llm` through the OpenRouter,
+Gemini and OpenAI API providers. Other baselines do not support episode restoration.
+
+#### Single task or batch
+
+Activate the project Python environment and load the original provider key.
+Point `RUN_DIR` at the existing per-task directory containing `run_config.json`
+and a checkpoint or compatible action/Q&A logs, not at the scene or output root.
+Grid outputs include a `seed<N>` directory. To inspect and then resume a run:
+
+```bash
+RUN_DIR="outputs/scene1/point1/gemini-3-flash-preview"
+python -m nav.scripts.resume_benchmark "$RUN_DIR" --dry-run
+python -m nav.scripts.resume_benchmark "$RUN_DIR"
+```
+
+The convenience command reconstructs the recorded run settings. Its `--dry-run`
+prints the command without launching Unity, making model calls or modifying run
+files; it is not a full checkpoint-integrity or pose-restoration test. On headless
+Linux, run this command under `xvfb-run -a` unless a working display is available.
+
+Alternatively, repeat the original **LLM** cell or grid command with `--resume`,
+or set `RESUME=1` for the shell wrapper. For example, for a run originally launched
+with the quickstart defaults:
+
+```bash
+RESUME=1 bash shs/run_headless_benchmark.sh scene1 google/gemini-3-flash-preview
+```
+
+Retain the original output root, model, prompt, seed, scene, sensors, modalities,
+motion/lighting settings and API counter. The grid skips normally finished
+episodes, restores partial ones and starts unattempted tasks. A normal finish
+means `stop_reason=max_steps` or `reached_vicinity`, not necessarily navigation
+success. Automatic LLM cell retries also use checkpoints. `--resume` and
+`--skip_existing_dirs` cannot be combined: the latter skips partial directories
+without restoring them. These commands resume tasks; they do not restart a
+separate queue/controller process or expand its authorized workload or budget.
+
+#### Restored state and preserved outputs
+
+- Restores the agent's world position/yaw, original start/target, total step
+  allowance, committed step number and recent visual/action history. A fresh
+  Unity process is launched, and its restored pose/target are checked before
+  any new model call. The budget is **not** recalculated from the remaining
+  distance, and failed requests do not consume navigation-action steps.
+- Saves a model reply before the main loop consumes it. An uncommitted saved
+  action is replayed from its pre-action pose without another model request;
+  committed actions are not replayed. If the process dies before a reply is
+  durably saved, that request may need to be sent again and remains counted
+  against the original API allowance. Exactly-once remote billing is not claimed.
+- Preserves completed frames and appends action/Q&A logs without duplicate step
+  numbers. Before trimming uncommitted tails, saves recoverable copies under a
+  `resume-*` subdirectory, including the previous partial result summary.
+  `resume_events.jsonl` and `results.csv.resume_count` identify continuations.
+- Bounded runs bind checkpoints to the original SQLite counter: a missing counter,
+  different counter path, count below the checkpoint or increased limit is
+  rejected. The convenience command restores this binding automatically; it never
+  resets the allowance. For **legacy OpenRouter/OpenAI logs without a checkpoint**,
+  export the original provider `*_MAX_REQUESTS` and `*_REQUEST_COUNTER_FILE` before
+  using the convenience command. A checkpoint is not itself an API call cap;
+  budget enforcement must have been configured for the original run.
+- Compatible old API logs can recover at the last logged action's **pre-action**
+  pose. That action is treated as pending because the old logger wrote before
+  Unity stepped. Missing, mismatched or ambiguous configuration/pose/Q&A records
+  are rejected instead of guessing or overwriting the old run.
+
+#### Limitations and recovery errors
+
+This is **agent/episode continuation, not an exact Unity scene snapshot**. Moving
+people, vehicles and robots restart; simulation time, physics state and hidden
+provider conversation state are not restored. The configured local navigation
+history (five steps by default) is restored. Resumed episodes record
+`scene_state_restored=false`; account for this distinction when comparing them
+with uninterrupted experiments. Final
+position/distance in checkpointed runs use the confirmed post-action pose.
+
+- **Run already active:** only one process may write to a task directory. Do not
+  start a second runner while its owner is still running. The OS releases the
+  lock after exit; deleting `.run.lock` is not a recovery procedure.
+- **Configuration or log mismatch:** retain the original files and settings.
+  Missing, edited or ambiguous records are not safe to resume. Use a fresh output
+  directory for a separate run rather than deleting the original evidence.
+- **Counter missing or exhausted:** retain the original counter. A missing counter
+  blocks bounded recovery, and an exhausted allowance blocks new requests; neither
+  is fixed by increasing the step budget or creating a new counter.
+- **Custom output paths:** checkpointed runs require per-task `results.csv`, with
+  action and Q&A logs directly inside the run directory. Use `--no-checkpoint`
+  only on the cell runner for legacy logging/custom external CSV behavior; it
+  cannot be combined with `--resume`.
+
+### Reconstruct historical Gemini logs
+
+The September 2 Gemini logs predate recorded run configurations and checkpoints.
+The reconstruction tool verifies the historical prompt, launch settings, action
+signals, log continuity and final request/pose agreement, then copies recoverable
+runs to a **new directory outside the source tree**. Original outputs are untouched;
+normal completions and empty action logs are skipped. Conflicting final poses are
+reported as blocked, without silently choosing an earlier recovery point.
+
+```bash
+python -m nav.scripts.reconstruct_gemini_runs \
+  --source-root outputs --output-root analysis/gemini_reconstructed
+```
+
+Each recovered task includes `run_config.json`, `checkpoint.json`, the original
+logs/images, `legacy_prompt.txt`, `source_manifest.json` and
+`reconstruction_report.json`. The root `manifest.json` lists successes and blockers.
+The original 70-step budget is retained; the final logged action is pending, not
+assumed committed. Unknown transport settings and cumulative API usage are not
+invented. Missing visual descriptions remain empty, matching the old protocol.
+
+These bundles use `legacy-gemini-reconstructed-v1` and intentionally have
+`api_resume_ready=false`. They cannot be passed to the ordinary API resume command
+as if they were current-protocol runs. Further API continuation requires a legacy
+protocol adapter and an explicitly verified provider/request allowance.
+
+Run a zero-model-call smoke test on a separate copy:
+
+```bash
+python -m nav.scripts.smoke_reconstructed_gemini \
+  analysis/gemini_reconstructed/scene10/point1/gemini-3.8-flash/seed0 \
+  --output-dir analysis/gemini_reconstruction_smoke --unity
+```
+
+Without `--unity`, this checks storage/rollback only. With `--unity`, it uses the
+recorded Unity client, validates restored pose/target and RGB resolution, replays
+exactly one saved action, and writes/reloads a post-action checkpoint. It never
+requests a new model decision. Reports and before/after RGB images are saved in
+the smoke directory; moving scene objects restart, as with other continuations.
+
+### Reconstruct historical Qwen logs
+
+The old Qwen batch uses the same historical prompt/log format as the Gemini
+recovery tool, but has **dynamic per-task budgets**. Preserve each task's recorded
+`initial_step_budget` and `max_steps`; do not replace them with Gemini's fixed 70
+steps or recalculate them from the remaining distance.
+
+```bash
+python -m nav.scripts.reconstruct_qwen_runs \
+  --source-root outputs --output-root analysis/qwen_reconstructed \
+  --job-dir analysis/queued_runs/qwen38_after_deepseek_20260904
+```
+
+The manifest classifies all discovered tasks as `skipped_complete`, `no_actions`,
+`offline_validated`, or `blocked`. Successful bundles contain the same recovery
+artifacts as Gemini. Conflicting final poses and empty pending-answer reasoning
+are blocked instead of fabricating a reply or silently choosing an earlier step.
+The recovery boundary uses actual action rows, not a summary step count that may
+include the failed request.
+
+Provider/options evidence comes from the original launch and finished-job records.
+The original shared SQLite request-counter path, limit and count are retained and
+checked read-only; the counter is not copied into a fresh allowance or reset.
+Per-episode request counts remain unknown. These bundles use
+`legacy-qwen-reconstructed-v1` and remain `api_resume_ready=false`.
+
+The shared zero-model-call smoke tool also accepts Qwen bundles and preserves
+their recorded dynamic budget:
+
+```bash
+python -m nav.scripts.smoke_reconstructed_gemini \
+  analysis/qwen_reconstructed/scene17/point2/qwen3.8-flash/seed0 \
+  --output-dir analysis/qwen_reconstruction_smoke --unity
+```
+
+This only verifies state restoration and cached-action replay. It does not test
+new Qwen requests, restart the batch, or add it to an execution queue.
+
+### Bounded direct OpenAI runs
+
+For `--llm_provider openai`, load `OPENAI_API_KEY` outside the repository.
+Set `OPENAI_MAX_REQUESTS` and `OPENAI_REQUEST_COUNTER_FILE` to enforce a
+persistent SQLite budget shared by smoke tests, workers and HTTP retries.
+Use a separate counter file for each independently authorized model budget;
+never delete or replace a counter to resume an experiment.
+`OPENAI_MIN_REQUEST_INTERVAL_SEC` optionally paces requests across all workers
+and requires that shared budget. `OPENAI_MAX_REQUEST_ATTEMPTS` controls HTTP
+attempts per decision (1–4, default 4); every attempt consumes one slot before
+sending, including transport failures. The call limit is not a dollar limit.
+Responses use `max_output_tokens`, `store=false`, the prompt's JSON contract,
+and provider-default reasoning. Effective transport settings are included in
+`run_config.json`; credentials are never recorded there.
 
 ### English GIF gallery
 
@@ -139,6 +326,36 @@ python -m nav.scripts.export_llm_gallery \
 
 Generated galleries remain local under the gitignored `analysis/` directory;
 the generator and its regression tests are version-controlled.
+
+To add another model without regenerating or replacing existing entries:
+
+```bash
+python -m nav.scripts.export_llm_gallery \
+  --input-glob 'outputs/scene*/point*/gemini-3.8-flash/seed0' \
+  --output-dir analysis/cli_agent_gif_gallery --append --skip-incomplete
+```
+
+`--append` skips runs already present and protects existing GIF files.
+`--skip-incomplete` omits missing/empty result summaries without fabricating
+final distances or success outcomes. It does not rerun any navigation tasks.
+Add `--normal-only` to exclude provider/JSON/Unity errors and retain only runs
+whose latest `stop_reason` is `max_steps` or `reached_vicinity`.
+
+### Top-down trajectory comparison gallery
+
+Build a separate 96-card gallery (24 scenes x 4 targets) that overlays every
+available agent trajectory on the same top-down map. Warning points are yellow,
+collision points are red, the start uses the GIF gallery's coral agent marker,
+and the target uses its green marker:
+
+```bash
+python -m nav.scripts.export_topdown_comparison_gallery \
+  --source-manifest analysis/cli_agent_gif_gallery/manifest.json \
+  --output-dir analysis/topdown_trajectory_comparison_gallery
+```
+
+The exporter recomputes warning locations from the saved native-resolution
+depth arrays with the current normalized ROI and warning configuration.
 
 ### Shell wrapper variables
 
@@ -162,12 +379,13 @@ This is the general benchmark wrapper for `llm`, `astar`, `bc`, and `random`.
 | `SCENE_ALL_BIN` | `auto` | Linux Unity runtime path override. |
 | `SCENE_ID` | derived from `scene_code` | Overrides the wrapper's `scene_code -> scene_id` mapping. Useful only if a local runtime build has a different scene order. |
 | `MAX_STEPS` | `70` | Fixed fallback budget; used when dynamic budgeting is disabled. |
+| `RESUME` | `0` | Set to `1` for LLM checkpoint/compatible-log continuation and completed-task skipping; retain the original settings, output root and API counter. |
 | `DYNAMIC_STEP_BUDGET` | `1` for LLM, `0` otherwise | Initialize the budget as `clamp(ceil(20 + 1.25 * direct_distance_m), 50, 160)`. Set to `0` to use `MAX_STEPS`. |
 | `REACH_M` | `2.0` | Success radius in Unity world meters. |
 | `EGO_WIDTH` | `320` for LLM, `512` otherwise | Width of the egocentric RGB and depth observations and saved frames. |
 | `EGO_HEIGHT` | `240` for LLM, `512` otherwise | Height of the egocentric RGB and depth observations and saved frames. |
 | `MINIMAP_WIDTH`, `MINIMAP_HEIGHT` | `431×256` for LLM, `862×512` otherwise | Set either dimension to derive the other at the canonical aspect ratio. |
-| `OUTPUT_ROOT` | `outputs` | Use a fresh root such as `outputs/_api_kiro_v1` for the aligned protocol. |
+| `OUTPUT_ROOT` | `outputs` | Use a fresh root such as `outputs/_api_v1` to keep new experiments separate. |
 | `DYNAMIC_OBJECTS` | `moving` | `moving` runs environment motion; `static` freezes environment objects while leaving the navigation agent controllable. |
 | `HUMAN_SPEED_MPS` | `1.2` | Absolute worker and pedestrian speed in meters/second. |
 | `VEHICLE_SPEED_MPS` | `2.5` | Absolute forklift and vehicle speed in meters/second. |

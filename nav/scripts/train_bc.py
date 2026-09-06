@@ -39,7 +39,14 @@ def parse_args() -> BCTrainConfig:
     p.add_argument("--seq_len", type=int, default=None)
     p.add_argument("--num_layers", type=int, default=None)
     p.add_argument("--chunk_size", type=int, default=None)
+    p.add_argument("--sequence_action_offset", type=int, choices=[0, 1], default=None,
+                   help="Sequence target offset relative to the final observation (new aligned datasets use 0).")
+    p.add_argument("--include_stop_targets", action=argparse.BooleanOptionalAction, default=None,
+                   help="Train on terminal stop decisions (recommended for point-goal navigation).")
     p.add_argument("--goal_rep", type=str, default=None, choices=["cartesian", "polar"])
+    p.add_argument("--goal_distance_scale_m", type=float, default=None)
+    p.add_argument("--horizontal_flip_prob", type=float, default=None)
+    p.add_argument("--class_weight_power", type=float, default=None)
     p.add_argument("--rgb_backbone", type=str, default=None)
     p.add_argument("--depth_backbone", type=str, default=None)
     p.add_argument("--backbone_lr_scale", type=float, default=None)

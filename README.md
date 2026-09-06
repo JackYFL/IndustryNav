@@ -35,8 +35,12 @@
 <a id="news"></a>
 ## 📰 News
 
+- **2026-09-06**
+  - Added an A*-supervised PointGoal training pipeline and a 96-task top-down trajectory gallery with distinct safety markers.
+  - Improved A* robustness under varied lighting and atomic-action recovery.
 - **2026-09-05**
-  - Aligned API navigation with the Kiro task protocol and visual history; added multi-threshold success metrics and an English GIF gallery with safety overlays.
+  - Added checkpoint-based API episode resume with preserved action history, saved replies, and request-budget accounting.
+  - Standardized API navigation prompts and visual history; added multi-threshold success metrics and an English GIF gallery with safety overlays.
 - **2026-09-01**
   - Refined collision and action-aware depth-warning metrics for more reliable safety evaluation.
 - **2026-08-24**
@@ -133,6 +137,7 @@ The current benchmark uses one compiled Unity client, `scene_all`, which contain
 | Observations | RGB, metric depth, minimap, pose, heading, target, and action history. |
 | Runtime controls | Adjustable sensor resolution, object motion, category speeds, and lighting. |
 | Baselines | LLM, A*, BC, random, and an extension interface for new baselines. |
+| Recovery | Resume interrupted API LLM episodes with saved pose/history and original budgets; skip completed tasks. |
 | Data and training | Data collection, trajectory recording, BC training, and inference. |
 | Evaluation | Success, distance, efficiency, collision, warning, trajectory, and aggregate metrics. |
 | Visualization | Sensor GIFs, A* path overlays, scene validation, and a 24-scene task overview. |
@@ -166,11 +171,13 @@ Main entry points:
 
 - `python -m nav.scripts.run_benchmark_cell`
 - `python -m nav.scripts.run_benchmark_grid`
+- `python -m nav.scripts.resume_benchmark <run_dir>`
 - `python -m nav.scripts.eval_run`
 - `python -m nav.scripts.compile_stats`
 
-Scene/client maintenance docs:
+Workflow and scene/client docs:
 
+- [`docs/run_benchmark.md`](docs/run_benchmark.md): benchmark commands, API protocol, checkpoint/resume, and GIF gallery workflows.
 - [`docs/scene_list.md`](docs/scene_list.md): all 24 scene codes, benchmark task definitions, cached point editing, and overview rendering.
 - [`docs/scene_files_and_interfaces.md`](docs/scene_files_and_interfaces.md): runtime scene codes, environment parameters, side channels, and spawn/target mapping.
 - [`docs/astar_workflow.md`](docs/astar_workflow.md): A* commands plus the shared baseline extension interface.
@@ -297,6 +304,7 @@ Useful environment variables:
 ```bash
 MAX_STEPS=70
 DYNAMIC_STEP_BUDGET=1
+RESUME=0 # Set to 1 to continue existing API LLM runs with the same settings.
 BASELINE=llm
 MODEL_ID=google/gemini-3-flash-preview
 DYNAMIC_OBJECTS=moving
@@ -393,6 +401,31 @@ scene1 scene2 ... scene24
 ```
 
 See [`docs/scene_list.md`](docs/scene_list.md) for the full mapping.
+
+### Resume interrupted API runs
+
+API LLM runs save checkpoints automatically. Activate the Python environment and
+load the original provider key, then use the existing per-task output directory
+(include its `seed<N>` subdirectory for grid outputs):
+
+```bash
+RUN_DIR="outputs/scene1/point1/gemini-3-flash-preview"
+python -m nav.scripts.resume_benchmark "$RUN_DIR" --dry-run
+python -m nav.scripts.resume_benchmark "$RUN_DIR"
+```
+
+For a batch, add `--resume` to the original LLM grid command, or set `RESUME=1`
+on the original shell-wrapper command. Keep the original settings and output
+root. Completed tasks are skipped; partial tasks resume, and unstarted tasks run
+normally. Existing checkpoints/actions are protected against accidental overwrite.
+
+Resume restores agent position/yaw, step count, original step budget and recent
+visual/action history, reusing any durably saved pending reply. Bounded runs keep
+their original persistent API counter; resuming does not grant new calls.
+
+This is not a full Unity snapshot: moving obstacles and simulation state restart.
+See the [resume guide](docs/run_benchmark.md#resume-an-interrupted-llm-episode)
+for requirements, legacy-log recovery, and limitations.
 
 <a id="astar"></a>
 ## 🧭 Run A*

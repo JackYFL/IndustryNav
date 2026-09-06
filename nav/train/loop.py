@@ -31,9 +31,14 @@ def set_seed(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
 
 
-def get_class_weights(class_counts: Dict[int, int]) -> torch.Tensor:
+def get_class_weights(
+    class_counts: Dict[int, int], power: float = 1.0
+) -> torch.Tensor:
+    if not 0.0 <= power <= 1.0:
+        raise ValueError("class_weight_power must be in [0, 1]")
     counts = np.maximum(np.array([class_counts[i] for i in range(4)], dtype=np.float32), 1.0)
-    return torch.tensor(counts.sum() / (counts * len(counts)), dtype=torch.float32)
+    inverse = counts.sum() / (counts * len(counts))
+    return torch.tensor(np.power(inverse, power), dtype=torch.float32)
 
 
 def _build_datasets(cfg: BCTrainConfig):
@@ -41,8 +46,12 @@ def _build_datasets(cfg: BCTrainConfig):
         common = dict(
             data_root=cfg.data_root, seq_len=cfg.seq_len, img_size=cfg.img_size,
             split_ratios=cfg.split_ratios, seed=cfg.seed, goal_rep=cfg.goal_rep,
+            goal_distance_scale_m=cfg.goal_distance_scale_m,
+            horizontal_flip_prob=cfg.horizontal_flip_prob,
             normalize_rgb=cfg.normalize_rgb, use_depth=cfg.use_depth, use_rgb=cfg.use_rgb,
             chunk_size=cfg.chunk_size,
+            action_target_offset=cfg.sequence_action_offset,
+            include_stop_targets=cfg.include_stop_targets,
         )
         train_ds = NavEpisodeSequenceDataset(split="train", **common)
         val_ds = NavEpisodeSequenceDataset(split="val", **common)
@@ -146,7 +155,11 @@ def train(cfg: BCTrainConfig) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = build_policy(cfg, input_dim).to(device)
 
-    criterion = torch.nn.CrossEntropyLoss(weight=get_class_weights(train_ds.class_counts).to(device))
+    criterion = torch.nn.CrossEntropyLoss(
+        weight=get_class_weights(
+            train_ds.class_counts, cfg.class_weight_power
+        ).to(device)
+    )
     optimizer = _make_optimizer(model, cfg)
 
     best_acc = 0.0

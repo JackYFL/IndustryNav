@@ -63,7 +63,7 @@ def _set_world_spawn_parameters(env_params, args) -> bool:
     if init_world_x is None or init_world_z is None:
         return False
     env_params.set_float_parameter("spawn_x", float(init_world_x))
-    env_params.set_float_parameter("spawn_y", 0.5)
+    env_params.set_float_parameter("spawn_y", float(getattr(args, "_resume_world_y", 0.5)))
     env_params.set_float_parameter("spawn_z", float(init_world_z))
     env_params.set_float_parameter(
         "spawn_rot", float(getattr(args, "init_curr_direction", 0.0))

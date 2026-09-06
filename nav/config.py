@@ -32,6 +32,20 @@ ACTION_SPACE_ANNOTATION: Dict[str, float] = {
     "stop": 0,
 }
 
+# Point-goal policies use one Unity simulation step per decision.  The Unity
+# controller applies a factor of roughly two to the look signal, so 11.25
+# produces an observed yaw delta of about 22.5 degrees.  Keeping this separate
+# avoids changing the established LLM and benchmark action protocols.
+ACTION_SPACE_POINTGOAL: Dict[str, float] = {
+    # One simulation step moves about 0.75 m.  The shorter stride is needed by
+    # an atomic turn-then-forward policy to negotiate warehouse corners without
+    # the smooth A* controller's simultaneous steering.
+    "forward": 7.5,
+    "turn right": 11.25,
+    "turn left": -11.25,
+    "stop": 0,
+}
+
 
 # Unity runtime
 
@@ -234,6 +248,8 @@ RESULTS_CSV_FIELDS: List[str] = [
     "distance_world",
     "stop_reason",
     "steps_taken",
+    "resume_count",
+    "scene_state_restored",
     "frame_sleep",
     "modalities",
     "sim_steps_per_decision",
@@ -451,7 +467,19 @@ class BCTrainConfig:
     seq_len: int = 8
     num_layers: int = 2
     goal_rep: str = "cartesian"  # cartesian | polar
+    # Zero preserves legacy raw goal coordinates. A positive value scales
+    # distance/cartesian coordinates and maps polar angles from [-pi, pi] to
+    # [-1, 1].
+    goal_distance_scale_m: float = 0.0
+    horizontal_flip_prob: float = 0.0
+    # 1.0 is full inverse-frequency weighting; 0.5 is a softer square-root
+    # correction that preserves more emphasis on the dominant forward class.
+    class_weight_power: float = 1.0
     chunk_size: int = 1
+    # Observation and expert action are recorded at the same decision state.
+    # Set to 1 only for explicitly legacy-shifted datasets.
+    sequence_action_offset: int = 0
+    include_stop_targets: bool = True
 
 
 BC_BASE_PRESETS: Dict[str, BCTrainConfig] = {

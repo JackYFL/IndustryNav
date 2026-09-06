@@ -49,6 +49,7 @@ class BCNavController:
         self.config = cfg
 
         self.goal_rep = str(cfg.get("goal_rep", "cartesian"))
+        self.goal_distance_scale_m = float(cfg.get("goal_distance_scale_m", 0.0))
         self.use_depth = bool(cfg.get("use_depth", True))
         self.use_rgb = bool(cfg.get("use_rgb", False))
         self.img_size = int(cfg.get("img_size", 256))
@@ -65,8 +66,10 @@ class BCNavController:
             num_layers=self.num_layers,
             rgb_backbone=str(cfg.get("rgb_backbone", "resnet50")),
             depth_backbone=str(cfg.get("depth_backbone", "resnet50")),
-            pretrained_rgb=bool(cfg.get("pretrained_rgb", False)),
-            pretrained_depth=bool(cfg.get("pretrained_depth", False)),
+            # The checkpoint immediately replaces every parameter; avoid a
+            # redundant network/cache dependency during deployment.
+            pretrained_rgb=False,
+            pretrained_depth=False,
             half_width=bool(cfg.get("half_width", True)),
             img_size=self.img_size,
             chunk_size=self.chunk_size,
@@ -123,7 +126,15 @@ class BCNavController:
         rel_x = cos_yaw * dx + sin_yaw * dz
         rel_z = -sin_yaw * dx + cos_yaw * dz
         if self.goal_rep == "polar":
-            return np.array([math.sqrt(rel_x * rel_x + rel_z * rel_z), math.atan2(rel_z, rel_x)], dtype=np.float32)
+            distance = math.sqrt(rel_x * rel_x + rel_z * rel_z)
+            angle = math.atan2(rel_z, rel_x)
+            if self.goal_distance_scale_m > 0.0:
+                distance /= self.goal_distance_scale_m
+                angle /= math.pi
+            return np.array([distance, angle], dtype=np.float32)
+        if self.goal_distance_scale_m > 0.0:
+            rel_x /= self.goal_distance_scale_m
+            rel_z /= self.goal_distance_scale_m
         return np.array([rel_x, rel_z], dtype=np.float32)
 
     def reset(self) -> None:

@@ -60,6 +60,7 @@ tensorboard/
 analysis/
 tests/
 clients/
+datasets/
 
 # Generated result artifacts
 results.csv

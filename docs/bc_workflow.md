@@ -189,6 +189,18 @@ use_rgb=False
 
 That means inference uses depth observations and a rolling goal/action history. If you train a checkpoint with `use_rgb=True`, make sure inference saves/provides ego RGB observations as well.
 
+For the A* point-goal dataset, the improved training wrapper uses a one-step
+action head, ImageNet initialization for the one-channel depth ResNet, normalized
+polar goals, left/right mirror augmentation, and softened class balancing:
+
+```bash
+bash shs/run_improved_pointgoal_train.sh
+```
+
+Set `TRAIN_EPOCHS`, `TRAIN_OUTPUT`, or `EVAL_OUTPUT` to override its defaults.
+The wrapper validates the exported expert dataset before training and evaluates
+one episode from each held-out scene after training.
+
 ## 3. Inference
 
 BC inference uses the same benchmark runner as the other baselines:

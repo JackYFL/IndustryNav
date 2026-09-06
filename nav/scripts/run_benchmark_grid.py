@@ -26,8 +26,8 @@ Design choices:
     ``_``-prefixed roots) so the history sweep never pollutes the main leaderboard.
   * Aggregates land under analysis/grid_runs/<timestamp>/{runs,failures}.csv;
     outputs/ stays per-cell telemetry only.
-  * --resume skips cells whose results.csv already has a row, so re-launching
-    after a partial completion is safe.
+  * --resume skips normally completed cells and restores partial LLM episodes
+    from checkpoints (or compatible legacy logs). Retries reuse checkpoints.
   * --skip_existing_dirs skips every cell whose output directory already
     exists, including interrupted/partial runs.
   * --max_retries N retries a failed cell up to N times before recording a
@@ -68,6 +68,7 @@ from nav.harness.navigation_protocol import (
     NAVIGATION_PROTOCOL_VERSION, check_navigation_run_config, navigation_run_config,
     resolve_navigation_sensors,
 )
+from nav.harness.checkpoint import CHECKPOINT_NAME
 from nav.utils import load_prompt_template
 from nav.harness.lighting import (
     add_lighting_args,
@@ -356,10 +357,13 @@ def run_cell(args_dict: dict) -> dict:
         "--light_random_seed", str(args_dict["light_random_seed"]),
         "--light_fixed_exposure", str(args_dict["light_fixed_exposure"]),
     ]
+    resume_cell = bool(args_dict.get("resume")) or (cell.frame_save_dir / CHECKPOINT_NAME).exists()
+    if resume_cell:
+        cmd += ["--resume"]
 
     started = time.time()
     try:
-        with open(log_path, "w") as logf:
+        with open(log_path, "a" if resume_cell else "w") as logf:
             logf.write("# command: " + " ".join(shlex.quote(c) for c in cmd) + "\n")
             logf.flush()
             proc = subprocess.run(
@@ -579,7 +583,7 @@ def parse_args():
     p.add_argument("--max_retries", type=int, default=2,
                    help="Retry a failed cell this many times before logging it to failures.csv.")
     p.add_argument("--resume", action="store_true",
-                   help="Skip normally completed cells with matching run_config.json.")
+                   help="Skip normally completed cells; resume partial cells from checkpoints or compatible legacy logs without resetting API counters.")
     p.add_argument(
         "--skip_existing_dirs",
         action="store_true",
@@ -625,6 +629,8 @@ def resolve_file_name(arg_file_name: str) -> str:
 
 def main():
     args = parse_args()
+    if args.resume and args.skip_existing_dirs:
+        raise SystemExit("--resume and --skip_existing_dirs are mutually exclusive.")
     try:
         motion = resolve_motion_speed_config(args)
         lighting = resolve_lighting_config(args)
@@ -752,6 +758,7 @@ def main():
                     run_cell,
                     {
                         "cell": asdict(c),
+                        "resume": args.resume,
                         "file_name": file_name,
                         "python_bin": args.python_bin,
                         "llm_provider": args.llm_provider,

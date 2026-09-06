@@ -30,6 +30,7 @@ from nav.config import (
     ACTIONS_CSV_FIELDS,
     ACTION_SPACE_AGENTS,
     ACTION_SPACE_ANNOTATION,
+    ACTION_SPACE_POINTGOAL,
     ASTAR_DEFAULTS,
     BEHAVIOR_NAME,
     DEFAULT_REACH_DISTANCE_M,
@@ -43,6 +44,10 @@ from nav.config import (
     resolve_scene_all_path,
 )
 from nav.harness.env_setup import EnvSetupError, setup_and_prime
+from nav.harness.checkpoint import (
+    CHECKPOINT_NAME, CheckpointStore, RunLock, pose_from_steps, validate_restored_pose,
+)
+from nav.eval.io import read_latest_results_row
 from nav.harness.lighting import add_lighting_args, lighting_result_fields
 from nav.harness.motion import add_motion_speed_args, motion_speed_result_fields
 from nav.harness.coordinates import (
@@ -89,6 +94,10 @@ def parse_args():
     p.add_argument("--max_steps", type=int, default=70, help="0 = run indefinitely.")
 
     p.add_argument("--frame_save_dir", type=str, default="./outputs/run")
+    p.add_argument("--resume", action="store_true",
+                   help="Continue an interrupted LLM episode from its checkpoint; preserve completed actions and API counters.")
+    p.add_argument("--checkpoint", action=argparse.BooleanOptionalAction, default=True,
+                   help="Persist LLM navigation state after each action (default on). Other baselines are unchanged.")
     # Default to a per-run file under frame_save_dir to avoid touching the
     # historical experiment_results_v6.csv at repo root. Pass an explicit
     # path to override.
@@ -216,6 +225,11 @@ def parse_args():
                    default="ckpts/nav_bc_resnet50_causal_transformer_depth_aug_remove_stop_seq_32_bs4_num_layers3/best.pt")
     p.add_argument("--bc_device", type=str, default="auto")
     p.add_argument("--bc_seq_len", type=int, default=0)
+    p.add_argument(
+        "--bc_pointgoal_actions",
+        action="store_true",
+        help="Execute BC actions with the Point-Goal control contract (one step, observed +/-22.5 degree turns).",
+    )
 
     # A* baseline (no LLM, no API key).
     p.add_argument(
@@ -293,6 +307,15 @@ def parse_args():
                    help="Dump A* walkable-grid / path overlays per step.")
     p.add_argument("--astar_debug_dir", type=str, default="",
                    help="Where to write A* debug images (default: <frame_save_dir>/astar_debug).")
+    p.add_argument(
+        "--astar_policy_actions",
+        action="store_true",
+        help=(
+            "Constrain A* to the learned policy's atomic action space: "
+            "forward=7.5, observed turn=+/-22.5 degrees, stop. Intended for BC data "
+            "collection; ordinary A* benchmarks retain smooth combined controls."
+        ),
+    )
 
     return p.parse_args()
 
@@ -598,9 +621,17 @@ def maybe_calibrate_projector_from_raw_marker(
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
-def action_space_for_baseline(baseline: str) -> dict:
+def action_space_for_baseline(
+    baseline: str,
+    astar_policy_actions: bool = False,
+    bc_pointgoal_actions: bool = False,
+) -> dict:
     """Use agent controls for learned/LLM agents; keep A* on annotation controls."""
-    if baseline == "astar":
+    if (baseline == "astar" and astar_policy_actions) or (
+        baseline == "bc" and bc_pointgoal_actions
+    ):
+        return ACTION_SPACE_POINTGOAL
+    if baseline == "astar" and not astar_policy_actions:
         return ACTION_SPACE_ANNOTATION
     return ACTION_SPACE_AGENTS
 
@@ -676,6 +707,8 @@ def resolve_dynamic_step_budget(baseline, requested):
 
 def main():
     args = parse_args()
+    if args.resume and (args.baseline != "llm" or not args.checkpoint):
+        raise SystemExit("--resume currently requires --baseline llm and checkpointing enabled.")
     if args.prompt_file is None:
         args.prompt_file = DEFAULT_PROMPT_VISION if args.vision_input else DEFAULT_PROMPT_NOVISION
     if args.sim_steps_per_decision <= 0:
@@ -709,12 +742,47 @@ def main():
     # invocation works across dev machines without a per-host wrapper hack.
     args.file_name = resolve_scene_all_path(args.file_name)
     prompt_template = load_prompt_template(args.prompt_file) if args.baseline == "llm" else ""
+    checkpoint_store = None
+    restored = None
+    run_lock = None
+    resume_archive = None
     if args.baseline == "llm":
         try:
+            folder = Path(args.frame_save_dir)
+            folder.mkdir(parents=True, exist_ok=True)
+            run_lock = RunLock(folder)
+            run_config = navigation_run_config(args, prompt_template)
             prepare_navigation_run(
-                Path(args.frame_save_dir), navigation_run_config(args, prompt_template),
+                folder, run_config,
             )
-        except ValueError as exc:
+            if args.checkpoint:
+                if args.results_csv.strip() and Path(args.results_csv).resolve() != (folder / "results.csv").resolve():
+                    raise ValueError("Checkpointed LLM runs require per-run results.csv; use --no-checkpoint for a custom aggregate file.")
+                checkpoint_store = CheckpointStore(
+                    folder, run_config, args.actions_csv.strip() or folder / "llm_actions.csv",
+                    folder / "agent_qa.txt",
+                )
+                if args.resume and read_latest_results_row(folder / "results.csv").get("stop_reason") in {"max_steps", "reached_vicinity"}:
+                    print(f"[resume] Already complete; no Unity launch or model call: {folder}")
+                    run_lock.close()
+                    return
+                if args.resume:
+                    if checkpoint_store.path.exists():
+                        restored = checkpoint_store.load()
+                    elif (folder / "llm_actions.csv").exists():
+                        restored = checkpoint_store.recover_legacy()
+                    elif any(folder.glob("llm_*/*")):
+                        raise ValueError("Existing frames lack a recoverable checkpoint/action log; choose a fresh output directory.")
+                    if restored:
+                        requested_modalities = {m.strip() for m in args.modalities.split(",") if m.strip()} | {"minimap"}
+                        if restored.get("modalities") and sorted(requested_modalities) != restored["modalities"]:
+                            raise ValueError("Resume must retain the checkpoint's saved modalities.")
+                        resume_archive = checkpoint_store.restore_logs(restored)
+                elif checkpoint_store.path.exists() or (folder / "llm_actions.csv").exists():
+                    raise ValueError("Existing LLM run would be overwritten. Use --resume or choose a fresh output directory.")
+        except (OSError, ValueError) as exc:
+            if run_lock:
+                run_lock.close()
             raise SystemExit(str(exc)) from exc
     logger = logger_config(args.frame_save_dir)
 
@@ -726,13 +794,20 @@ def main():
     assert enabled_modalities.issubset({"ego", "minimap", "depth", "his"}), \
         "modalities must be subset of {ego,minimap,depth,his}"
 
-    action_space = action_space_for_baseline(args.baseline)
-    allowed_actions = get_allowed_actions(action_space)
-    logger.info(
-        "Action space: "
-        f"{'ACTION_SPACE_ANNOTATION' if action_space is ACTION_SPACE_ANNOTATION else 'ACTION_SPACE_AGENTS'} "
-        f"{action_space}"
+    action_space = action_space_for_baseline(
+        args.baseline,
+        astar_policy_actions=args.astar_policy_actions,
+        bc_pointgoal_actions=args.bc_pointgoal_actions,
     )
+    allowed_actions = get_allowed_actions(action_space)
+    action_space_name = (
+        "ACTION_SPACE_ANNOTATION"
+        if action_space is ACTION_SPACE_ANNOTATION
+        else "ACTION_SPACE_POINTGOAL"
+        if action_space is ACTION_SPACE_POINTGOAL
+        else "ACTION_SPACE_AGENTS"
+    )
+    logger.info(f"Action space: {action_space_name} {action_space}")
     if args.baseline == "llm":
         logger.info(f"LLM provider: {args.llm_provider} | model={args.model_id}")
         logger.info(
@@ -741,6 +816,12 @@ def main():
             Path(args.frame_save_dir) / "run_config.json",
         )
     history_deque = deque(maxlen=args.history_size if args.history_size > 0 else None)
+    if restored:
+        history_deque.extend(restored["history"])
+        logger.warning(
+            "Resuming after %s committed actions (%s); dynamic objects restart, not a full Unity snapshot. Archive: %s",
+            restored["step_count"], restored.get("recovery_source", "checkpoint"), resume_archive,
+        )
 
     astar_planner = None
     if args.baseline == "astar":
@@ -764,6 +845,7 @@ def main():
             dynamic_replan_confirm_steps=args.astar_dynamic_replan_confirm_steps,
             pixel_scale=pixel_scale,
             minimap_has_baked_markers=astar_baked_markers,
+            policy_actions=args.astar_policy_actions,
             debug_viz=args.astar_debug_viz,
             debug_dir=astar_debug_dir,
         )
@@ -782,6 +864,7 @@ def main():
             f"{args.astar_dynamic_replan_lookahead_m:g} | "
             f"dynamic_replan_confirm_steps="
             f"{args.astar_dynamic_replan_confirm_steps} | "
+            f"policy_actions={args.astar_policy_actions} | "
             f"pixel_scale={pixel_scale:.4f} | "
             f"debug_viz={args.astar_debug_viz} | debug_dir={astar_debug_dir}"
         )
@@ -800,15 +883,36 @@ def main():
         )
 
     # ---- Launch Unity + prime spawn/target (see nav.harness.env_setup) ----
+    spawn_args = args
+    if restored:
+        spawn_args = argparse.Namespace(**vars(args))
+        spawn_args.init_world_x = restored["pose"]["x"]
+        spawn_args.init_world_z = restored["pose"]["z"]
+        spawn_args.init_curr_direction = restored["pose"]["yaw"]
+        spawn_args._resume_world_y = restored["pose"]["y"]
     try:
-        primed = setup_and_prime(args, logger)
+        primed = setup_and_prime(spawn_args, logger)
     except EnvSetupError as e:
         logger.error(str(e))
+        if run_lock:
+            run_lock.close()
         sys.exit(2)
     env = primed.env
     init_world_x, init_world_z = primed.init_world or (None, None)
     target_world_x, target_world_z = primed.target_world or (None, None)
     target_xy = primed.target_xy
+    if restored:
+        try:
+            validate_restored_pose(
+                restored["pose"], pose_from_steps(env.get_steps(BEHAVIOR_NAME)[0]),
+                restored["target_world"], primed.target_world,
+            )
+        except (ValueError, IndexError, TypeError) as exc:
+            env.close()
+            run_lock.close()
+            raise SystemExit(f"Resume pose validation failed before any model call: {exc}") from exc
+        init_world_x, init_world_z = restored["init_world"]
+        target_world_x, target_world_z = restored["target_world"]
     logger.info(
         f"Minimap runtime space: {minimap_size[0]}x{minimap_size[1]} | "
         f"reach_m={args.reach_m:g}"
@@ -853,6 +957,13 @@ def main():
         primed.target_sc.last_target_pixel,
         primed.target_sc.last_target_world,
     )
+    if restored:
+        step_budget = restored["step_budget"]
+        initial_step_budget = restored["initial_step_budget"]
+        step_budget_mode = restored["step_budget_mode"]
+        if restored.get("minimap_projector") is not None:
+            minimap_projector = restored["minimap_projector"]
+        logger.info("Restored original budget: %s total, %s actions already committed", step_budget, restored["step_count"])
 
     def astar_point_to_world(point):
         return visual_to_world_coords(
@@ -869,9 +980,15 @@ def main():
             continue
         if mod in enabled_modalities:
             subdirs[mod] = os.path.join(args.frame_save_dir, f"{args.baseline}_{('fp' if mod=='ego' else mod)}")
-            clear_and_reset_dir(subdirs[mod])
+            if restored:
+                os.makedirs(subdirs[mod], exist_ok=True)
+            else:
+                clear_and_reset_dir(subdirs[mod])
     subdir_ann = os.path.join(args.frame_save_dir, f"{args.baseline}_minimap_target")
-    clear_and_reset_dir(subdir_ann)
+    if restored:
+        os.makedirs(subdir_ann, exist_ok=True)
+    else:
+        clear_and_reset_dir(subdir_ann)
 
     actions_csv_path = (
         args.actions_csv.strip()
@@ -879,14 +996,23 @@ def main():
         else os.path.join(args.frame_save_dir, f"{args.baseline}_actions.csv")
     )
     os.makedirs(os.path.dirname(os.path.abspath(actions_csv_path)), exist_ok=True)
-    _action_csv_file = open(actions_csv_path, "w", newline="")
+    action_log = []
+    if restored:
+        with open(actions_csv_path, newline="") as existing:
+            reader = csv.DictReader(existing)
+            action_log = list(reader)
+            if reader.fieldnames != ACTIONS_CSV_FIELDS:
+                env.close()
+                run_lock.close()
+                raise SystemExit("Resume action log schema does not match this runner.")
+    _action_csv_file = open(actions_csv_path, "a" if restored else "w", newline="")
     _action_csv_writer = csv.DictWriter(
         _action_csv_file,
         fieldnames=ACTIONS_CSV_FIELDS,
     )
-    _action_csv_writer.writeheader()
+    if not restored:
+        _action_csv_writer.writeheader()
     _action_csv_file.flush()
-    action_log = []
 
     astar_paths_path = os.path.join(args.frame_save_dir, "astar_paths.jsonl")
     _astar_paths_file = (
@@ -896,19 +1022,60 @@ def main():
     )
 
     agent_qa_path = os.path.join(args.frame_save_dir, "agent_qa.txt")
-    _qa_file = open(agent_qa_path, "w", encoding="utf-8")
+    _qa_file = open(agent_qa_path, "a" if restored else "w", encoding="utf-8")
 
     # ---- Main async loop (derived from run_async.py) ----
     SIM_STEPS_PER_DECISION = max(1, int(args.sim_steps_per_decision))
     decision_thread = None
     decision_result = {}
     last_prompt = ""
-    detected_init_xy = None
+    detected_init_xy = restored.get("detected_init_xy") if restored else None
     last_curr_xy = None
-    last_world_xz = None
-    last_saved_step = None
-    step_count = 0
+    last_world_xz = (restored["pose"]["x"], restored["pose"]["z"]) if restored else None
+    last_saved_step = restored["step_count"] if restored and restored["phase"] == "decision_ready" else None
+    step_count = restored["step_count"] if restored else 0
     stop_reason = None
+    restored_pending = restored.get("pending_decision") if restored and restored["phase"] == "decision_ready" else None
+    resume_count = int(restored.get("resume_count", 0)) + 1 if restored else 0
+    latest_checkpoint = restored
+    if restored:
+        with open(Path(args.frame_save_dir) / "resume_events.jsonl", "a", encoding="utf-8") as stream:
+            stream.write(json.dumps({
+                "timestamp": datetime.datetime.now().isoformat(), "resume_count": resume_count,
+                "committed_steps": step_count, "step_budget": step_budget,
+                "cached_decision": bool(restored_pending), "pose": restored["pose"],
+                "scene_state_restored": False, "dynamic_objects_reinitialized": args.dynamic_objects == "moving",
+                "recovery_source": restored.get("recovery_source", "checkpoint"), "archive": str(resume_archive),
+            }) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+
+    def save_checkpoint(pose, phase="ready", pending=None):
+        nonlocal latest_checkpoint
+        if checkpoint_store is None:
+            return
+        pending_data = None if pending is None else {
+            key: pending.get(key, {} if key == "history_entry" else "")
+            for key in ("action", "reasoning", "observation", "prompt", "history_entry")
+        }
+        latest_checkpoint = checkpoint_store.save({
+            "phase": phase, "step_count": step_count, "pose": pose,
+            "step_budget": int(step_budget), "initial_step_budget": int(initial_step_budget),
+            "step_budget_mode": step_budget_mode, "init_world": [init_world_x, init_world_z],
+            "target_world": [target_world_x, target_world_z], "history": list(history_deque),
+            "minimap_projector": minimap_projector, "detected_init_xy": detected_init_xy,
+            "pending_decision": pending_data, "resume_count": resume_count,
+            "modalities": sorted(enabled_modalities),
+            "stop_reason": stop_reason,
+        }, streams=(_action_csv_file, _qa_file))
+
+    def execute_with_checkpoint(baseline, payload, result, committed_steps):
+        execute_decision(baseline, payload, result)
+        if checkpoint_store is not None and not result.get("error"):
+            try:
+                checkpoint_store.save_reply(committed_steps, result)
+            except Exception as exc:
+                result.update(error=True, reasoning=f"Could not persist model reply: {exc}")
 
     try:
         while True:
@@ -1050,16 +1217,25 @@ def main():
                 last_saved_step = step_count
 
             # ----- Async decision state machine -----
-            if decision_thread is not None and not decision_thread.is_alive():
-                decision_thread.join()
-                decision_thread = None
-                step_count += 1
+            if restored_pending is not None or (decision_thread is not None and not decision_thread.is_alive()):
+                if restored_pending is not None:
+                    decision_result = restored_pending
+                    restored_pending = None
+                    logger.info("Reusing saved model decision for step %s; no new provider call", step_count + 1)
+                else:
+                    decision_thread.join()
+                    decision_thread = None
                 chosen_action = decision_result.get("action", "stop")
                 reasoning = decision_result.get("reasoning", "")
                 if decision_result.get("error"):
                     stop_reason = "decision_error"
-                    logger.error(f"Decision error at step {step_count}: {reasoning}")
+                    logger.error(f"Decision error at step {step_count + 1}: {reasoning}")
                     break
+                # Commit the reply before logging/applying the action. If Unity
+                # dies in the middle of its simulation steps, replay from this
+                # pre-action pose instead of paying for the same reply again.
+                save_checkpoint(pose_from_steps(decision_steps), "decision_ready", decision_result)
+                step_count += 1
                 if args.baseline == "astar" and _astar_paths_file is not None:
                     path_record = {
                         "step": int(decision_result.get("astar_step", step_count - 1)),
@@ -1256,10 +1432,11 @@ def main():
                         step_count += 1
                         continuous_actions = action2signal(chosen_action, action_space)
                     else:
+                        save_checkpoint(pose_from_steps(decision_steps))
                         decision_result = {"finished": False}
                         decision_thread = threading.Thread(
-                            target=execute_decision,
-                            args=(args.baseline, payload, decision_result),
+                            target=execute_with_checkpoint,
+                            args=(args.baseline, payload, decision_result, step_count),
                             daemon=True,
                         )
                         decision_thread.start()
@@ -1328,6 +1505,11 @@ def main():
             for _ in range(SIM_STEPS_PER_DECISION):
                 env.step()
 
+            if checkpoint_store is not None:
+                post_pose = pose_from_steps(env.get_steps(BEHAVIOR_NAME)[0])
+                last_world_xz = (post_pose["x"], post_pose["z"])
+                save_checkpoint(post_pose)
+
             if stop_reason in {"reached_vicinity", "astar_stop"} and chosen_action == "stop":
                 logger.info(f"[Step:{step_count}] {stop_reason}. Stopping.")
                 break
@@ -1383,6 +1565,8 @@ def main():
                 "distance_world": distance_world,
                 "stop_reason": stop_reason or "loop_end",
                 "steps_taken": step_count,
+                "resume_count": resume_count,
+                "scene_state_restored": False if resume_count else "",
                 "frame_sleep": float(args.frame_sleep),
                 "modalities": ",".join(sorted(enabled_modalities)),
                 "sim_steps_per_decision": int(args.sim_steps_per_decision),
@@ -1409,6 +1593,8 @@ def main():
                 else os.path.join(args.frame_save_dir, "results.csv")
             )
             append_results_csv(results_csv_path, result)
+            if checkpoint_store is not None and latest_checkpoint is not None and stop_reason in {"max_steps", "reached_vicinity"}:
+                save_checkpoint(latest_checkpoint["pose"], phase="completed")
             logger.info(f"Results appended to: {os.path.abspath(results_csv_path)}")
         except Exception:
             logger.exception("Failed to write results.csv")
@@ -1420,6 +1606,8 @@ def main():
         if _astar_paths_file is not None:
             _astar_paths_file.close()
         _qa_file.close()
+        if run_lock:
+            run_lock.close()
         if action_log:
             logger.info(f"Actions saved to: {os.path.abspath(actions_csv_path)}")
         if _astar_paths_file is not None:

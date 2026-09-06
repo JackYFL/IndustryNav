@@ -18,9 +18,11 @@ from nav.scripts.export_llm_gallery import (
     TRAJECTORY_POINT_RADIUS_CANONICAL,
     WARNING_COLOR,
     add_trajectory,
+    allocate_gallery_gif,
     event_points,
     gallery_html,
     main,
+    pending_gallery_runs,
     rotation_step_count,
     run_identity,
     scale_trajectory_points,
@@ -177,6 +179,58 @@ class TrajectoryScalingTest(unittest.TestCase):
             {"action": "malformed", "look": "not-a-number"},
         ]
         self.assertEqual(rotation_step_count(rows), 3)
+
+    def test_append_skips_existing_and_missing_results(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            old, new, partial, empty = [root / name for name in ("old", "new", "partial", "empty")]
+            for folder in (old, new, partial, empty):
+                folder.mkdir()
+            (new / "results.csv").write_text("stop_reason\nmax_steps\n")
+            (empty / "results.csv").write_text("stop_reason\n")
+            existing = [{"run_dir": str(old)}]
+            pending, skipped = pending_gallery_runs([old, new, partial, empty], existing, True)
+            self.assertEqual(pending, [new])
+            self.assertEqual(len(skipped), 3)
+            self.assertEqual(existing, [{"run_dir": str(old)}])
+
+    def test_normal_only_rejects_provider_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            reached, exhausted, failed, active = [
+                root / name for name in ("reached", "exhausted", "failed", "active")
+            ]
+            for folder in (reached, exhausted, failed, active):
+                folder.mkdir()
+            (reached / "results.csv").write_text("stop_reason\nreached_vicinity\n")
+            (exhausted / "results.csv").write_text("stop_reason\nmax_steps\n")
+            (failed / "results.csv").write_text("stop_reason\ndecision_error\n")
+            pending, skipped = pending_gallery_runs(
+                [reached, exhausted, failed, active], [], True, normal_only=True,
+            )
+            self.assertEqual(pending, [reached, exhausted])
+            self.assertEqual({folder for folder, _ in skipped}, {failed, active})
+
+    def test_append_never_overwrites_an_existing_gif(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            gifs = Path(tmpdir)
+            run = Path("outputs/scene1/point1/gemini-3.8-flash/seed0")
+            reserved = set()
+            existing = allocate_gallery_gif(run, gifs, reserved, qualified=True, append=True)
+            Image.new("RGB", (2, 2)).save(existing)
+            original = existing.read_bytes()
+            new = allocate_gallery_gif(run, gifs, set(), qualified=True, append=True)
+            self.assertNotEqual(existing, new)
+            self.assertEqual(existing.read_bytes(), original)
+            self.assertIn("gemini-3.8-flash", new.name)
+
+    def test_gif_filenames_distinguish_seeds(self) -> None:
+        reserved = set()
+        paths = [allocate_gallery_gif(
+            Path(f"outputs/scene1/point1/model/seed{seed}"), Path("gifs"), reserved,
+            qualified=True, append=True,
+        ) for seed in (0, 1)]
+        self.assertNotEqual(paths[0], paths[1])
 
 
 if __name__ == "__main__":

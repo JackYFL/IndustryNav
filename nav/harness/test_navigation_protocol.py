@@ -112,6 +112,21 @@ class NavigationPromptTest(unittest.TestCase):
 
 
 class NavigationConfigTest(unittest.TestCase):
+    def test_openai_transport_options_are_recorded_without_credentials(self):
+        with patch.dict(os.environ, {
+            "OPENAI_API_KEY": "secret-not-for-manifest",
+            "OPENAI_MAX_REQUEST_ATTEMPTS": "3",
+            "OPENAI_MIN_REQUEST_INTERVAL_SEC": "1",
+            "OPENAI_REQUEST_COUNTER_FILE": "/tmp/private-counter.sqlite3",
+        }):
+            config = navigation_run_config(argparse.Namespace(llm_provider="openai"), "prompt")
+        self.assertEqual(config["openai_options"]["max_request_attempts"], 3)
+        self.assertEqual(config["openai_options"]["shared_min_request_interval_sec"], "1")
+        self.assertEqual(config["openai_options"]["reasoning_effort"], "provider_default")
+        self.assertFalse(config["openai_options"]["store"])
+        self.assertNotIn("secret-not-for-manifest", json.dumps(config))
+        self.assertNotIn("private-counter", json.dumps(config))
+
     def test_llm_defaults_and_other_baselines(self):
         for baseline, ego, minimap in (("llm", (320, 240), (431, 256)),
                                       ("astar", (512, 512), (862, 512)),
@@ -164,15 +179,18 @@ class NavigationConfigTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             argv = ["grid", "--models", "test/model", "--seeds", "0",
                     "--output_root", tmpdir, "--motion_random_seed", "12",
-                    "--light_random_seed", "15", "--light_fixed_exposure", "8"]
+                    "--light_random_seed", "15", "--light_fixed_exposure", "8", "--resume"]
             with patch("sys.argv", argv):
                 args = grid_runner.parse_args()
             resolve_navigation_sensors(args)
             cell = grid_runner.build_grid(["test/model"], ["scene1"], ["0"], [True], [5],
                                           ["point1"], output_root=tmpdir)[0]
             expected = grid_runner.cell_run_config(args, cell, "/tmp/fake-unity")
+            cell.frame_save_dir.mkdir(parents=True)
+            (cell.frame_save_dir / "run.log").write_text("previous attempt\n")
 
             def fake_subprocess(cmd, **kwargs):
+                self.assertIn("--resume", cmd)
                 with patch("sys.argv", ["cell", *cmd[3:]]):
                     actual_args = cell_runner.parse_args()
                 resolve_navigation_sensors(actual_args)
@@ -189,6 +207,7 @@ class NavigationConfigTest(unittest.TestCase):
             })
             self.assertTrue(result["ok"], result)
             run.assert_called_once()
+            self.assertTrue((cell.frame_save_dir / "run.log").read_text().startswith("previous attempt\n"))
 
     def test_matching_manifest_and_configuration_mismatch(self):
         with tempfile.TemporaryDirectory() as tmpdir:

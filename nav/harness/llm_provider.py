@@ -1,11 +1,8 @@
 """LLM provider client.
 
-Only OpenRouter is wired up today — it proxies OpenAI, Anthropic, and Google
-models behind a single API and a single key, so a separate provider per
-model vendor is unnecessary for now. If/when we add a direct-API path
-(e.g. anthropic-sdk for ``claude-...``), introduce a ``Protocol`` and have
-each backend implement it; for one concrete impl, a Protocol would be
-premature abstraction.
+Supports OpenRouter, direct OpenAI Responses, and direct Google Gemini.
+OpenRouter and OpenAI can share a persistent request budget across workers;
+every HTTP attempt (including retries) must reserve a slot before sending.
 
 Provider entry points:
 
@@ -115,23 +112,23 @@ def _error_blob(message: str) -> str:
     return json.dumps({"reasoning": message, "error": True})
 
 
-def _reserve_openrouter_request() -> bool:
+def _reserve_shared_request(provider: str) -> bool:
     """Reserve a request, optionally pacing all workers sharing the budget."""
-    raw_limit = os.getenv("OPENROUTER_MAX_REQUESTS", "").strip()
-    interval = float(os.getenv("OPENROUTER_MIN_REQUEST_INTERVAL_SEC", "0"))
+    raw_limit = os.getenv(f"{provider}_MAX_REQUESTS", "").strip()
+    interval = float(os.getenv(f"{provider}_MIN_REQUEST_INTERVAL_SEC", "0"))
     if not raw_limit:
         if interval > 0:
-            raise ValueError("OpenRouter shared pacing requires a shared request budget")
+            raise ValueError(f"{provider} shared pacing requires a shared request budget")
         return True
     limit = int(raw_limit)
     if limit <= 0:
         return False
 
-    counter_path = os.getenv("OPENROUTER_REQUEST_COUNTER_FILE", "").strip()
+    counter_path = os.getenv(f"{provider}_REQUEST_COUNTER_FILE", "").strip()
     if not counter_path:
         raise ValueError(
-            "OPENROUTER_REQUEST_COUNTER_FILE is required when "
-            "OPENROUTER_MAX_REQUESTS is set"
+            f"{provider}_REQUEST_COUNTER_FILE is required when "
+            f"{provider}_MAX_REQUESTS is set"
         )
     path = Path(counter_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -170,6 +167,14 @@ def _reserve_openrouter_request() -> bool:
                 return True
         # Release the SQLite write lock while other workers wait for a slot.
         time.sleep(min(delay, 30.0))
+
+
+def _reserve_openrouter_request() -> bool:
+    return _reserve_shared_request("OPENROUTER")
+
+
+def _reserve_openai_request() -> bool:
+    return _reserve_shared_request("OPENAI")
 
 
 def call_openrouter(
@@ -447,24 +452,32 @@ def call_openai(
 
     try:
         resp = None
-        for attempt in range(OPENAI_MAX_REQUEST_ATTEMPTS):
+        attempts = max(1, min(OPENAI_MAX_REQUEST_ATTEMPTS, int(
+            os.getenv("OPENAI_MAX_REQUEST_ATTEMPTS", str(OPENAI_MAX_REQUEST_ATTEMPTS))
+        )))
+        for attempt in range(attempts):
             try:
                 _wait_for_openai_request_interval(min_request_interval_sec)
+                if not _reserve_openai_request():
+                    return _error_blob(
+                        "API error: OpenAI request limit reached before sending"
+                    )
                 resp = requests.post(
                     OPENAI_RESPONSES_URL,
                     headers=headers,
                     json=payload,
                     timeout=LLM_REQUEST_TIMEOUT_SEC,
+                    allow_redirects=False,
                 )
             except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
-                if attempt + 1 >= OPENAI_MAX_REQUEST_ATTEMPTS:
+                if attempt + 1 >= attempts:
                     raise
                 time.sleep(2**attempt)
                 continue
 
             if (
                 resp.status_code in OPENAI_TRANSIENT_STATUS_CODES
-                and attempt + 1 < OPENAI_MAX_REQUEST_ATTEMPTS
+                and attempt + 1 < attempts
             ):
                 time.sleep(_openai_retry_delay(resp, attempt))
                 continue

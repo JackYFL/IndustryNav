@@ -69,6 +69,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument(
+        "--append", action="store_true",
+        help="Add new runs to the existing manifest and preserve all existing gallery entries/GIFs.",
+    )
+    parser.add_argument(
+        "--skip-incomplete", action="store_true",
+        help="Skip run directories with missing or empty results.csv; do not infer final outcomes.",
+    )
+    parser.add_argument(
+        "--normal-only", action="store_true",
+        help="Export only runs whose latest stop_reason is max_steps or reached_vicinity.",
+    )
+    parser.add_argument(
         "--html-only",
         action="store_true",
         help="Refresh the English HTML page from the existing manifest without regenerating GIFs.",
@@ -79,8 +91,10 @@ def parse_args() -> argparse.Namespace:
         help="Optional page title. Derived from the result models when omitted.",
     )
     args = parser.parse_args()
-    if args.html_only and (args.input_glob or args.limit):
-        parser.error("--html-only uses the existing manifest; do not combine it with --input-glob or --limit.")
+    if args.html_only and (
+        args.input_glob or args.limit or args.append or args.skip_incomplete or args.normal_only
+    ):
+        parser.error("--html-only uses the existing manifest; do not combine it with run-selection options.")
     return args
 
 
@@ -641,6 +655,50 @@ def write_gallery_page(output_dir: Path, items: list[dict], gallery_title: str =
     return index_path
 
 
+def pending_gallery_runs(
+    run_dirs: list[Path],
+    existing_items: list[dict],
+    skip_incomplete: bool,
+    normal_only: bool = False,
+):
+    known = {Path(item["run_dir"]).resolve() for item in existing_items}
+    pending, skipped = [], []
+    for run_dir in run_dirs:
+        if run_dir.resolve() in known:
+            skipped.append((run_dir, "already in gallery"))
+            continue
+        results_path = run_dir / "results.csv"
+        result_rows = load_csv_rows(results_path) if results_path.is_file() else []
+        if skip_incomplete and not result_rows:
+            skipped.append((run_dir, "missing or empty results.csv"))
+            continue
+        if normal_only and (
+            not result_rows
+            or result_rows[-1].get("stop_reason") not in {"max_steps", "reached_vicinity"}
+        ):
+            skipped.append((run_dir, "latest result did not end normally"))
+            continue
+        pending.append(run_dir)
+    return pending, skipped
+
+
+def allocate_gallery_gif(run_dir: Path, gifs_dir: Path, reserved: set[str], *, qualified: bool, append: bool) -> Path:
+    """Avoid collisions across models/seeds and never overwrite a GIF on append."""
+    scene, point, run_name = run_identity(run_dir)
+    stem = f"{scene}_{point}"
+    if qualified:
+        stem = f"{run_name}__{stem}"
+    if run_dir.name.startswith("seed"):
+        stem += f"__{run_dir.name}"
+    filename = f"{stem}.gif"
+    suffix = 2
+    while filename in reserved or (append and (gifs_dir / filename).exists()):
+        filename = f"{stem}__{suffix}.gif"
+        suffix += 1
+    reserved.add(filename)
+    return gifs_dir / filename
+
+
 def main() -> None:
     args = parse_args()
     output_dir = args.output_dir.resolve()
@@ -652,14 +710,25 @@ def main() -> None:
         return
     input_globs = args.input_glob or ["outputs/scene*/point*/gpt-5.6-sol/seed0"]
     run_dirs = discover_run_dirs(input_globs)
-    if args.limit > 0:
-        run_dirs = run_dirs[: args.limit]
     if not run_dirs:
         raise FileNotFoundError(f"No run directories matched {input_globs!r}")
 
+    manifest_path = output_dir / "manifest.json"
+    items = json.loads(manifest_path.read_text(encoding="utf-8")) if args.append and manifest_path.exists() else []
+    run_dirs, skipped = pending_gallery_runs(
+        run_dirs, items, args.skip_incomplete, args.normal_only,
+    )
+    for run_dir, reason in skipped:
+        print(f"Skipping {run_dir}: {reason}", flush=True)
+    if args.limit > 0:
+        run_dirs = run_dirs[: args.limit]
+    if not run_dirs:
+        print("No new eligible runs to export; the existing gallery is unchanged.")
+        return
+
     gifs_dir = output_dir / "gifs"
     gifs_dir.mkdir(parents=True, exist_ok=True)
-    items: list[dict] = []
+    reserved_gifs = {item["gif"] for item in items}
     pair_counts: dict[tuple[str, str], int] = {}
     for run_dir in run_dirs:
         scene, point, _ = run_identity(run_dir)
@@ -669,11 +738,12 @@ def main() -> None:
     with ProcessPoolExecutor(max_workers=workers) as executor:
         futures = {}
         for run_dir in run_dirs:
-            scene, point, run_name = run_identity(run_dir)
-            filename = f"{scene}_{point}.gif"
-            if pair_counts[(scene, point)] > 1:
-                filename = f"{run_name}__{filename}"
-            output_path = gifs_dir / filename
+            scene, point, _ = run_identity(run_dir)
+            output_path = allocate_gallery_gif(
+                run_dir, gifs_dir, reserved_gifs,
+                qualified=args.append or pair_counts[(scene, point)] > 1,
+                append=args.append,
+            )
             future = executor.submit(
                 export_run,
                 run_dir,

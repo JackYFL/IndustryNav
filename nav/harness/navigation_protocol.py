@@ -78,6 +78,14 @@ def navigation_run_config(args, prompt_template: str) -> dict:
             "min_request_interval_sec": os.getenv("OPENROUTER_MIN_REQUEST_INTERVAL_SEC", "0"),
             "max_request_attempts": os.getenv("OPENROUTER_MAX_REQUEST_ATTEMPTS", "1"),
         }
+    elif values["llm_provider"] == "openai":
+        config["openai_options"] = {
+            "api": "responses", "store": False,
+            "reasoning_effort": "provider_default",
+            "output_format": "prompt_json_contract",
+            "shared_min_request_interval_sec": os.getenv("OPENAI_MIN_REQUEST_INTERVAL_SEC", "0"),
+            "max_request_attempts": max(1, min(4, int(os.getenv("OPENAI_MAX_REQUEST_ATTEMPTS", "4")))),
+        }
     return config
 
 
@@ -91,7 +99,7 @@ def check_navigation_run_config(folder: Path, expected: dict) -> None:
             raise ValueError(f"Unreadable run configuration: {path}") from exc
         if saved == expected:
             return
-    elif not folder.exists() or not any(p.name != "run.log" for p in folder.iterdir()):
+    elif not folder.exists() or not any(p.name not in {"run.log", ".run.lock"} for p in folder.iterdir()):
         # The grid opens run.log before starting the cell process.
         return
     raise ValueError(

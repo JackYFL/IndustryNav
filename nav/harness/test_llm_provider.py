@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
@@ -13,6 +15,7 @@ import numpy as np
 import requests
 
 from nav.harness.llm_provider import (
+    _reserve_openai_request,
     _reserve_openrouter_request,
     call_gemini,
     call_openai,
@@ -251,6 +254,91 @@ class GeminiProviderTest(unittest.TestCase):
 
 
 class OpenAIProviderTest(unittest.TestCase):
+    @patch("nav.harness.llm_provider.time.sleep")
+    @patch("nav.harness.llm_provider.requests.post")
+    def test_every_retry_reserves_a_slot_and_stops_at_limit(self, post, sleep):
+        unavailable = Mock(status_code=503, headers={})
+        success = Mock(status_code=200, headers={})
+        success.json.return_value = {"output_text": '{"action":"forward"}'}
+        for failure in (unavailable, requests.Timeout("timeout"), requests.ConnectionError("offline")):
+            for limit in (1, 2):
+                with self.subTest(failure=type(failure).__name__, limit=limit), tempfile.TemporaryDirectory() as tmpdir:
+                    post.reset_mock()
+                    post.side_effect = [failure, success]
+                    counter = str(Path(tmpdir) / "requests.sqlite3")
+                    with patch.dict(os.environ, {
+                        "OPENAI_API_KEY": "test-key",
+                        "OPENAI_MAX_REQUESTS": str(limit),
+                        "OPENAI_REQUEST_COUNTER_FILE": counter,
+                        "OPENAI_MIN_REQUEST_INTERVAL_SEC": "0",
+                        "OPENAI_MAX_REQUEST_ATTEMPTS": "3",
+                    }):
+                        result = call_openai("navigate", [], "gpt-5-mini")
+                        blocked = call_openai("navigate", [], "gpt-5-mini")
+                    self.assertEqual(post.call_count, limit)
+                    self.assertIn("request limit reached", blocked)
+                    with sqlite3.connect(counter) as conn:
+                        self.assertEqual(conn.execute("SELECT value FROM request_counter").fetchone()[0], limit)
+                    if limit == 1:
+                        self.assertIn("request limit reached", result)
+                    else:
+                        self.assertEqual(result, '{"action":"forward"}')
+
+    @patch("nav.harness.llm_provider.requests.post")
+    def test_budget_misconfiguration_fails_closed(self, post):
+        for limit in ("0", "invalid", "2"):
+            with self.subTest(limit=limit), patch.dict(os.environ, {
+                "OPENAI_API_KEY": "test-key", "OPENAI_MAX_REQUESTS": limit,
+                "OPENAI_REQUEST_COUNTER_FILE": "", "OPENAI_MIN_REQUEST_INTERVAL_SEC": "0",
+            }):
+                self.assertIn('"error": true', call_openai("navigate", [], "gpt-5.2"))
+        post.assert_not_called()
+
+    @patch("nav.harness.llm_provider.time.sleep")
+    @patch("nav.harness.llm_provider.time.time", side_effect=[100.0, 100.0, 105.0])
+    def test_openai_shared_pacing(self, clock, sleep):
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict(os.environ, {
+            "OPENAI_MAX_REQUESTS": "2",
+            "OPENAI_REQUEST_COUNTER_FILE": str(Path(tmpdir) / "requests.sqlite3"),
+            "OPENAI_MIN_REQUEST_INTERVAL_SEC": "5",
+        }):
+            self.assertTrue(_reserve_openai_request())
+            self.assertTrue(_reserve_openai_request())
+            self.assertFalse(_reserve_openai_request())
+        sleep.assert_called_once_with(5.0)
+
+    def test_independent_model_counters(self):
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict(os.environ, {
+            "OPENAI_MAX_REQUESTS": "1", "OPENAI_MIN_REQUEST_INTERVAL_SEC": "0",
+        }):
+            for model in ("gpt-5-mini", "gpt-5.2"):
+                with patch.dict(os.environ, {
+                    "OPENAI_REQUEST_COUNTER_FILE": str(Path(tmpdir) / (model + ".sqlite3")),
+                }):
+                    self.assertTrue(_reserve_openai_request())
+                    self.assertFalse(_reserve_openai_request())
+
+    def test_concurrent_processes_cannot_overspend_or_reset_counter(self):
+        code = (
+            "from nav.harness.llm_provider import _reserve_openai_request; "
+            "print(sum(_reserve_openai_request() for _ in range(10)))"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env = {**os.environ, "OPENAI_MAX_REQUESTS": "7",
+                   "OPENAI_REQUEST_COUNTER_FILE": str(Path(tmpdir) / "requests.sqlite3"),
+                   "OPENAI_MIN_REQUEST_INTERVAL_SEC": "0"}
+            workers = [subprocess.Popen([sys.executable, "-c", code], env=env,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(4)]
+            total = 0
+            for worker in workers:
+                output, errors = worker.communicate(timeout=30)
+                self.assertEqual(worker.returncode, 0, errors)
+                total += int(output.strip())
+            self.assertEqual(total, 7)
+            restarted = subprocess.run([sys.executable, "-c", code], env=env,
+                                       capture_output=True, text=True, check=True, timeout=30)
+            self.assertEqual(restarted.stdout.strip(), "0")
+
     @patch("nav.harness.llm_provider.requests.post")
     def test_openai_multimodal_payload_and_response(self, post: Mock) -> None:
         response = Mock(status_code=200, headers={})
@@ -286,6 +374,9 @@ class OpenAIProviderTest(unittest.TestCase):
         self.assertEqual(kwargs["json"]["model"], "gpt-5.6-sol")
         self.assertEqual(kwargs["json"]["max_output_tokens"], 123)
         self.assertFalse(kwargs["json"]["store"])
+        self.assertFalse(kwargs["allow_redirects"])
+        self.assertNotIn("temperature", kwargs["json"])
+        self.assertNotIn("reasoning", kwargs["json"])
         parts = kwargs["json"]["input"][0]["content"]
         self.assertEqual(parts[0], {"type": "input_text", "text": "navigate"})
         self.assertEqual(parts[1]["type"], "input_image")

@@ -16,9 +16,11 @@ train-only augmentation (random resized crop + color jitter).
 from __future__ import annotations
 
 import csv
+import json
 import math
 import os
 import random
+from pathlib import Path
 from typing import Dict, List, Tuple
 
 import numpy as np
@@ -97,6 +99,38 @@ class _NavEpisodeBase(Dataset):
         return episodes
 
     def _split_episodes(self) -> List[str]:
+        manifest_path = Path(self.data_root) / "dataset_manifest.jsonl"
+        if manifest_path.is_file():
+            episodes = []
+            with manifest_path.open(encoding="utf-8") as stream:
+                for line_number, line in enumerate(stream, 1):
+                    if not line.strip():
+                        continue
+                    record = json.loads(line)
+                    if record.get("split") != self.split:
+                        continue
+                    relative = record.get("episode_dir")
+                    if not relative:
+                        raise ValueError(
+                            f"Missing episode_dir in {manifest_path}:{line_number}"
+                        )
+                    episode = Path(self.data_root) / str(relative)
+                    csv_path, rgb_dir, depth_dir = self._episode_paths(str(episode))
+                    if not Path(csv_path).is_file() or not Path(rgb_dir).is_dir():
+                        raise FileNotFoundError(
+                            f"Manifest episode is incomplete: {episode}"
+                        )
+                    if self.use_depth and not Path(depth_dir).is_dir():
+                        raise FileNotFoundError(
+                            f"Manifest episode has no depth directory: {episode}"
+                        )
+                    episodes.append(str(episode))
+            if not episodes:
+                raise RuntimeError(
+                    f"No {self.split!r} episodes found in {manifest_path}"
+                )
+            return episodes
+
         episodes = self._list_episodes()
         if not episodes:
             raise RuntimeError(f"No episodes found in {self.data_root}")
@@ -262,15 +296,29 @@ class NavEpisodeSequenceDataset(_NavEpisodeBase):
         split_ratios: Tuple[float, float, float] = (0.7, 0.15, 0.15),
         seed: int = 42,
         goal_rep: str = "cartesian",
+        goal_distance_scale_m: float = 0.0,
+        horizontal_flip_prob: float = 0.0,
         normalize_rgb: bool = True,
         use_depth: bool = True,
         use_rgb: bool = False,
         chunk_size: int = 1,
+        action_target_offset: int = 0,
+        include_stop_targets: bool = True,
     ) -> None:
         self.seq_len = seq_len
         self.goal_rep = goal_rep
+        self.goal_distance_scale_m = float(goal_distance_scale_m)
+        self.horizontal_flip_prob = float(horizontal_flip_prob)
+        if self.goal_distance_scale_m < 0.0:
+            raise ValueError("goal_distance_scale_m must be nonnegative")
+        if not 0.0 <= self.horizontal_flip_prob <= 1.0:
+            raise ValueError("horizontal_flip_prob must be in [0, 1]")
         self.use_rgb = use_rgb
         self.chunk_size = chunk_size
+        if action_target_offset not in {0, 1}:
+            raise ValueError("action_target_offset must be 0 or 1")
+        self.action_target_offset = int(action_target_offset)
+        self.include_stop_targets = bool(include_stop_targets)
         super().__init__(data_root, split, img_size, split_ratios, seed, normalize_rgb, use_depth)
         self._episode_steps = self._build_episode_steps()
         self._index = self._build_index()
@@ -307,20 +355,33 @@ class NavEpisodeSequenceDataset(_NavEpisodeBase):
         if rgb_seq and self.normalize_rgb:
             rgb_seq = [self._normalize_rgb(im) for im in rgb_seq]
 
+        action = self._target_action(steps, step_idx)
+        if self.augment and random.random() < self.horizontal_flip_prob:
+            rgb_seq, depth_seq, goal_seq, prev_action_seq, action = (
+                mirror_pointgoal_sample(
+                    rgb_seq,
+                    depth_seq,
+                    goal_seq,
+                    prev_action_seq,
+                    action,
+                )
+            )
+
         return {
             "rgb": torch.stack(rgb_seq) if self.use_rgb else torch.empty(0),
             "depth": torch.stack(depth_seq) if self.use_depth else torch.empty(0),
             "goal": torch.stack(goal_seq),
             "prev_action": torch.tensor(prev_action_seq, dtype=torch.long),
-            "action": self._target_action(steps, step_idx),
+            "action": action,
         }
 
     def _target_action(self, steps, step_idx) -> torch.Tensor:
+        target_idx = step_idx + self.action_target_offset
         if self.chunk_size == 1:
-            return torch.tensor(steps[step_idx + 1]["action"], dtype=torch.long)
+            return torch.tensor(steps[target_idx]["action"], dtype=torch.long)
         chunk = []
         for k in range(self.chunk_size):
-            future_idx = step_idx + 1 + k
+            future_idx = target_idx + k
             chunk.append(steps[future_idx]["action"] if future_idx < len(steps) else chunk[-1])
         return torch.tensor(chunk, dtype=torch.long)
 
@@ -357,14 +418,14 @@ class NavEpisodeSequenceDataset(_NavEpisodeBase):
         return episodes_steps
 
     def _build_index(self) -> List[Tuple[int, int]]:
-        # Drop windows whose target action is "stop" for train/val (the data is
-        # stop-heavy at episode ends); keep all for test.
-        drop_stop_target = self.split in {"train", "val"}
+        drop_stop_target = not self.include_stop_targets and self.split in {"train", "val"}
         stop_label = BC_ACTION_TO_LABEL["stop"]
         index = []
         for ep_idx, steps in enumerate(self._episode_steps):
-            for step_idx in range(len(steps) - 1):
-                if drop_stop_target and steps[step_idx + 1]["action"] == stop_label:
+            last_input_idx = len(steps) - 1 - self.action_target_offset
+            for step_idx in range(last_input_idx + 1):
+                target_idx = step_idx + self.action_target_offset
+                if drop_stop_target and steps[target_idx]["action"] == stop_label:
                     continue
                 index.append((ep_idx, step_idx))
         return index
@@ -378,11 +439,58 @@ class NavEpisodeSequenceDataset(_NavEpisodeBase):
         rel_x = cos_yaw * dx + sin_yaw * dz
         rel_z = -sin_yaw * dx + cos_yaw * dz
         if self.goal_rep == "polar":
-            return np.array([math.sqrt(rel_x * rel_x + rel_z * rel_z), math.atan2(rel_z, rel_x)], dtype=np.float32)
+            distance = math.sqrt(rel_x * rel_x + rel_z * rel_z)
+            angle = math.atan2(rel_z, rel_x)
+            if self.goal_distance_scale_m > 0.0:
+                distance /= self.goal_distance_scale_m
+                angle /= math.pi
+            return np.array([distance, angle], dtype=np.float32)
+        if self.goal_distance_scale_m > 0.0:
+            rel_x /= self.goal_distance_scale_m
+            rel_z /= self.goal_distance_scale_m
         return np.array([rel_x, rel_z], dtype=np.float32)
 
     def _count_classes(self) -> Dict[int, int]:
         counts = {i: 0 for i in range(4)}
         for ep_idx, step_idx in self._index:
-            counts[self._episode_steps[ep_idx][step_idx + 1]["action"]] += 1
+            target_idx = step_idx + self.action_target_offset
+            counts[self._episode_steps[ep_idx][target_idx]["action"]] += 1
         return counts
+
+
+def _swap_turn_label(label: int) -> int:
+    if label == BC_ACTION_TO_LABEL["turn right"]:
+        return BC_ACTION_TO_LABEL["turn left"]
+    if label == BC_ACTION_TO_LABEL["turn left"]:
+        return BC_ACTION_TO_LABEL["turn right"]
+    return label
+
+
+def mirror_pointgoal_sample(
+    rgb_seq: List[torch.Tensor],
+    depth_seq: List[torch.Tensor],
+    goal_seq: List[torch.Tensor],
+    prev_action_seq: List[int],
+    action: torch.Tensor,
+) -> tuple[
+    List[torch.Tensor],
+    List[torch.Tensor],
+    List[torch.Tensor],
+    List[int],
+    torch.Tensor,
+]:
+    """Mirror egocentric inputs and swap every left/right semantic signal."""
+    rgb_seq = [torch.flip(frame, dims=(-1,)) for frame in rgb_seq]
+    depth_seq = [torch.flip(frame, dims=(-1,)) for frame in depth_seq]
+    mirrored_goals = []
+    for goal in goal_seq:
+        mirrored = goal.clone()
+        mirrored[1] = -mirrored[1]
+        mirrored_goals.append(mirrored)
+    prev_action_seq = [_swap_turn_label(label) for label in prev_action_seq]
+    mirrored_action = action.clone()
+    right = action == BC_ACTION_TO_LABEL["turn right"]
+    left = action == BC_ACTION_TO_LABEL["turn left"]
+    mirrored_action[right] = BC_ACTION_TO_LABEL["turn left"]
+    mirrored_action[left] = BC_ACTION_TO_LABEL["turn right"]
+    return rgb_seq, depth_seq, mirrored_goals, prev_action_seq, mirrored_action

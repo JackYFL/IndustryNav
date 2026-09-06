@@ -18,6 +18,7 @@
 #                                  which prefers the in-repo unity_client/ build, no path needed)
 #   SCENE_ID     override the scene_code->scene_id mapping
 #   MAX_STEPS    per-point decision-step cap               (default: 70)
+#   RESUME       1 to resume partial LLM episodes and skip completed ones (default: 0)
 #   DYNAMIC_STEP_BUDGET  distance-conditioned step budget; defaults to 1 for
 #                       LLM and 0 for other baselines. Set 0 for fixed MAX_STEPS.
 #   REACH_M      success radius in Unity world meters       (default: 2.0)
@@ -122,6 +123,11 @@ if [[ ! -f "$INPUT_FILE" ]]; then
 fi
 
 MAX_STEPS="${MAX_STEPS:-70}"
+RESUME="${RESUME:-0}"
+if [[ "$RESUME" != "0" && "$RESUME" != "1" ]]; then
+  echo "RESUME must be 1 or 0."
+  exit 1
+fi
 DYNAMIC_STEP_BUDGET="${DYNAMIC_STEP_BUDGET:-}"
 if [[ -z "$DYNAMIC_STEP_BUDGET" ]]; then
   if [[ "$BASELINE" == "llm" ]]; then
@@ -243,6 +249,9 @@ PY
        --init_curr_direction "$init_dir"
        --target_x "$target_x"
        --target_y "$target_y")
+  if [[ "$RESUME" == "1" ]]; then
+    CMD+=(--resume)
+  fi
   if [[ "$DYNAMIC_STEP_BUDGET" == "1" ]]; then
     CMD+=(--dynamic_step_budget)
   else

@@ -64,6 +64,8 @@ class AStarBaseline:
         proxy_stop_distance_m: float = ASTAR_DEFAULTS.proxy_stop_distance_m,
         pixel_scale: float = 1.0,
         minimap_has_baked_markers: bool = False,
+        policy_actions: bool = False,
+        policy_forward_tolerance_deg: float = 12.5,
         debug_viz: bool = False,
         debug_dir: Optional[str] = None,
     ):
@@ -87,6 +89,7 @@ class AStarBaseline:
         self.contrast_min_area_px = max(
             1, int(round(float(contrast_min_area_px) * self.pixel_scale ** 2))
         )
+        self.adaptive_obstacle_denoise_px = max(3, scaled_int(5) | 1)
         self.min_free_ratio = float(min_free_ratio)
         self.obstacle_clearance_m = self._nonnegative(
             obstacle_clearance_m, "obstacle_clearance_m"
@@ -109,6 +112,14 @@ class AStarBaseline:
             "stanley_forward_tolerance_deg",
         )
         self.minimap_has_baked_markers = bool(minimap_has_baked_markers)
+        # Dataset collection must execute exactly the same four atomic actions
+        # as the learned policy.  The ordinary A* benchmark keeps its smoother
+        # annotation controls (including simultaneous forward+turn actions).
+        self.policy_actions = bool(policy_actions)
+        self.policy_forward_tolerance_deg = self._nonnegative(
+            policy_forward_tolerance_deg,
+            "policy_forward_tolerance_deg",
+        )
         self.marker_clear_px = scaled_int(
             self._MARKER_RADIUS_CANONICAL_PX * self._MARKER_CLEAR_RADIUS_FACTOR
         )
@@ -142,6 +153,15 @@ class AStarBaseline:
             stuck_block_radius_m, "stuck_block_radius_m"
         )
         self.stuck_block_ttl_steps = int(stuck_block_ttl_steps)
+        if self.policy_actions:
+            # These defaults were tuned for the 1.5 m smooth-controller stride.
+            # The point-goal action moves only about 0.75 m, so the old 2.1 m
+            # offset / 1.35 m radius frequently sealed an entire aisle. Mark
+            # only the failed step endpoint. Keep it active after the escape
+            # manoeuvre so the next replan must select a genuine detour.
+            self.stuck_block_ahead_m = min(self.stuck_block_ahead_m, 0.75)
+            self.stuck_block_radius_m = min(self.stuck_block_radius_m, 0.9)
+            self.stuck_block_ttl_steps = min(self.stuck_block_ttl_steps, 24)
         self.proxy_stop_distance_m = self._positive(
             proxy_stop_distance_m, "proxy_stop_distance_m"
         )
@@ -164,6 +184,17 @@ class AStarBaseline:
         self.prev_world_xz: Optional[Tuple[float, float]] = None
         self.stuck_count = 0
         self.recovery_count = 0
+        # The smooth benchmark controller can steer while advancing, whereas
+        # the point-goal teacher only has atomic turn/forward actions.  After a
+        # blocked forward command, merely turning 3 times (about 67.5 degrees)
+        # leaves that policy touching the same wall or rack corner.  Give the
+        # atomic policy a deterministic 180-degree turn followed by two short
+        # forward steps so it actually leaves the contact point before A*
+        # replans.  Ordinary A* keeps its historical recovery behaviour.
+        self.recovery_forward_steps = 2 if self.policy_actions else 0
+        if self.policy_actions:
+            self.recovery_turn_steps = max(self.recovery_turn_steps, 8)
+        self.recovery_forward_count = 0
         self.recovery_turn_sign = 1
         self.last_effective_target_xy: Optional[Point] = None
         self.last_debug = {}
@@ -279,12 +310,13 @@ class AStarBaseline:
             agent_theta,
             point_to_world=point_to_world,
         )
-        if self.recovery_count > 0:
+        if self.recovery_count > 0 or self.recovery_forward_count > 0:
             action = self._recovery_action()
             self._record_action(action)
             return (
                 action,
                 f"Astar recovery({stuck_reason}) turns_left={self.recovery_count} "
+                f"forward_left={self.recovery_forward_count} "
                 f"turn_sign={self.recovery_turn_sign}",
                 self.last_path,
             )
@@ -325,6 +357,33 @@ class AStarBaseline:
             self.last_turn_sign = 0
 
         if not path:
+            if self.policy_actions and self.virtual_obstacles:
+                # A temporary collision marker can disconnect a narrow aisle.
+                # Do not fall back to a straight target-seeking forward action:
+                # that drives the agent directly back into the obstacle. Rotate
+                # safely until the short-lived marker expires, then let A*
+                # construct a fresh path from the escaped pose.
+                action = (
+                    "turn right" if self.recovery_turn_sign > 0 else "turn left"
+                )
+                fallback_path = [curr_xy, target_xy]
+                self.last_path = []
+                self.tracking_path = []
+                self.path_segment_index = 0
+                self.follow_waypoints = []
+                self.follow_waypoint_index = 0
+                self.last_effective_target_xy = None
+                self._save_debug_visualization(
+                    minimap_rgb, curr_xy, target_xy, fallback_path, None, step
+                )
+                self._record_action(action)
+                return (
+                    action,
+                    "Astar temporary collision obstacle disconnects path; "
+                    f"waiting by rotation ({len(self.virtual_obstacles)} active)",
+                    fallback_path,
+                )
+
             action, reasoning = self._greedy_action(
                 curr_xy,
                 target_xy,
@@ -426,6 +485,33 @@ class AStarBaseline:
             )
             heading_error = relative
             controller = "terminal"
+        elif self.policy_actions:
+            waypoint_world_xz = point_to_world(waypoint)
+            action, relative = self._action_toward(
+                curr_xy,
+                waypoint,
+                agent_theta,
+                curr_world_xz=curr_world_xz,
+                waypoint_world_xz=waypoint_world_xz,
+            )
+            heading_error = relative
+            closest_idx, cross_track_m, _ = self._closest_path_index(
+                path,
+                curr_xy,
+                curr_world_xz=curr_world_xz,
+                point_to_world=point_to_world,
+            )
+            segment_idx = min(closest_idx, max(0, len(path) - 2))
+            action_waypoint = waypoint
+            controller = "policy_waypoint"
+            waypoint_reason = f"{waypoint_reason};atomic_waypoint_{waypoint_idx}"
+            self.last_tracking_metrics = {
+                "controller": controller,
+                "segment": int(segment_idx),
+                "cross_track_m": float(cross_track_m),
+                "heading_error_deg": float(relative),
+                "steering_deg": float(relative),
+            }
         else:
             (
                 action,
@@ -493,6 +579,30 @@ class AStarBaseline:
         keep[1:] = stats[1:, cv2.CC_STAT_AREA] >= self.contrast_min_area_px
         return keep[labels]
 
+    def _threshold_free_space(
+        self,
+        gray: np.ndarray,
+    ) -> Tuple[np.ndarray, int, int, float]:
+        """Return a lighting-adaptive floor band.
+
+        The historical fixed band is retained for normal exposures. Under the
+        randomized training illumination, however, the warehouse floor can
+        move from roughly gray=127 to gray=245-250. In that case a fixed upper
+        bound of 190 classifies almost the entire floor as an obstacle and
+        breaks it into tiny disconnected components. Since floor occupies most
+        of every top-down warehouse image, its median is a stable exposure
+        reference. Dark structures remain below the adaptive lower bound;
+        saturated walls remain above the upper bound and are also reinforced by
+        the local-contrast obstacle detector.
+        """
+        floor_reference = float(np.median(gray))
+        lower = self.obstacle_threshold
+        upper = self.obstacle_bright_threshold
+        if floor_reference > self.obstacle_bright_threshold:
+            lower = max(lower, int(math.floor(floor_reference - 30.0)))
+            upper = min(255, max(upper, int(math.ceil(floor_reference + 8.0))))
+        return (gray > lower) & (gray <= upper), lower, upper, floor_reference
+
     def _clear_discs(self, free: np.ndarray, points: Tuple[Point, ...]) -> np.ndarray:
         free_u8 = free.astype(np.uint8)
         for point in points:
@@ -530,11 +640,37 @@ class AStarBaseline:
         # Obstacles are whatever deviates from the mid-gray floor in either
         # direction: dark racks/crates *and* bright partition walls, which are
         # brighter than the floor and would otherwise read as free space.
-        threshold_free = (gray > self.obstacle_threshold) & (
-            gray <= self.obstacle_bright_threshold
-        )
+        (
+            threshold_free,
+            effective_obstacle_threshold,
+            effective_obstacle_bright_threshold,
+            floor_gray_reference,
+        ) = self._threshold_free_space(gray)
         low_contrast = self._low_contrast_obstacles(gray)
         threshold_free = threshold_free & ~low_contrast
+        lighting_adapted = (
+            floor_gray_reference > self.obstacle_bright_threshold
+        )
+        if lighting_adapted:
+            # Exposure amplification turns fine floor texture and antialiased
+            # object outlines into many isolated out-of-band pixels. Dilating
+            # those pixels by the physical robot clearance would erase almost
+            # the whole floor (9.5% free in the failing scene3 sample). Remove
+            # only sub-five-pixel structures before clearance inflation. Keep
+            # normal-exposure behaviour bit-for-bit compatible.
+            obstacle_noise_kernel = np.ones(
+                (
+                    self.adaptive_obstacle_denoise_px,
+                    self.adaptive_obstacle_denoise_px,
+                ),
+                dtype=np.uint8,
+            )
+            denoised_obstacles = cv2.morphologyEx(
+                (~threshold_free).astype(np.uint8),
+                cv2.MORPH_OPEN,
+                obstacle_noise_kernel,
+            )
+            threshold_free = denoised_obstacles == 0
         free = threshold_free.copy()
 
         forced_free = self._forced_free_points(curr_xy, target_xy)
@@ -582,6 +718,15 @@ class AStarBaseline:
         self.last_debug = {
             "gray": gray,
             "threshold_free": threshold_free,
+            "effective_obstacle_threshold": effective_obstacle_threshold,
+            "effective_obstacle_bright_threshold": (
+                effective_obstacle_bright_threshold
+            ),
+            "floor_gray_reference": floor_gray_reference,
+            "lighting_adapted": lighting_adapted,
+            "adaptive_obstacle_denoise_px": (
+                self.adaptive_obstacle_denoise_px if lighting_adapted else 0
+            ),
             "low_contrast_obstacles": low_contrast,
             "inflated_free": free,
             "walkable": walkable,
@@ -1420,12 +1565,12 @@ class AStarBaseline:
             return "stop", 0.0
         if abs(relative) <= self.turn_tolerance_deg:
             self.last_turn_sign = 0
-            return "astar forward", relative
+            return ("forward" if self.policy_actions else "astar forward"), relative
 
         self.last_turn_sign = 1 if relative > 0 else -1
         if self.last_turn_sign > 0:
-            return "astar turn right", relative
-        return "astar turn left", relative
+            return ("turn right" if self.policy_actions else "astar turn right"), relative
+        return ("turn left" if self.policy_actions else "astar turn left"), relative
 
     def _action_toward(
         self,
@@ -1466,6 +1611,14 @@ class AStarBaseline:
         forward_tolerance_deg: float,
         drive_turn_tolerance_deg: float,
     ) -> str:
+        if self.policy_actions:
+            # Point-goal controls produce an approximately 22.5-degree yaw
+            # update. Errors below half that turn are not exactly correctable;
+            # the deadband prevents the teacher from alternating left/right
+            # forever. Do not inherit the smooth controller's wider 20-degree
+            # forward tolerance: that made the atomic policy advance into rack
+            # corners at errors of 13-20 degrees.
+            forward_tolerance_deg = self.policy_forward_tolerance_deg
         if abs(steering_error_deg) <= forward_tolerance_deg:
             if abs(steering_error_deg) <= self.hysteresis_reset_deg:
                 self.last_turn_sign = 0
@@ -1479,6 +1632,9 @@ class AStarBaseline:
         ):
             turn_sign = self.last_turn_sign
         self.last_turn_sign = turn_sign
+
+        if self.policy_actions:
+            return "turn right" if turn_sign > 0 else "turn left"
 
         if abs(steering_error_deg) <= drive_turn_tolerance_deg:
             if turn_sign > 0:
@@ -1571,6 +1727,7 @@ class AStarBaseline:
                     agent_theta,
                 )
             self.recovery_count = self.recovery_turn_steps
+            self.recovery_forward_count = self.recovery_forward_steps
             self.recovery_turn_sign = -self.last_turn_sign if self.last_turn_sign else 1
             self.stuck_count = 0
             self.last_turn_sign = 0
@@ -1620,10 +1777,17 @@ class AStarBaseline:
         self.virtual_obstacles = kept
 
     def _recovery_action(self) -> str:
-        self.recovery_count = max(0, self.recovery_count - 1)
-        if self.recovery_turn_sign > 0:
-            return "astar turn right"
-        return "astar turn left"
+        if self.recovery_count > 0:
+            self.recovery_count = max(0, self.recovery_count - 1)
+            if self.recovery_turn_sign > 0:
+                return "turn right" if self.policy_actions else "astar turn right"
+            return "turn left" if self.policy_actions else "astar turn left"
+
+        if self.recovery_forward_count > 0:
+            self.recovery_forward_count = max(0, self.recovery_forward_count - 1)
+            return "forward"
+
+        return "stop"
 
     def _record_action(self, action: str) -> None:
         self.last_action_was_move = "forward" in action or action in {
