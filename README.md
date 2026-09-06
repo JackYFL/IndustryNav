@@ -201,7 +201,14 @@ UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple uv sync
 source .venv/bin/activate
 ```
 
-`pyproject.toml` installs `mlagents` and `mlagents-envs` from `external/ml-agents`, because the PyPI packages are stale for this project.
+If the Tsinghua mirror is slow or unreachable from your region, sync from PyPI instead:
+
+```bash
+uv sync
+source .venv/bin/activate
+```
+
+`pyproject.toml` installs `mlagents` and `mlagents-envs` from `external/ml-agents`, because the PyPI packages are stale for this project. The checkout tracks the latest ML-Agents `develop` branch, which depends on Gymnasium and PettingZoo; those are pulled in transitively, so they are not pinned here.
 
 ### Option B: conda
 

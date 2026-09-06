@@ -352,7 +352,6 @@ SCENE_ALL_BUILDS: Dict[str, List[str]] = {
         ),
         str(REPO_ROOT / "clients" / "scene_all_24scenes_latest" / "scene_all.x86_64"),
         str(UNITY_CLIENT_DIR / "scene_all" / "scene_all.x86_64"),
-        "/mnt/ss2/devops/sandbox/industrynav2/client/scene_all/scene_all.x86_64",
     ],
     "Windows": [
         str(UNITY_CLIENT_DIR / "scene_all" / "IndustryNav.exe"),
