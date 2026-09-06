@@ -65,8 +65,9 @@ def _check_api_key() -> str:
     api_key = os.getenv("OPENROUTER_API_KEY")
     if not api_key:
         raise ValueError(
-            "OPENROUTER_API_KEY is not set. Source tmp/secrets.sh "
-            "(see tmp/secrets.sh.example) before invoking the benchmark."
+            "OPENROUTER_API_KEY is not set. Copy tmp/secrets.sh.example to "
+            "tmp/secrets.sh, fill in your key, and source it before invoking "
+            "the benchmark."
         )
     return api_key
 

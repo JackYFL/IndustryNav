@@ -5,6 +5,12 @@
 *.swp
 *.swo
 
+# Local coding-agent files (Claude Code, Codex, etc.); keep them out of the repo.
+/AGENTS.md
+/CLAUDE.md
+/.claude/
+/.codex/
+
 # Python bytecode and caches
 __pycache__/
 *.py[cod]
@@ -49,7 +55,9 @@ test.log
 outputs/
 build_logs/
 logs/
-tmp/
+# Local scratch space. Everything inside is ignored except the secrets template.
+tmp/*
+!tmp/secrets.sh.example
 collect_data/
 exp_frames*/
 ckpts/
