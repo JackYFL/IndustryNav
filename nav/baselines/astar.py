@@ -1796,6 +1796,10 @@ class AStarBaseline:
             "strafe right",
         }
 
+    def observe_executed_action(self, action: str) -> None:
+        """Align DAgger teacher state with the action applied in Unity."""
+        self._record_action(action)
+
     def _point_to_cell(self, point: Point) -> Tuple[int, int]:
         return (
             int(point[1]) // self.grid_step_y_px,

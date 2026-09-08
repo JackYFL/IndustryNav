@@ -17,8 +17,8 @@ import numpy as np
 from nav.config import ACTIONS_CSV_FIELDS
 from nav.harness.checkpoint import CheckpointStore, RunLock, validate_restored_pose
 from nav.harness.navigation_protocol import navigation_run_config
-from nav.scripts import run_benchmark_cell as runner
-from nav.scripts.resume_benchmark import resume_command, resume_environment
+from nav.scripts.agent import run_benchmark_cell as runner
+from nav.scripts.agent.resume_benchmark import resume_command, resume_environment
 
 
 def empty_state():
@@ -126,7 +126,7 @@ class CheckpointStorageTest(unittest.TestCase):
                                  {"OPENAI_API_KEY": "not-a-real-key", "OPENAI_MAX_REQUESTS": "5000"})
         self.assertEqual(env["OPENAI_MAX_REQUESTS"], "5000")
         self.assertEqual(env["OPENAI_REQUEST_COUNTER_FILE"], str(counter))
-        with patch("nav.scripts.resume_benchmark.free_tcp_port", return_value=5555):
+        with patch("nav.scripts.agent.resume_benchmark.free_tcp_port", return_value=5555):
             command = resume_command(self.root, self.store.config)
         self.assertNotIn("not-a-real-key", " ".join(command))
         self.assertIn("--resume", command)

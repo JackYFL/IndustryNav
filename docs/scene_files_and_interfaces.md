@@ -151,34 +151,34 @@ Examples:
 
 ```bash
 # General benchmark wrapper
-EGO_WIDTH=768 EGO_HEIGHT=432 bash shs/run_headless_benchmark.sh scene1
+EGO_WIDTH=768 EGO_HEIGHT=432 bash shs/agent/run_headless_benchmark.sh scene1
 
 # A* wrapper
-EGO_WIDTH=768 EGO_HEIGHT=432 bash shs/run_Astar.sh scene1 point1
+EGO_WIDTH=768 EGO_HEIGHT=432 bash shs/astar/run_Astar.sh scene1 point1
 
 # Smaller minimap while preserving the benchmark coordinate space
-MINIMAP_WIDTH=431 bash shs/run_Astar.sh scene1 point1
+MINIMAP_WIDTH=431 bash shs/astar/run_Astar.sh scene1 point1
 
 # Freeze environment motion without freezing the navigation agent
-DYNAMIC_OBJECTS=static bash shs/run_Astar.sh scene1 point1
+DYNAMIC_OBJECTS=static bash shs/astar/run_Astar.sh scene1 point1
 
 # Set distinct fixed speeds in meters/second
 HUMAN_SPEED_MPS=1.0 VEHICLE_SPEED_MPS=3.0 ROBOT_SPEED_MPS=1.4 \
-  bash shs/run_Astar.sh scene1 point1
+  bash shs/astar/run_Astar.sh scene1 point1
 
 # Sample reproducible category-specific speeds
 HUMAN_SPEED_MIN_MPS=0.9 HUMAN_SPEED_MAX_MPS=1.4 \
 VEHICLE_SPEED_MIN_MPS=2.0 VEHICLE_SPEED_MAX_MPS=3.5 \
 ROBOT_SPEED_MIN_MPS=1.0 ROBOT_SPEED_MAX_MPS=2.0 MOTION_RANDOM_SEED=42 \
-  bash shs/run_Astar.sh scene1 point1
+  bash shs/astar/run_Astar.sh scene1 point1
 
 # Direct benchmark, grid, or collector invocation
-python -m nav.scripts.run_benchmark_cell --ego_width 768 --ego_height 432 ...
-python -m nav.scripts.run_benchmark_grid --ego_width 768 --ego_height 432 ...
-python -m nav.scripts.collect_data --ego_width 768 --ego_height 432 ...
-python -m nav.scripts.run_benchmark_cell --minimap_width 431 ...
-python -m nav.scripts.run_benchmark_cell --dynamic_objects static ...
-python -m nav.scripts.run_benchmark_cell \
+python -m nav.scripts.agent.run_benchmark_cell --ego_width 768 --ego_height 432 ...
+python -m nav.scripts.agent.run_benchmark_grid --ego_width 768 --ego_height 432 ...
+python -m nav.scripts.bc.collect_data --ego_width 768 --ego_height 432 ...
+python -m nav.scripts.agent.run_benchmark_cell --minimap_width 431 ...
+python -m nav.scripts.agent.run_benchmark_cell --dynamic_objects static ...
+python -m nav.scripts.agent.run_benchmark_cell \
   --human_speed_mps 1.0 --vehicle_speed_mps 3.0 --robot_speed_mps 1.4 ...
 ```
 
@@ -273,7 +273,7 @@ When adding or rebuilding a scene, verify that the scene contains:
 5. Run a cheap dry boot before launching full benchmarks:
 
 ```bash
-BASELINE=random MAX_STEPS=2 bash shs/run_headless_benchmark.sh sceneN
+BASELINE=random MAX_STEPS=2 bash shs/agent/run_headless_benchmark.sh sceneN
 ```
 
 ### Debug Spawn/Target Mapping
@@ -298,8 +298,8 @@ If the reported pixel/world pair is wrong, inspect:
 After changing scene/runtime code, run:
 
 ```bash
-BASELINE=random MAX_STEPS=2 bash shs/run_headless_benchmark.sh scene1
-ASTAR_DEBUG_VIZ=1 bash shs/run_Astar.sh scene1 point1
+BASELINE=random MAX_STEPS=2 bash shs/agent/run_headless_benchmark.sh scene1
+ASTAR_DEBUG_VIZ=1 bash shs/astar/run_Astar.sh scene1 point1
 ```
 
 This verifies both the ML-Agents launch path and the minimap/planning path.

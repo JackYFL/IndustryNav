@@ -11,18 +11,18 @@ The pipeline is:
 ```text
 human teleop episodes
     -> collect_data output folders
-    -> nav.scripts.train_bc checkpoint
+    -> nav.scripts.bc.train_bc checkpoint
     -> BASELINE=bc benchmark inference
 ```
 
 Relevant code:
 
-- `nav/scripts/collect_data.py`: interactive keyboard data collection.
+- `nav/scripts/bc/collect_data.py`: interactive keyboard data collection.
 - `nav/train/dataset.py`: parses collected episodes into BC samples.
-- `nav/scripts/train_bc.py`: CLI training entry.
-- `shs/train_bc.sh`: thin shell wrapper around `nav.scripts.train_bc`.
+- `nav/scripts/bc/train_bc.py`: CLI training entry.
+- `shs/bc/train_bc.sh`: thin shell wrapper around `nav.scripts.bc.train_bc`.
 - `nav/train/controller.py`: inference-time controller used by `BASELINE=bc`.
-- `nav/scripts/run_benchmark_cell.py`: unified benchmark entry for LLM, A*, BC, and random baselines.
+- `nav/scripts/agent/run_benchmark_cell.py`: unified benchmark entry for LLM, A*, BC, and random baselines.
 
 ## 1. Data Collection
 
@@ -30,7 +30,7 @@ BC training consumes human-controlled episodes saved by:
 
 ```bash
 # Set SCENE_ALL_APP to the local Unity runtime executable before running.
-python -m nav.scripts.collect_data \
+python -m nav.scripts.bc.collect_data \
   --file_name "$SCENE_ALL_APP" \
   --scene_id 0 \
   --frame_save_dir collect_data/scene1/point1 \
@@ -64,6 +64,12 @@ to take effect.
 Use `--dynamic_objects static` to collect or evaluate a static-environment
 variant. The navigation agent remains controllable; only environment motion is
 frozen. Keep this value consistent between data collection and BC inference.
+
+PointGoal A* collection and closed-loop policy evaluation both use the
+scene-authored Unity lighting and exposure on macOS and Linux. Do not pass the
+runtime `--light_*` overrides for these runs: fixed HDRP exposure can saturate
+the minimap while darkening the egocentric camera. Photometric variation for
+PointGoal training is applied by the dataset augmentation pipeline instead.
 
 Human, vehicle, and robot speeds are controlled independently in meters/second.
 Use `--human_speed_mps`, `--vehicle_speed_mps`, and `--robot_speed_mps` for fixed
@@ -126,7 +132,7 @@ turn left -> 3
 The recommended training wrapper is:
 
 ```bash
-bash shs/train_bc.sh resnet50 --data_root collect_data --epochs 20
+bash shs/bc/train_bc.sh resnet50 --data_root collect_data --epochs 20
 ```
 
 The first argument selects a preset:
@@ -143,20 +149,20 @@ Common examples:
 
 ```bash
 # Default resnet50 transformer preset
-bash shs/train_bc.sh resnet50 \
+bash shs/bc/train_bc.sh resnet50 \
   --data_root collect_data \
   --output_dir outputs/nav_bc_resnet50 \
   --epochs 20
 
 # Small quick check
-bash shs/train_bc.sh resnet50 \
+bash shs/bc/train_bc.sh resnet50 \
   --data_root collect_data \
   --output_dir outputs/nav_bc_debug \
   --epochs 1 \
   --num_workers 0
 
 # Train without depth if the dataset lacks keyboard_depth/
-bash shs/train_bc.sh resnet50 \
+bash shs/bc/train_bc.sh resnet50 \
   --data_root collect_data \
   --no-use_depth \
   --use_rgb
@@ -194,19 +200,75 @@ action head, ImageNet initialization for the one-channel depth ResNet, normalize
 polar goals, left/right mirror augmentation, and softened class balancing:
 
 ```bash
-bash shs/run_improved_pointgoal_train.sh
+bash shs/bc/run_improved_pointgoal_train.sh
 ```
 
 Set `TRAIN_EPOCHS`, `TRAIN_OUTPUT`, or `EVAL_OUTPUT` to override its defaults.
 The wrapper validates the exported expert dataset before training and evaluates
 one episode from each held-out scene after training.
 
+New checkpoints use `goal_encoding=unity_egocentric_v2`: Unity yaw zero faces
+world `+Z`, Cartesian goals are `[forward, right]`, and polar goals are
+`[distance, signed bearing]` with positive bearing to the right. The encoding is
+stored in the checkpoint so training and deployment cannot silently diverge;
+untagged historical checkpoints retain their original `legacy_v1` transform.
+
+For the expanded closed-loop-oriented run, use:
+
+```bash
+bash shs/bc/run_pointgoal_v3_pipeline.sh
+```
+
+This reuses existing canonical demonstrations, adds cross-route and additional
+heading variants, corrupts a small fraction of previous-action tokens during
+training, adds a goal-to-action residual and turn-direction loss, and selects
+the checkpoint by macro navigation accuracy instead of forward-dominated
+overall accuracy.
+
+Historical v1-v4 checkpoints used the legacy goal transform and should not be
+mixed with the corrected transform. Retrain and evaluate a corrected checkpoint
+without recollecting the A* dataset with:
+
+```bash
+bash shs/bc/run_pointgoal_v5_train.sh
+```
+
+### DAgger recovery rounds
+
+Pure A* demonstrations contain only states visited by the expert. A DAgger
+round instead rolls out the current policy, queries A* at every visited state,
+and stores the current RGB/depth/goal observation with the A* corrective action.
+The behavior action is sampled from A* with probability `beta`; both controller
+histories are updated with the action actually executed in Unity.
+
+Only `split=train` is collected. Scene17-20 validation and scene21-24 testing
+remain untouched, so DAgger cannot leak held-out layouts. Failed behavior
+rollouts are useful and are exported as long as they contain valid A* labels.
+
+Run one balanced round after the corrected v5 checkpoint is available:
+
+```bash
+BETA=0.5 ROUND_ID=round1 EPISODES_PER_SCENE=4 \
+  bash shs/bc/run_pointgoal_dagger_round.sh
+```
+
+The wrapper collects resumably, exports oracle labels, creates a lightweight
+symlink aggregate with the original expert dataset, fine-tunes from the input
+checkpoint, and evaluates four held-out scenes. For later rounds, use a decay
+such as `0.5 -> 0.25 -> 0.1` and point `INIT_CHECKPOINT` and `BASE_DATA_ROOT` to
+the previous round. The A* minimap remains privileged supervision and is not a
+policy input.
+
+PPO and distributed PPO now have a dedicated guide. See
+[`docs/rl_workflow.md`](rl_workflow.md) for architecture, safety rewards,
+training, resume, evaluation, and troubleshooting.
+
 ## 3. Inference
 
 BC inference uses the same benchmark runner as the other baselines:
 
 ```bash
-BASELINE=bc bash shs/run_headless_benchmark.sh scene1
+BASELINE=bc bash shs/agent/run_headless_benchmark.sh scene1
 ```
 
 By default, `run_benchmark_cell.py` looks for:
@@ -218,7 +280,7 @@ ckpts/nav_bc_resnet50_causal_transformer_depth_aug_remove_stop_seq_32_bs4_num_la
 For a locally trained checkpoint, pass `--bc_ckpt` through the Python entry directly:
 
 ```bash
-python -m nav.scripts.run_benchmark_cell \
+python -m nav.scripts.agent.run_benchmark_cell \
   --baseline bc \
   --file_name auto \
   --scene_id 0 \

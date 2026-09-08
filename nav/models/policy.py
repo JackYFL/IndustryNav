@@ -139,6 +139,7 @@ class NavPolicyRNN(nn.Module):
         half_width: bool = True,
         img_size: int = 256,
         chunk_size: int = 1,
+        previous_action_vocab_size: int | None = None,
     ) -> None:
         super().__init__()
         self.use_depth = use_depth
@@ -153,7 +154,9 @@ class NavPolicyRNN(nn.Module):
             img_size=img_size, half_width=half_width,
         )
         self.goal_mlp = _goal_mlp(goal_dim, goal_hidden)
-        self.action_embed = nn.Embedding(num_actions, action_embed)
+        self.action_embed = nn.Embedding(
+            previous_action_vocab_size or num_actions, action_embed
+        )
 
         visual_in = (visual_dim if use_rgb else 0) + (visual_dim if use_depth else 0)
         lstm_in = visual_in + goal_hidden + action_embed
@@ -203,6 +206,8 @@ class NavPolicyTransformer(nn.Module):
         half_width: bool = True,
         img_size: int = 256,
         chunk_size: int = 1,
+        goal_action_residual: bool = False,
+        previous_action_vocab_size: int | None = None,
     ) -> None:
         super().__init__()
         self.use_depth = use_depth
@@ -210,6 +215,7 @@ class NavPolicyTransformer(nn.Module):
         self.seq_len = seq_len
         self.chunk_size = chunk_size
         self.num_actions = num_actions
+        self.goal_action_residual = bool(goal_action_residual)
 
         self.rgb_encoder, self.depth_encoder = build_encoder_pair(
             use_rgb=use_rgb, use_depth=use_depth, visual_dim=visual_dim,
@@ -218,7 +224,9 @@ class NavPolicyTransformer(nn.Module):
             img_size=img_size, half_width=half_width,
         )
         self.goal_mlp = _goal_mlp(goal_dim, goal_hidden)
-        self.action_embed = nn.Embedding(num_actions, action_embed)
+        self.action_embed = nn.Embedding(
+            previous_action_vocab_size or num_actions, action_embed
+        )
 
         visual_in = (visual_dim if use_rgb else 0) + (visual_dim if use_depth else 0)
         token_in = visual_in + goal_hidden + action_embed
@@ -235,6 +243,15 @@ class NavPolicyTransformer(nn.Module):
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
             nn.Linear(d_model // 2, num_actions * chunk_size),
+        )
+        self.goal_action_head = (
+            nn.Sequential(
+                nn.Linear(goal_dim, goal_hidden),
+                nn.ReLU(inplace=True),
+                nn.Linear(goal_hidden, num_actions * chunk_size),
+            )
+            if self.goal_action_residual
+            else None
         )
 
     def _encode_tokens(self, rgb, depth, goal, prev_action) -> torch.Tensor:
@@ -253,6 +270,8 @@ class NavPolicyTransformer(nn.Module):
         B = goal.shape[0]
         out = self._run_encoder(self._encode_tokens(rgb, depth, goal, prev_action))
         out = self.head(out[:, -1, :])
+        if self.goal_action_head is not None:
+            out = out + self.goal_action_head(goal[:, -1, :])
         if self.chunk_size > 1:
             return out.reshape(B, self.chunk_size, self.num_actions)
         return out
@@ -283,6 +302,7 @@ class NavPolicyDiffusion(nn.Module):
         beta_start: float = _ARCH.diffusion_beta_start,
         beta_end: float = _ARCH.diffusion_beta_end,
         chunk_size: int = 1,
+        previous_action_vocab_size: int | None = None,
     ) -> None:
         super().__init__()
         self.num_actions = num_actions
@@ -299,6 +319,7 @@ class NavPolicyDiffusion(nn.Module):
             rgb_backbone=rgb_backbone, depth_backbone=depth_backbone,
             pretrained_rgb=pretrained_rgb, pretrained_depth=pretrained_depth,
             half_width=half_width, img_size=img_size, chunk_size=1,
+            previous_action_vocab_size=previous_action_vocab_size,
         )
 
         self.time_mlp = nn.Sequential(nn.Linear(d_model, d_model), nn.ReLU(inplace=True))
@@ -371,13 +392,18 @@ class NavPolicyDiffusion(nn.Module):
         return x_t
 
 
-def build_policy(cfg, input_dim: int, num_actions: int = 4) -> nn.Module:
+def build_policy(cfg, input_dim: int, num_actions: int | None = None) -> nn.Module:
     """Construct a policy from a :class:`nav.config.BCTrainConfig`.
 
     ``input_dim`` is the dataset-derived feature width: the numeric state
     vector length for the ``mlp`` policy, or the goal-vector length for the
     sequence policies (``lstm`` / ``transformer`` / ``diffusion``).
     """
+    if num_actions is None:
+        num_actions = 3 if cfg.navigation_only_actions else 4
+    previous_action_vocab_size = (
+        num_actions + 1 if cfg.navigation_only_actions else num_actions
+    )
     pt = cfg.policy_type
     if pt == "mlp":
         return NavPolicy(
@@ -392,11 +418,16 @@ def build_policy(cfg, input_dim: int, num_actions: int = 4) -> nn.Module:
         num_layers=cfg.num_layers, rgb_backbone=cfg.rgb_backbone, depth_backbone=cfg.depth_backbone,
         pretrained_rgb=cfg.pretrained_rgb, pretrained_depth=cfg.pretrained_depth,
         half_width=cfg.half_width, img_size=cfg.img_size, chunk_size=cfg.chunk_size,
+        previous_action_vocab_size=previous_action_vocab_size,
     )
     if pt == "lstm":
         return NavPolicyRNN(**shared)
     if pt == "transformer":
-        return NavPolicyTransformer(seq_len=cfg.seq_len, **shared)
+        return NavPolicyTransformer(
+            seq_len=cfg.seq_len,
+            goal_action_residual=cfg.goal_action_residual,
+            **shared,
+        )
     if pt == "diffusion":
         return NavPolicyDiffusion(seq_len=cfg.seq_len, **shared)
     raise ValueError(f"Unknown policy_type: {pt!r}")

@@ -10,15 +10,26 @@ and replayed before the next model query.
 from __future__ import annotations
 
 import json
-import math
 import os
 from collections import deque
 
 import numpy as np
 import torch
 
-from nav.config import BC_ACTION_TO_LABEL, BC_LABEL_TO_ACTION, IMAGENET_MEAN, IMAGENET_STD
+from nav.config import (
+    BC_ACTION_TO_LABEL,
+    BC_LABEL_TO_ACTION,
+    BC_NAV_ACTION_TO_LABEL,
+    BC_NAV_BOS_LABEL,
+    BC_NAV_LABEL_TO_ACTION,
+    IMAGENET_MEAN,
+    IMAGENET_STD,
+)
 from nav.models.policy import NavPolicyTransformer
+from nav.train.pointgoal import (
+    POINTGOAL_ENCODING_LEGACY,
+    encode_pointgoal,
+)
 
 
 class BCNavController:
@@ -49,6 +60,12 @@ class BCNavController:
         self.config = cfg
 
         self.goal_rep = str(cfg.get("goal_rep", "cartesian"))
+        # Untagged checkpoints were trained with the original transform. Keep
+        # them loadable while all newly trained checkpoints use the corrected
+        # Unity-egocentric encoding stored in their config.
+        self.goal_encoding = str(
+            cfg.get("goal_encoding", POINTGOAL_ENCODING_LEGACY)
+        )
         self.goal_distance_scale_m = float(cfg.get("goal_distance_scale_m", 0.0))
         self.use_depth = bool(cfg.get("use_depth", True))
         self.use_rgb = bool(cfg.get("use_rgb", False))
@@ -56,10 +73,30 @@ class BCNavController:
         self.seq_len = self.seq_len_override if self.seq_len_override > 0 else int(cfg.get("seq_len", 8))
         self.num_layers = int(cfg.get("num_layers", 2))
         self.chunk_size = int(cfg.get("chunk_size", 1))
+        self.include_stop_targets = bool(cfg.get("include_stop_targets", True))
+        self.navigation_only_actions = bool(
+            cfg.get("navigation_only_actions", False)
+        )
+        self.action_to_label = (
+            BC_NAV_ACTION_TO_LABEL
+            if self.navigation_only_actions
+            else BC_ACTION_TO_LABEL
+        )
+        self.label_to_action = (
+            BC_NAV_LABEL_TO_ACTION
+            if self.navigation_only_actions
+            else BC_LABEL_TO_ACTION
+        )
+        self.start_action_idx = (
+            BC_NAV_BOS_LABEL
+            if self.navigation_only_actions
+            else BC_ACTION_TO_LABEL["stop"]
+        )
+        output_action_count = len(self.action_to_label)
 
         self.model = NavPolicyTransformer(
             goal_dim=2,
-            num_actions=4,
+            num_actions=output_action_count,
             use_depth=self.use_depth,
             use_rgb=self.use_rgb,
             seq_len=self.seq_len,
@@ -73,6 +110,12 @@ class BCNavController:
             half_width=bool(cfg.get("half_width", True)),
             img_size=self.img_size,
             chunk_size=self.chunk_size,
+            goal_action_residual=bool(cfg.get("goal_action_residual", False)),
+            previous_action_vocab_size=(
+                output_action_count + 1
+                if self.navigation_only_actions
+                else output_action_count
+            ),
         )
         self.model.load_state_dict(ckpt["model"], strict=True)
         self.model.to(self.device)
@@ -82,7 +125,7 @@ class BCNavController:
         self.depth_seq = deque(maxlen=self.seq_len)
         self.goal_seq = deque(maxlen=self.seq_len)
         self.prev_action_seq = deque(maxlen=self.seq_len)
-        self.last_action_idx = BC_ACTION_TO_LABEL["stop"]
+        self.last_action_idx = self.start_action_idx
         self._chunk_buffer: list = []
 
     def _prep_depth(self, depth_obs):
@@ -119,23 +162,16 @@ class BCNavController:
         return (ten - mean) / std
 
     def _build_goal(self, curr_world_x, curr_world_z, curr_yaw_deg, target_world_x, target_world_z):
-        dx = float(target_world_x) - float(curr_world_x)
-        dz = float(target_world_z) - float(curr_world_z)
-        yaw_rad = math.radians(float(curr_yaw_deg))
-        cos_yaw, sin_yaw = math.cos(yaw_rad), math.sin(yaw_rad)
-        rel_x = cos_yaw * dx + sin_yaw * dz
-        rel_z = -sin_yaw * dx + cos_yaw * dz
-        if self.goal_rep == "polar":
-            distance = math.sqrt(rel_x * rel_x + rel_z * rel_z)
-            angle = math.atan2(rel_z, rel_x)
-            if self.goal_distance_scale_m > 0.0:
-                distance /= self.goal_distance_scale_m
-                angle /= math.pi
-            return np.array([distance, angle], dtype=np.float32)
-        if self.goal_distance_scale_m > 0.0:
-            rel_x /= self.goal_distance_scale_m
-            rel_z /= self.goal_distance_scale_m
-        return np.array([rel_x, rel_z], dtype=np.float32)
+        return encode_pointgoal(
+            curr_world_x,
+            curr_world_z,
+            curr_yaw_deg,
+            target_world_x,
+            target_world_z,
+            goal_rep=self.goal_rep,
+            distance_scale_m=self.goal_distance_scale_m,
+            encoding=self.goal_encoding,
+        )
 
     def reset(self) -> None:
         """Clear observation history and the action-chunk buffer."""
@@ -143,7 +179,16 @@ class BCNavController:
         self.depth_seq.clear()
         self.goal_seq.clear()
         self.prev_action_seq.clear()
-        self.last_action_idx = BC_ACTION_TO_LABEL["stop"]
+        self.last_action_idx = self.start_action_idx
+        self._chunk_buffer.clear()
+
+    def observe_executed_action(self, action: str) -> None:
+        """Align history with an externally selected DAgger behavior action."""
+        if action not in self.action_to_label:
+            raise ValueError(f"Unsupported executed BC action: {action!r}")
+        self.last_action_idx = self.action_to_label[action]
+        # A cached chunk was conditioned on the policy's prior action, which
+        # may differ from the expert intervention that was actually executed.
         self._chunk_buffer.clear()
 
     def _padded_stack(self, frames: list, pad_value) -> torch.Tensor:
@@ -175,7 +220,7 @@ class BCNavController:
         if self._chunk_buffer:
             action_idx = self._chunk_buffer.pop(0)
             self.last_action_idx = action_idx
-            return BC_LABEL_TO_ACTION.get(action_idx, "stop")
+            return self.label_to_action.get(action_idx, "stop")
 
         if self.use_rgb:
             rgb = torch.stack(self._padded_stack(self.rgb_seq, None), dim=1).to(self.device)
@@ -189,11 +234,16 @@ class BCNavController:
 
         stop_label = BC_ACTION_TO_LABEL["stop"]
         prev_action = torch.tensor(
-            self._padded_stack(self.prev_action_seq, stop_label), dtype=torch.long
+            self._padded_stack(self.prev_action_seq, self.start_action_idx),
+            dtype=torch.long,
         ).unsqueeze(0).to(self.device)
 
         with torch.no_grad():
             logits = self.model(rgb, depth, goal, prev_action)
+
+        if not self.navigation_only_actions and not self.include_stop_targets:
+            logits = logits.clone()
+            logits[..., stop_label] = torch.finfo(logits.dtype).min
 
         if self.chunk_size > 1:
             action_indices = logits[0].argmax(dim=-1).tolist()
@@ -203,4 +253,4 @@ class BCNavController:
             action_idx = int(torch.argmax(logits, dim=1).item())
 
         self.last_action_idx = action_idx
-        return BC_LABEL_TO_ACTION.get(action_idx, "stop")
+        return self.label_to_action.get(action_idx, "stop")

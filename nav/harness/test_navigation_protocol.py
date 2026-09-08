@@ -26,8 +26,8 @@ from nav.harness.prompt_assembly import (
     add_api_observation_contract, format_history_for_prompt, render_nav_prompt,
 )
 from nav.harness.routing import execute_decision
-from nav.scripts import run_benchmark_cell as cell_runner
-from nav.scripts import run_benchmark_grid as grid_runner
+from nav.scripts.agent import run_benchmark_cell as cell_runner
+from nav.scripts.agent import run_benchmark_grid as grid_runner
 from nav.utils import load_prompt_template
 
 
@@ -173,8 +173,8 @@ class NavigationConfigTest(unittest.TestCase):
             self.assertEqual(old.read_text(), "old experiment\n")
             self.assertFalse((root / "run_config.json").exists())
 
-    @patch("nav.scripts.run_benchmark_grid.free_tcp_port", return_value=55555)
-    @patch("nav.scripts.run_benchmark_grid.subprocess.run")
+    @patch("nav.scripts.agent.run_benchmark_grid.free_tcp_port", return_value=55555)
+    @patch("nav.scripts.agent.run_benchmark_grid.subprocess.run")
     def test_worker_command_preserves_effective_configuration(self, run, port):
         with tempfile.TemporaryDirectory() as tmpdir:
             argv = ["grid", "--models", "test/model", "--seeds", "0",

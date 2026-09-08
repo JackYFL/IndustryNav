@@ -59,6 +59,8 @@ wandb/
 tensorboard/
 analysis/
 tests/
+!nav/scripts/tests/
+!nav/scripts/tests/*.py
 clients/
 datasets/
 

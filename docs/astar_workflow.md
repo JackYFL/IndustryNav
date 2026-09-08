@@ -10,6 +10,7 @@ The benchmark routes all decision makers through one baseline interface. Built-i
 llm
 astar
 bc
+ppo
 random
 ```
 
@@ -17,9 +18,9 @@ All baselines share the same Unity startup path, point format, action execution 
 
 Relevant code:
 
-- `shs/run_Astar.sh`: convenience wrapper for scene/point runs.
+- `shs/astar/run_Astar.sh`: convenience wrapper for scene/point runs.
 - `nav/baselines/astar.py`: A* planner and action selection.
-- `nav/scripts/run_benchmark_cell.py`: unified benchmark entry; `--baseline astar` constructs and runs the planner.
+- `nav/scripts/agent/run_benchmark_cell.py`: unified benchmark entry; `--baseline astar` constructs and runs the planner.
 - `nav/config.py`: default A* tuning values in `ASTAR_DEFAULTS`.
 
 A* does not need `OPENROUTER_API_KEY`.
@@ -51,43 +52,43 @@ turn left
 stop
 ```
 
-This shared contract is what lets LLM, A*, BC, random, and future baselines reuse the same benchmark runner and output/evaluation code.
+This shared contract is what lets LLM, A*, BC, PPO, random, and future baselines reuse the same benchmark runner and output/evaluation code.
 
 ## Quick Commands
 
 Run all points in one scene:
 
 ```bash
-bash shs/run_Astar.sh scene1
+bash shs/astar/run_Astar.sh scene1
 ```
 
 Run one point:
 
 ```bash
-bash shs/run_Astar.sh scene1 point1
+bash shs/astar/run_Astar.sh scene1 point1
 ```
 
 Run all scenes:
 
 ```bash
-bash shs/run_Astar.sh all
+bash shs/astar/run_Astar.sh all
 ```
 
 Enable debug visualizations:
 
 ```bash
-ASTAR_DEBUG_VIZ=1 bash shs/run_Astar.sh scene1 point1
+ASTAR_DEBUG_VIZ=1 bash shs/astar/run_Astar.sh scene1 point1
 ```
 
 Dry-run the generated command without launching Unity:
 
 ```bash
-DRY_RUN=1 bash shs/run_Astar.sh scene1 point1
+DRY_RUN=1 bash shs/astar/run_Astar.sh scene1 point1
 ```
 
 ## What the Wrapper Does
 
-`shs/run_Astar.sh` handles the repetitive setup:
+`shs/astar/run_Astar.sh` handles the repetitive setup:
 
 1. Validates `scene1`-`scene24` or `all`; `all` iterates the canonical 24-scene
    order and requires point data for every scene.
@@ -101,7 +102,7 @@ DRY_RUN=1 bash shs/run_Astar.sh scene1 point1
 The wrapper calls:
 
 ```bash
-python -m nav.scripts.run_benchmark_cell --baseline astar ...
+python -m nav.scripts.agent.run_benchmark_cell --baseline astar ...
 ```
 
 ## Inputs
@@ -170,8 +171,8 @@ or to `ASTAR_DEBUG_DIR` if explicitly provided.
 Export one run or all available runs:
 
 ```bash
-python -m nav.scripts.export_astar_preview --run-dir outputs/scene1/point1/astar --output outputs/astar_gifs/scene1/point1/astar.gif
-python -m nav.scripts.export_astar_preview --batch-root outputs --output-dir outputs/astar_gifs
+python -m nav.scripts.gallery.export_astar_preview --run-dir outputs/scene1/point1/astar --output outputs/astar_gifs/scene1/point1/astar.gif
+python -m nav.scripts.gallery.export_astar_preview --batch-root outputs --output-dir outputs/astar_gifs
 ```
 
 ## Important Runtime Settings
@@ -221,38 +222,38 @@ internal implementation details for raster masks and marker rendering.
 Use a fixed budget for a reproducibility run:
 
 ```bash
-MAX_STEPS=120 bash shs/run_Astar.sh scene1 point4
+MAX_STEPS=120 bash shs/astar/run_Astar.sh scene1 point4
 ```
 
 Tune the dynamic budget bounds or scaling:
 
 ```bash
 ASTAR_STEP_BUDGET_MAX=200 ASTAR_STEPS_PER_PATH_METER=1.4 \
-  bash shs/run_Astar.sh scene1 point4
+  bash shs/astar/run_Astar.sh scene1 point4
 ```
 
 Make obstacle avoidance more conservative:
 
 ```bash
-ASTAR_OBSTACLE_CLEARANCE_M=0.9 bash shs/run_Astar.sh scene1 point1
+ASTAR_OBSTACLE_CLEARANCE_M=0.9 bash shs/astar/run_Astar.sh scene1 point1
 ```
 
 Save only minimap/debug outputs:
 
 ```bash
-MODALITIES=minimap ASTAR_DEBUG_VIZ=1 bash shs/run_Astar.sh scene1 point1
+MODALITIES=minimap ASTAR_DEBUG_VIZ=1 bash shs/astar/run_Astar.sh scene1 point1
 ```
 
 Change the egocentric RGB and depth resolution together:
 
 ```bash
-EGO_WIDTH=768 EGO_HEIGHT=432 bash shs/run_Astar.sh scene1 point1
+EGO_WIDTH=768 EGO_HEIGHT=432 bash shs/astar/run_Astar.sh scene1 point1
 ```
 
 Resize the minimap while preserving its aspect ratio:
 
 ```bash
-MINIMAP_WIDTH=431 bash shs/run_Astar.sh scene1 point1
+MINIMAP_WIDTH=431 bash shs/astar/run_Astar.sh scene1 point1
 ```
 
 The saved minimap is `431 x 256`. A* converts its meter-based grid and clearance
@@ -262,13 +263,13 @@ projection, while CSV pixel output remains in the canonical `862 x 512` space.
 Keep the raw Unity red marker visible:
 
 ```bash
-HIDE_UNITY_RED_MARKER=0 bash shs/run_Astar.sh scene1 point1
+HIDE_UNITY_RED_MARKER=0 bash shs/astar/run_Astar.sh scene1 point1
 ```
 
 Use a custom output folder name:
 
 ```bash
-RUN_NAME=astar_clearance09 ASTAR_OBSTACLE_CLEARANCE_M=0.9 bash shs/run_Astar.sh scene1 point1
+RUN_NAME=astar_clearance09 ASTAR_OBSTACLE_CLEARANCE_M=0.9 bash shs/astar/run_Astar.sh scene1 point1
 ```
 
 ## Direct Python Invocation
@@ -276,7 +277,7 @@ RUN_NAME=astar_clearance09 ASTAR_OBSTACLE_CLEARANCE_M=0.9 bash shs/run_Astar.sh 
 For wrapper-free debugging, call the benchmark cell directly:
 
 ```bash
-python -m nav.scripts.run_benchmark_cell \
+python -m nav.scripts.agent.run_benchmark_cell \
   --baseline astar \
   --file_name auto \
   --scene_id 0 \
@@ -466,7 +467,7 @@ Keep failures contained. `execute_decision` already catches exceptions and turns
 
 ### 4. Build the Payload in `run_benchmark_cell.py`
 
-In `nav/scripts/run_benchmark_cell.py`, initialize any controller/planner before the Unity loop, then build the per-step payload inside the decision loop.
+In `nav/scripts/agent/run_benchmark_cell.py`, initialize any controller/planner before the Unity loop, then build the per-step payload inside the decision loop.
 
 The payload can use the same information already passed to existing baselines:
 
@@ -497,7 +498,7 @@ If the new baseline needs annotation-style actions or agent-style actions, updat
 Most baselines can run through:
 
 ```bash
-BASELINE=my_baseline bash shs/run_headless_benchmark.sh scene1
+BASELINE=my_baseline bash shs/agent/run_headless_benchmark.sh scene1
 ```
 
 Add a dedicated shell wrapper only when the baseline has many repeated tuning variables, like A* does.

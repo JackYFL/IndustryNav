@@ -114,6 +114,19 @@ def _launch_env(args, logger):
         "--minimap-width", str(minimap_width),
         "--minimap-height", str(minimap_height),
     ]
+    device_index = os.environ.get("INDUSTRYNAV_UNITY_DEVICE_INDEX")
+    if device_index is not None and device_index.strip():
+        try:
+            parsed_device_index = int(device_index)
+        except ValueError as exc:
+            raise EnvSetupError(
+                "INDUSTRYNAV_UNITY_DEVICE_INDEX must be a non-negative integer"
+            ) from exc
+        if parsed_device_index < 0:
+            raise EnvSetupError(
+                "INDUSTRYNAV_UNITY_DEVICE_INDEX must be a non-negative integer"
+            )
+        unity_args.extend(["-force-device-index", str(parsed_device_index)])
     if use_batchmode:
         unity_args.insert(0, "-batchmode")
 
@@ -122,6 +135,16 @@ def _launch_env(args, logger):
     # blanks the sensor frames on macOS. macOS uses `-batchmode`; Linux defaults
     # to windowed because some Linux builds SIGSEGV during Input System init in
     # batchmode. Override with INDUSTRYNAV_UNITY_BATCHMODE=1/0.
+    try:
+        timeout_wait = int(os.environ.get("INDUSTRYNAV_UNITY_TIMEOUT_SECONDS", "120"))
+    except ValueError as exc:
+        raise EnvSetupError(
+            "INDUSTRYNAV_UNITY_TIMEOUT_SECONDS must be a positive integer"
+        ) from exc
+    if timeout_wait <= 0:
+        raise EnvSetupError(
+            "INDUSTRYNAV_UNITY_TIMEOUT_SECONDS must be a positive integer"
+        )
     env = UnityEnvironment(
         file_name=args.file_name,
         no_graphics=False,
@@ -129,7 +152,7 @@ def _launch_env(args, logger):
         additional_args=unity_args,
         worker_id=int(args.worker_id),
         base_port=int(args.base_port),
-        timeout_wait=120,
+        timeout_wait=timeout_wait,
     )
     quality_level = int(getattr(args, "quality_level", UNITY_ENGINE_QUALITY_LEVEL))
     engine.set_configuration_parameters(

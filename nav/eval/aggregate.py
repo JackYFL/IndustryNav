@@ -7,7 +7,7 @@ than raising — the caller decides how to surface them.
 
 :func:`write_aggregate_xlsx` is the xlsx-emission half. It depends on
 ``openpyxl`` being installed; if not, it falls back to CSV. Used by
-``nav.scripts.aggregate_eval``.
+``nav.scripts.evaluation.aggregate_eval``.
 """
 
 from __future__ import annotations

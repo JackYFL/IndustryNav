@@ -15,12 +15,14 @@ from typing import Dict
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from nav.config import BCTrainConfig
+from nav.config import BC_ACTION_TO_LABEL, BC_NAV_ACTION_TO_LABEL, BCTrainConfig
 from nav.models import build_policy
 from nav.train.dataset import NavEpisodeDataset, NavEpisodeSequenceDataset
+from nav.train.pointgoal import POINTGOAL_ENCODING_LEGACY
 
 _SEQUENCE_POLICIES = {"lstm", "transformer", "diffusion"}
 
@@ -36,9 +38,43 @@ def get_class_weights(
 ) -> torch.Tensor:
     if not 0.0 <= power <= 1.0:
         raise ValueError("class_weight_power must be in [0, 1]")
-    counts = np.maximum(np.array([class_counts[i] for i in range(4)], dtype=np.float32), 1.0)
-    inverse = counts.sum() / (counts * len(counts))
-    return torch.tensor(np.power(inverse, power), dtype=torch.float32)
+    counts = np.array(
+        [class_counts[i] for i in range(len(class_counts))], dtype=np.float32
+    )
+    present = counts > 0
+    if not np.any(present):
+        raise ValueError("at least one action class must have training samples")
+
+    # Keep absent output classes at exactly zero.  Clamping an absent class to
+    # one sample gives it an enormous inverse-frequency weight; when label
+    # smoothing is enabled that class then receives supervision from every
+    # example and can dominate the learned policy (the v3 PointGoal stop
+    # collapse).  Relative weights among classes that are actually present are
+    # unchanged.
+    weights = np.zeros_like(counts)
+    inverse = counts[present].sum() / (counts[present] * present.sum())
+    weights[present] = np.power(inverse, power)
+    return torch.tensor(weights, dtype=torch.float32)
+
+
+def mask_untrained_stop_logits(
+    logits: torch.Tensor,
+    include_stop_targets: bool,
+    navigation_only_actions: bool = False,
+) -> torch.Tensor:
+    """Make ``stop`` impossible when termination is distance-controlled.
+
+    PointGoal rollouts already terminate before policy inference once the
+    agent is within ``reach_m``.  Runs trained without terminal stop targets
+    therefore use only the three navigation actions.  Keeping the fourth
+    output preserves checkpoint compatibility while this mask enforces the
+    intended contract during training, validation, and deployment.
+    """
+    if include_stop_targets or navigation_only_actions:
+        return logits
+    masked = logits.clone()
+    masked[..., BC_ACTION_TO_LABEL["stop"]] = torch.finfo(masked.dtype).min
+    return masked
 
 
 def _build_datasets(cfg: BCTrainConfig):
@@ -46,12 +82,15 @@ def _build_datasets(cfg: BCTrainConfig):
         common = dict(
             data_root=cfg.data_root, seq_len=cfg.seq_len, img_size=cfg.img_size,
             split_ratios=cfg.split_ratios, seed=cfg.seed, goal_rep=cfg.goal_rep,
+            goal_encoding=cfg.goal_encoding,
             goal_distance_scale_m=cfg.goal_distance_scale_m,
             horizontal_flip_prob=cfg.horizontal_flip_prob,
+            previous_action_noise_prob=cfg.previous_action_noise_prob,
             normalize_rgb=cfg.normalize_rgb, use_depth=cfg.use_depth, use_rgb=cfg.use_rgb,
             chunk_size=cfg.chunk_size,
             action_target_offset=cfg.sequence_action_offset,
             include_stop_targets=cfg.include_stop_targets,
+            navigation_only_actions=cfg.navigation_only_actions,
         )
         train_ds = NavEpisodeSequenceDataset(split="train", **common)
         val_ds = NavEpisodeSequenceDataset(split="val", **common)
@@ -90,14 +129,50 @@ def _chunk_ce_loss(criterion, logits: torch.Tensor, action: torch.Tensor, chunk_
     return criterion(logits, action)
 
 
-def evaluate(model, loader, device, policy_type: str, chunk_size: int = 1) -> Dict[str, float]:
+def turn_direction_loss(
+    logits: torch.Tensor,
+    action: torch.Tensor,
+    action_to_label: Dict[str, int] = BC_ACTION_TO_LABEL,
+) -> torch.Tensor:
+    """Balance left-vs-right learning without duplicating forward samples."""
+    if logits.ndim == 3:
+        logits = logits.reshape(-1, logits.shape[-1])
+        action = action.reshape(-1)
+    right = action_to_label["turn right"]
+    left = action_to_label["turn left"]
+    mask = (action == right) | (action == left)
+    if not torch.any(mask):
+        return logits.sum() * 0.0
+    turn_logits = logits[mask][:, [right, left]]
+    turn_target = (action[mask] == left).long()
+    return F.cross_entropy(turn_logits, turn_target)
+
+
+def evaluate(
+    model,
+    loader,
+    device,
+    policy_type: str,
+    chunk_size: int = 1,
+    include_stop_targets: bool = True,
+    navigation_only_actions: bool = False,
+) -> Dict[str, float]:
+    action_to_label = (
+        BC_NAV_ACTION_TO_LABEL
+        if navigation_only_actions
+        else BC_ACTION_TO_LABEL
+    )
     model.eval()
     correct = total = 0
-    per_class = {i: [0, 0] for i in range(4)}
+    per_class = {i: [0, 0] for i in range(len(action_to_label))}
+    predicted = {i: 0 for i in range(len(action_to_label))}
     with torch.no_grad():
         for batch in loader:
             action = batch["action"].to(device)
             logits = _forward_logits(model, batch, device, policy_type)
+            logits = mask_untrained_stop_logits(
+                logits, include_stop_targets, navigation_only_actions
+            )
             if chunk_size > 1:  # evaluate only the first step of the chunk
                 step_logits, step_action = logits[:, 0, :], action[:, 0]
             else:
@@ -105,13 +180,26 @@ def evaluate(model, loader, device, policy_type: str, chunk_size: int = 1) -> Di
             pred = step_logits.argmax(dim=1)
             correct += (pred == step_action).sum().item()
             total += step_action.numel()
-            for cls in range(4):
+            for cls in range(len(action_to_label)):
                 mask = step_action == cls
                 per_class[cls][1] += mask.sum().item()
                 per_class[cls][0] += (pred[mask] == cls).sum().item()
+                predicted[cls] += (pred == cls).sum().item()
 
     metrics = {"acc": correct / max(total, 1)}
     metrics.update({f"acc_class_{k}": v[0] / max(v[1], 1) for k, v in per_class.items()})
+    metrics.update({f"support_class_{k}": v[1] for k, v in per_class.items()})
+    metrics.update({f"predicted_class_{k}": value for k, value in predicted.items()})
+    present = [metrics[f"acc_class_{k}"] for k, value in per_class.items() if value[1]]
+    navigation_classes = tuple(
+        action_to_label[name]
+        for name in ("forward", "turn right", "turn left")
+    )
+    navigation = [
+        metrics[f"acc_class_{k}"] for k in navigation_classes if per_class[k][1]
+    ]
+    metrics["macro_acc"] = float(np.mean(present)) if present else 0.0
+    metrics["macro_nav_acc"] = float(np.mean(navigation)) if navigation else 0.0
     return metrics
 
 
@@ -128,10 +216,41 @@ def _make_optimizer(model, cfg: BCTrainConfig) -> torch.optim.Optimizer:
     return torch.optim.AdamW(param_groups, weight_decay=cfg.weight_decay)
 
 
-def _save_ckpt(path, model, cfg_dict, epoch, metrics, best_acc) -> None:
+def initialize_from_checkpoint(model, cfg: BCTrainConfig) -> None:
+    """Load compatible weights for DAgger fine-tuning, without optimizer state."""
+    if not cfg.init_checkpoint:
+        return
+    checkpoint = torch.load(cfg.init_checkpoint, map_location="cpu")
+    if not isinstance(checkpoint, dict) or "model" not in checkpoint:
+        raise ValueError(f"Invalid initialization checkpoint: {cfg.init_checkpoint}")
+    source_cfg = checkpoint.get("config", {})
+    source_encoding = source_cfg.get(
+        "goal_encoding", POINTGOAL_ENCODING_LEGACY
+    )
+    if source_encoding != cfg.goal_encoding:
+        raise ValueError(
+            "Initialization checkpoint goal encoding mismatch: "
+            f"{source_encoding!r} != {cfg.goal_encoding!r}"
+        )
+    source_navigation_only = bool(
+        source_cfg.get("navigation_only_actions", False)
+    )
+    if source_navigation_only != cfg.navigation_only_actions:
+        raise ValueError(
+            "Initialization checkpoint action-head mismatch: "
+            f"navigation_only_actions={source_navigation_only} != "
+            f"{cfg.navigation_only_actions}"
+        )
+    model.load_state_dict(checkpoint["model"], strict=True)
+
+
+def _save_ckpt(path, model, cfg_dict, epoch, metrics, best_score) -> None:
     torch.save(
         {"model": model.state_dict(), "config": cfg_dict, "epoch": epoch,
-         "val_metrics": metrics, "best_acc": best_acc},
+         "val_metrics": metrics, "best_score": best_score,
+         "selection_metric": cfg_dict.get("checkpoint_metric", "acc"),
+         # Retain the legacy field for older checkpoint readers.
+         "best_acc": best_score},
         path,
     )
 
@@ -154,15 +273,26 @@ def train(cfg: BCTrainConfig) -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = build_policy(cfg, input_dim).to(device)
+    initialize_from_checkpoint(model, cfg)
+
+    if not 0.0 <= cfg.label_smoothing < 1.0:
+        raise ValueError("label_smoothing must be in [0, 1)")
+    if cfg.turn_aux_loss_weight < 0.0:
+        raise ValueError("turn_aux_loss_weight must be nonnegative")
+    if cfg.checkpoint_metric not in {"acc", "macro_acc", "macro_nav_acc"}:
+        raise ValueError(f"Unsupported checkpoint_metric: {cfg.checkpoint_metric!r}")
+    if cfg.policy_type == "diffusion" and cfg.turn_aux_loss_weight:
+        raise ValueError("turn_aux_loss_weight is only supported by logit policies")
 
     criterion = torch.nn.CrossEntropyLoss(
         weight=get_class_weights(
             train_ds.class_counts, cfg.class_weight_power
-        ).to(device)
+        ).to(device),
+        label_smoothing=cfg.label_smoothing,
     )
     optimizer = _make_optimizer(model, cfg)
 
-    best_acc = 0.0
+    best_score = float("-inf")
     for epoch in range(1, cfg.epochs + 1):
         model.train()
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{cfg.epochs}")
@@ -177,20 +307,47 @@ def train(cfg: BCTrainConfig) -> None:
                 loss = model.diffusion_loss(rgb, depth, goal, prev_action, action)
             else:
                 logits = _forward_logits(model, batch, device, cfg.policy_type)
+                logits = mask_untrained_stop_logits(
+                    logits,
+                    cfg.include_stop_targets,
+                    cfg.navigation_only_actions,
+                )
                 loss = _chunk_ce_loss(criterion, logits, action, cfg.chunk_size)
+                if cfg.turn_aux_loss_weight:
+                    loss = loss + cfg.turn_aux_loss_weight * turn_direction_loss(
+                        logits,
+                        action,
+                        (
+                            BC_NAV_ACTION_TO_LABEL
+                            if cfg.navigation_only_actions
+                            else BC_ACTION_TO_LABEL
+                        ),
+                    )
             loss.backward()
             optimizer.step()
             pbar.set_postfix({"loss": f"{loss.item():.4f}"})
 
-        metrics = evaluate(model, val_loader, device, cfg.policy_type, cfg.chunk_size)
-        val_acc = metrics["acc"]
-        print(f"Validation acc: {val_acc:.4f}")
+        metrics = evaluate(
+            model,
+            val_loader,
+            device,
+            cfg.policy_type,
+            cfg.chunk_size,
+            cfg.include_stop_targets,
+            cfg.navigation_only_actions,
+        )
+        score = metrics[cfg.checkpoint_metric]
+        print(
+            f"Validation acc: {metrics['acc']:.4f} | "
+            f"macro: {metrics['macro_acc']:.4f} | "
+            f"macro-nav: {metrics['macro_nav_acc']:.4f}"
+        )
 
-        if val_acc > best_acc:
-            best_acc = val_acc
-            _save_ckpt(os.path.join(cfg.output_dir, "best.pt"), model, cfg_dict, epoch, metrics, best_acc)
-        _save_ckpt(os.path.join(cfg.output_dir, "last.pt"), model, cfg_dict, epoch, metrics, best_acc)
+        if score > best_score:
+            best_score = score
+            _save_ckpt(os.path.join(cfg.output_dir, "best.pt"), model, cfg_dict, epoch, metrics, best_score)
+        _save_ckpt(os.path.join(cfg.output_dir, "last.pt"), model, cfg_dict, epoch, metrics, best_score)
         with open(os.path.join(cfg.output_dir, "metrics.json"), "a") as f:
             f.write(json.dumps({"epoch": epoch, **metrics}) + "\n")
 
-    print(f"Best val acc: {best_acc:.4f}")
+    print(f"Best validation {cfg.checkpoint_metric}: {best_score:.4f}")

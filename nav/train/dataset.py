@@ -40,10 +40,13 @@ from nav.config import (
     BC_ACTION_TO_LABEL,
     BC_DEPTH_SUBDIR,
     BC_EPISODE_CSV,
+    BC_NAV_ACTION_TO_LABEL,
+    BC_NAV_BOS_LABEL,
     BC_RGB_SUBDIR,
     IMAGENET_MEAN,
     IMAGENET_STD,
 )
+from nav.train.pointgoal import POINTGOAL_ENCODING_UNITY, encode_pointgoal
 
 
 def _row_float(row: Dict[str, str], key: str, default: float = 0.0) -> float:
@@ -296,29 +299,47 @@ class NavEpisodeSequenceDataset(_NavEpisodeBase):
         split_ratios: Tuple[float, float, float] = (0.7, 0.15, 0.15),
         seed: int = 42,
         goal_rep: str = "cartesian",
+        goal_encoding: str = POINTGOAL_ENCODING_UNITY,
         goal_distance_scale_m: float = 0.0,
         horizontal_flip_prob: float = 0.0,
+        previous_action_noise_prob: float = 0.0,
         normalize_rgb: bool = True,
         use_depth: bool = True,
         use_rgb: bool = False,
         chunk_size: int = 1,
         action_target_offset: int = 0,
         include_stop_targets: bool = True,
+        navigation_only_actions: bool = False,
     ) -> None:
         self.seq_len = seq_len
         self.goal_rep = goal_rep
+        self.goal_encoding = goal_encoding
         self.goal_distance_scale_m = float(goal_distance_scale_m)
         self.horizontal_flip_prob = float(horizontal_flip_prob)
+        self.previous_action_noise_prob = float(previous_action_noise_prob)
         if self.goal_distance_scale_m < 0.0:
             raise ValueError("goal_distance_scale_m must be nonnegative")
         if not 0.0 <= self.horizontal_flip_prob <= 1.0:
             raise ValueError("horizontal_flip_prob must be in [0, 1]")
+        if not 0.0 <= self.previous_action_noise_prob <= 1.0:
+            raise ValueError("previous_action_noise_prob must be in [0, 1]")
         self.use_rgb = use_rgb
         self.chunk_size = chunk_size
         if action_target_offset not in {0, 1}:
             raise ValueError("action_target_offset must be 0 or 1")
         self.action_target_offset = int(action_target_offset)
         self.include_stop_targets = bool(include_stop_targets)
+        self.navigation_only_actions = bool(navigation_only_actions)
+        self.action_to_label = (
+            BC_NAV_ACTION_TO_LABEL
+            if self.navigation_only_actions
+            else BC_ACTION_TO_LABEL
+        )
+        self.start_action_label = (
+            BC_NAV_BOS_LABEL
+            if self.navigation_only_actions
+            else BC_ACTION_TO_LABEL["stop"]
+        )
         super().__init__(data_root, split, img_size, split_ratios, seed, normalize_rgb, use_depth)
         self._episode_steps = self._build_episode_steps()
         self._index = self._build_index()
@@ -364,8 +385,17 @@ class NavEpisodeSequenceDataset(_NavEpisodeBase):
                     goal_seq,
                     prev_action_seq,
                     action,
+                    action_to_label=self.action_to_label,
                 )
             )
+        if self.augment and self.previous_action_noise_prob > 0.0:
+            action_count = len(self.action_to_label)
+            prev_action_seq = [
+                random.randrange(action_count)
+                if random.random() < self.previous_action_noise_prob
+                else label
+                for label in prev_action_seq
+            ]
 
         return {
             "rgb": torch.stack(rgb_seq) if self.use_rgb else torch.empty(0),
@@ -386,7 +416,6 @@ class NavEpisodeSequenceDataset(_NavEpisodeBase):
         return torch.tensor(chunk, dtype=torch.long)
 
     def _build_episode_steps(self) -> List[List[dict]]:
-        stop_label = BC_ACTION_TO_LABEL["stop"]
         episodes_steps: List[List[dict]] = []
         for ep_dir in self._episodes:
             csv_path, rgb_dir, depth_dir = self._episode_paths(ep_dir)
@@ -394,7 +423,7 @@ class NavEpisodeSequenceDataset(_NavEpisodeBase):
             with open(csv_path, "r", newline="") as f:
                 for row in csv.DictReader(f):
                     action_str = str(row.get("action", "")).strip().lower()
-                    if action_str not in BC_ACTION_TO_LABEL:
+                    if action_str not in self.action_to_label:
                         continue
                     step = int(float(row.get("step", 0)))
                     rgb_path = os.path.join(rgb_dir, f"{step}.png")
@@ -403,13 +432,29 @@ class NavEpisodeSequenceDataset(_NavEpisodeBase):
                         continue
                     if self.use_depth and not os.path.isfile(depth_path):
                         continue
-                    action = BC_ACTION_TO_LABEL[action_str]
+                    action = self.action_to_label[action_str]
+                    behavior_action_str = str(
+                        row.get("behavior_action", action_str)
+                    ).strip().lower()
+                    if behavior_action_str not in self.action_to_label:
+                        raise ValueError(
+                            f"Unsupported behavior action {behavior_action_str!r} "
+                            f"in {csv_path}:{step}"
+                        )
+                    behavior_action = self.action_to_label[behavior_action_str]
                     steps.append({
                         "rgb_path": rgb_path,
                         "depth_path": depth_path,
                         "goal": self._build_goal(row),
-                        "prev_action": steps[-1]["action"] if steps else stop_label,
+                        "prev_action": (
+                            steps[-1]["behavior_action"]
+                            if steps
+                            else self.start_action_label
+                        ),
                         "action": action,
+                        # DAgger targets the oracle action but conditions the
+                        # next state on what the mixed behavior actually did.
+                        "behavior_action": behavior_action,
                     })
             if steps:
                 episodes_steps.append(steps)
@@ -418,7 +463,11 @@ class NavEpisodeSequenceDataset(_NavEpisodeBase):
         return episodes_steps
 
     def _build_index(self) -> List[Tuple[int, int]]:
-        drop_stop_target = not self.include_stop_targets and self.split in {"train", "val"}
+        drop_stop_target = (
+            not self.navigation_only_actions
+            and not self.include_stop_targets
+            and self.split in {"train", "val"}
+        )
         stop_label = BC_ACTION_TO_LABEL["stop"]
         index = []
         for ep_idx, steps in enumerate(self._episode_steps):
@@ -431,38 +480,30 @@ class NavEpisodeSequenceDataset(_NavEpisodeBase):
         return index
 
     def _build_goal(self, row: Dict[str, str]) -> np.ndarray:
-        yaw_rad = math.radians(_row_float(row, "curr_direction_y", _row_float(row, "init_direction")))
-        curr_x, curr_z = _row_float(row, "curr_world_x"), _row_float(row, "curr_world_z")
-        target_x, target_z = _row_float(row, "target_world_x"), _row_float(row, "target_world_z")
-        dx, dz = target_x - curr_x, target_z - curr_z
-        cos_yaw, sin_yaw = math.cos(yaw_rad), math.sin(yaw_rad)
-        rel_x = cos_yaw * dx + sin_yaw * dz
-        rel_z = -sin_yaw * dx + cos_yaw * dz
-        if self.goal_rep == "polar":
-            distance = math.sqrt(rel_x * rel_x + rel_z * rel_z)
-            angle = math.atan2(rel_z, rel_x)
-            if self.goal_distance_scale_m > 0.0:
-                distance /= self.goal_distance_scale_m
-                angle /= math.pi
-            return np.array([distance, angle], dtype=np.float32)
-        if self.goal_distance_scale_m > 0.0:
-            rel_x /= self.goal_distance_scale_m
-            rel_z /= self.goal_distance_scale_m
-        return np.array([rel_x, rel_z], dtype=np.float32)
+        return encode_pointgoal(
+            _row_float(row, "curr_world_x"),
+            _row_float(row, "curr_world_z"),
+            _row_float(row, "curr_direction_y", _row_float(row, "init_direction")),
+            _row_float(row, "target_world_x"),
+            _row_float(row, "target_world_z"),
+            goal_rep=self.goal_rep,
+            distance_scale_m=self.goal_distance_scale_m,
+            encoding=self.goal_encoding,
+        )
 
     def _count_classes(self) -> Dict[int, int]:
-        counts = {i: 0 for i in range(4)}
+        counts = {i: 0 for i in range(len(self.action_to_label))}
         for ep_idx, step_idx in self._index:
             target_idx = step_idx + self.action_target_offset
             counts[self._episode_steps[ep_idx][target_idx]["action"]] += 1
         return counts
 
 
-def _swap_turn_label(label: int) -> int:
-    if label == BC_ACTION_TO_LABEL["turn right"]:
-        return BC_ACTION_TO_LABEL["turn left"]
-    if label == BC_ACTION_TO_LABEL["turn left"]:
-        return BC_ACTION_TO_LABEL["turn right"]
+def _swap_turn_label(label: int, action_to_label: Dict[str, int]) -> int:
+    if label == action_to_label["turn right"]:
+        return action_to_label["turn left"]
+    if label == action_to_label["turn left"]:
+        return action_to_label["turn right"]
     return label
 
 
@@ -472,6 +513,7 @@ def mirror_pointgoal_sample(
     goal_seq: List[torch.Tensor],
     prev_action_seq: List[int],
     action: torch.Tensor,
+    action_to_label: Dict[str, int] = BC_ACTION_TO_LABEL,
 ) -> tuple[
     List[torch.Tensor],
     List[torch.Tensor],
@@ -487,10 +529,12 @@ def mirror_pointgoal_sample(
         mirrored = goal.clone()
         mirrored[1] = -mirrored[1]
         mirrored_goals.append(mirrored)
-    prev_action_seq = [_swap_turn_label(label) for label in prev_action_seq]
+    prev_action_seq = [
+        _swap_turn_label(label, action_to_label) for label in prev_action_seq
+    ]
     mirrored_action = action.clone()
-    right = action == BC_ACTION_TO_LABEL["turn right"]
-    left = action == BC_ACTION_TO_LABEL["turn left"]
-    mirrored_action[right] = BC_ACTION_TO_LABEL["turn left"]
-    mirrored_action[left] = BC_ACTION_TO_LABEL["turn right"]
+    right = action == action_to_label["turn right"]
+    left = action == action_to_label["turn left"]
+    mirrored_action[right] = action_to_label["turn left"]
+    mirrored_action[left] = action_to_label["turn right"]
     return rgb_seq, depth_seq, mirrored_goals, prev_action_seq, mirrored_action

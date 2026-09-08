@@ -1,4 +1,4 @@
-"""Main entry-point scripts.
+"""Functionally grouped command-line entry points.
 
 Each module here is a thin CLI wrapper that imports submodules from the
 rest of the ``nav`` package and stitches them into one runnable job.
