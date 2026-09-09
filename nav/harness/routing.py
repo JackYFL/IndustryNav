@@ -19,10 +19,30 @@ loop has one code path for every baseline.
 
 from __future__ import annotations
 
+import logging
+import time
+
 import numpy as np
 
 from nav.config import LLM_ERROR_SENTINELS
 from nav.harness.llm_provider import llm_generate_decision
+
+logger = logging.getLogger(__name__)
+
+# Seconds between in-episode LLM re-queries; scaled by the attempt index.
+LLM_DECISION_RETRY_BACKOFF_SEC = 5.0
+
+
+def _llm_decision_failed(decision: dict) -> bool:
+    """True when a decision carries the provider error flag or an error sentinel.
+
+    Only explicit sentinels count: a bare "failed" substring trips on
+    legitimate chain-of-thought ("forward failed to change position").
+    """
+    if decision.get("error"):
+        return True
+    r_lower = str(decision.get("reasoning", "")).lower()
+    return any(s in r_lower for s in LLM_ERROR_SENTINELS)
 
 
 def astar_path_length_m(path, point_to_world) -> float | None:
@@ -55,27 +75,40 @@ def execute_decision(baseline: str, payload: dict, result_container: dict) -> No
             result_container["action"] = str(np.random.choice(payload["action_space"]))
             result_container["reasoning"] = "Random action."
         elif baseline == "llm":
-            decision = llm_generate_decision(
-                prompt=payload["prompt"],
-                images=payload["images"],
-                model=payload["model_id"],
-                provider=payload.get("llm_provider", "openrouter"),
-                max_tokens=payload["max_tokens"],
-                min_request_interval_sec=payload.get(
-                    "llm_min_request_interval_sec", 0.0
-                ),
-                allowed_actions=payload["allowed_actions"],
-            )
+            # A single bad reply (transport timeout, truncated/empty content,
+            # malformed JSON) used to abort the whole episode. Re-query the
+            # same observation up to ``llm_decision_retries`` extra times
+            # before surfacing the error; the retry count is logged so the
+            # per-step log stays auditable.
+            retries = max(0, int(payload.get("llm_decision_retries", 0)))
+            decision = None
+            for attempt in range(retries + 1):
+                decision = llm_generate_decision(
+                    prompt=payload["prompt"],
+                    images=payload["images"],
+                    model=payload["model_id"],
+                    provider=payload.get("llm_provider", "openrouter"),
+                    max_tokens=payload["max_tokens"],
+                    min_request_interval_sec=payload.get(
+                        "llm_min_request_interval_sec", 0.0
+                    ),
+                    allowed_actions=payload["allowed_actions"],
+                )
+                if not _llm_decision_failed(decision):
+                    break
+                if attempt < retries:
+                    delay = LLM_DECISION_RETRY_BACKOFF_SEC * (attempt + 1)
+                    logger.warning(
+                        "LLM decision failed (attempt %d/%d), retrying in %.0fs: %s",
+                        attempt + 1, retries + 1, delay,
+                        str(decision.get("reasoning", ""))[:200],
+                    )
+                    time.sleep(delay)
             result_container.update(decision)
-            reasoning = decision["reasoning"]
+            result_container["decision_attempts"] = attempt + 1
             result_container["prompt"] = payload["prompt"]
             result_container["history_entry"] = payload.get("history_entry", {})
-            # Only abort on an explicit provider error sentinel. A bare
-            # "failed" substring trips on legitimate chain-of-thought
-            # ("forward failed to change position"), spuriously aborting
-            # otherwise-working runs.
-            r_lower = str(reasoning).lower()
-            if any(s in r_lower for s in LLM_ERROR_SENTINELS):
+            if _llm_decision_failed(decision):
                 result_container["error"] = True
         elif baseline == "bc":
             result_container["action"] = payload["bc_controller"].predict_action(

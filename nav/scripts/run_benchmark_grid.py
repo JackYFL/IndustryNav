@@ -48,6 +48,7 @@ import subprocess
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
+import dataclasses
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import List, Optional
@@ -60,6 +61,7 @@ from nav.config import (
     DEFAULT_PROMPT_VISION,
     GRID_CSV_FIELDS,
     LLM_DEFAULT_HISTORY_SIZE,
+    LLM_DEFAULT_DECISION_RETRIES,
     LLM_DEFAULT_MAX_TOKENS,
     SCENE_ID_MAP,
     SCENE_CODES,
@@ -232,6 +234,7 @@ def run_cell(args_dict: dict) -> dict:
     llm_provider = args_dict["llm_provider"]
     llm_min_request_interval_sec = args_dict["llm_min_request_interval_sec"]
     max_tokens = args_dict["max_tokens"]
+    llm_decision_retries = args_dict["llm_decision_retries"]
     max_steps = args_dict["max_steps"]
     dynamic_step_budget = args_dict["dynamic_step_budget"]
     step_budget_min = args_dict["step_budget_min"]
@@ -323,6 +326,7 @@ def run_cell(args_dict: dict) -> dict:
         "--llm_provider", llm_provider,
         "--llm_min_request_interval_sec", str(llm_min_request_interval_sec),
         "--max_tokens", str(max_tokens),
+        "--llm_decision_retries", str(llm_decision_retries),
         "--init_world_x", str(cell.init_world_x),
         "--init_world_z", str(cell.init_world_z),
         "--init_curr_direction", str(cell.init_direction),
@@ -527,6 +531,15 @@ def parse_args():
         default=LLM_DEFAULT_MAX_TOKENS,
         help="Maximum completion tokens for each LLM decision request.",
     )
+    p.add_argument(
+        "--llm_decision_retries",
+        type=int,
+        default=LLM_DEFAULT_DECISION_RETRIES,
+        help=(
+            "Extra in-episode re-queries when an LLM reply is unusable before "
+            "the cell stops with decision_error (forwarded to every cell)."
+        ),
+    )
     p.add_argument("--max_steps", type=int, default=70)
     p.add_argument(
         "--dynamic_step_budget",
@@ -584,6 +597,17 @@ def parse_args():
                    help="Retry a failed cell this many times before logging it to failures.csv.")
     p.add_argument("--resume", action="store_true",
                    help="Skip normally completed cells; resume partial cells from checkpoints or compatible legacy logs without resetting API counters.")
+    p.add_argument(
+        "--skip_completed_from",
+        type=str,
+        default="",
+        help=(
+            "Also skip cells that completed normally under this other output "
+            "root. Use when continuing a sweep into a fresh --output_root after "
+            "a settings change; the older cells keep their own run_config.json "
+            "and are not validated against the current settings."
+        ),
+    )
     p.add_argument(
         "--skip_existing_dirs",
         action="store_true",
@@ -698,6 +722,15 @@ def main():
         cells = [c for c in cells if not cell_completed(c)]
         print(f"[resume] skipping {before - len(cells)} already-complete cells "
               f"(matching config and normal stop); {len(cells)} remain.", flush=True)
+    if args.skip_completed_from:
+        alt_root = str(Path(args.skip_completed_from).resolve())
+        before = len(cells)
+        cells = [
+            c for c in cells
+            if not cell_completed(dataclasses.replace(c, output_root=alt_root))
+        ]
+        print(f"[skip-completed-from] skipping {before - len(cells)} cells that "
+              f"completed normally under {alt_root}; {len(cells)} remain.", flush=True)
 
     file_name = resolve_file_name(args.file_name)
     if not Path(file_name).exists():
@@ -766,6 +799,7 @@ def main():
                             args.llm_min_request_interval_sec
                         ),
                         "max_tokens": args.max_tokens,
+                        "llm_decision_retries": args.llm_decision_retries,
                         "max_steps": args.max_steps,
                         "dynamic_step_budget": args.dynamic_step_budget,
                         "step_budget_min": args.step_budget_min,

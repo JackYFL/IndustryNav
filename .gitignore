@@ -50,9 +50,11 @@ unity_projects/
 *.log
 unity_log.txt
 test.log
+# Mono crash dumps written to the CWD when a Unity player is killed mid-run
+mono_crash.*
 
-# Benchmark / training / evaluation outputs
-outputs/
+# Benchmark / training / evaluation outputs (any outputs* root, e.g. outputs_v2/)
+outputs*/
 build_logs/
 logs/
 # Local scratch space. Everything inside is ignored except the secrets template.

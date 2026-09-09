@@ -11,7 +11,12 @@ import json
 import os
 from pathlib import Path
 
-from nav.config import ACTION_SPACE_AGENTS, LLM_DEFAULT_MAX_TOKENS, LLM_REQUEST_TIMEOUT_SEC
+from nav.config import (
+    ACTION_SPACE_AGENTS,
+    LLM_DEFAULT_DECISION_RETRIES,
+    LLM_DEFAULT_MAX_TOKENS,
+    LLM_REQUEST_TIMEOUT_SEC,
+)
 from nav.harness.coordinates import resolve_minimap_resolution
 
 
@@ -40,6 +45,7 @@ def navigation_run_config(args, prompt_template: str) -> dict:
     defaults = {
         "model_id": None, "llm_provider": "openrouter", "vision_input": True,
         "history_size": 5, "max_tokens": LLM_DEFAULT_MAX_TOKENS,
+        "llm_decision_retries": LLM_DEFAULT_DECISION_RETRIES,
         "llm_min_request_interval_sec": 0.0,
         "scene_id": None, "scene_name": "", "point_id": "", "seed_id": "",
         "init_world_x": None, "init_world_z": None, "init_curr_direction": 180.0,
