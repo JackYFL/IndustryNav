@@ -38,6 +38,7 @@ from nav.config import (
     DEFAULT_PROMPT_VISION,
     DEFAULT_PROMPT_NOVISION,
     LLM_DEFAULT_HISTORY_SIZE,
+    LLM_DEFAULT_DECISION_RETRIES,
     LLM_DEFAULT_MAX_TOKENS,
     UNITY_SCENE_COUNT,
     UNITY_MAP_SIZE,
@@ -214,6 +215,17 @@ def parse_args():
         help="LLM transport: OpenRouter, direct Google Gemini, or direct OpenAI API.",
     )
     p.add_argument("--max_tokens", type=int, default=LLM_DEFAULT_MAX_TOKENS)
+    p.add_argument(
+        "--llm_decision_retries",
+        type=int,
+        default=LLM_DEFAULT_DECISION_RETRIES,
+        help=(
+            "Extra in-episode re-queries of the same observation when an LLM "
+            "reply is unusable (timeout, empty/truncated content, malformed "
+            "JSON) before the episode stops with decision_error. 0 restores "
+            "the abort-on-first-failure behavior."
+        ),
+    )
     p.add_argument(
         "--llm_min_request_interval_sec",
         type=float,
@@ -1388,6 +1400,7 @@ def main():
                                     args.llm_min_request_interval_sec
                                 ),
                                 "max_tokens": args.max_tokens,
+                                "llm_decision_retries": args.llm_decision_retries,
                                 "allowed_actions": allowed_actions,
                                 "history_entry": {
                                     "position": prompt_curr_xy,
