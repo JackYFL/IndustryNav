@@ -92,6 +92,10 @@ LLM_ERROR_SENTINELS: Tuple[str, ...] = (
     "rate limit",
 )
 LLM_DEFAULT_MAX_TOKENS: int = 20000
+# Extra in-episode re-queries of the same observation when an LLM reply is
+# unusable (transport timeout, empty/truncated content, malformed JSON) before
+# the episode ends with ``decision_error``. 0 = abort on the first bad reply.
+LLM_DEFAULT_DECISION_RETRIES: int = 2
 LLM_SUBAGENT_MAX_TOKENS: int = 50000
 LLM_REQUEST_TIMEOUT_SEC: int = 300  # Historical Kiro CLI request timeout.
 LLM_DEFAULT_HISTORY_SIZE: int = 5
