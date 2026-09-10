@@ -108,10 +108,10 @@
 <p align="center"><strong>Dynamic-environment A* preview</strong></p>
 
 <p align="center">
-  <img src="docs/assets/industrynav_navigation_scene22_point2_dynamic.gif" alt="IndustryNav A-star navigation in a moving Scene 22 environment" width="640">
+  <img src="docs/assets/industrynav_navigation_scene21_point2_dynamic.gif" alt="IndustryNav A-star navigation in a moving Scene 21 environment" width="640">
 </p>
 
-<p align="center"><em>A Scene 22, Point 2 run with moving workers, vehicles, and robots. A* reaches the target in 91 steps with a final world-space distance of 1.40 m.</em></p>
+<p align="center"><em>A Scene 21, Point 2 run with moving workers, vehicles, and robots. A* navigates a narrow aisle with a 0.3 m obstacle-clearance radius and reaches the target in 108 steps with a final world-space distance of 1.69 m. The cyan arrow shows the agent's heading.</em></p>
 
 ## 📄 About the Paper
 
