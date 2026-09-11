@@ -92,6 +92,14 @@ def navigation_run_config(args, prompt_template: str) -> dict:
             "shared_min_request_interval_sec": os.getenv("OPENAI_MIN_REQUEST_INTERVAL_SEC", "0"),
             "max_request_attempts": max(1, min(4, int(os.getenv("OPENAI_MAX_REQUEST_ATTEMPTS", "4")))),
         }
+    elif values["llm_provider"] == "anthropic":
+        config["anthropic_options"] = {
+            "api": "messages", "thinking": "adaptive",
+            "effort": "provider_default",
+            "output_format": "prompt_json_contract",
+            "shared_min_request_interval_sec": os.getenv("ANTHROPIC_MIN_REQUEST_INTERVAL_SEC", "0"),
+            "max_request_attempts": max(1, min(4, int(os.getenv("ANTHROPIC_MAX_REQUEST_ATTEMPTS", "4")))),
+        }
     return config
 
 

@@ -41,11 +41,18 @@ def render_sample(history="No previous movements yet.", template=DEFAULT_PROMPT_
 
 class NavigationPromptTest(unittest.TestCase):
     def test_task_body_matches_archived_kiro_prompt_exactly(self):
-        # SHA-256 of the navigation body, stripped of the transport-specific
-        # wrapper, in scene1/point1/cli_agent_gpt-5.6-luna/seed0, Step 1.
+        # SHA-256 of the canonical navigation body (Step 1 of scene1/point1,
+        # transport wrapper stripped). This pin exists to catch accidental
+        # prompt drift: any deliberate prompt change must update it, because
+        # run_config.json records prompt_sha256 and runs made with different
+        # bodies cannot be mixed under one output root.
+        #
+        # Pinned bodies so far:
+        #   f742a414... archived Kiro run (scene1/point1/cli_agent_gpt-5.6-luna, Step 1).
+        #   6d5489e9... current world-coordinate templates in nav/prompts/.
         self.assertEqual(
             hashlib.sha256(render_sample().strip().encode()).hexdigest(),
-            "f742a414829805f13619bd14e12e6b546e2ef692034e846cf54bdb43cfdab208",
+            "6d5489e9f4e6c337fa36c8ec8899d77fd60353a335daddbe8458ae8cb7c93fa3",
         )
 
     def test_action_description_tracks_simulation_step_override(self):
@@ -68,7 +75,7 @@ class NavigationPromptTest(unittest.TestCase):
         self.assertNotIn("Inspect the attached image", prompt)
 
     def test_visual_memory_survives_provider_routing_and_next_prompt(self):
-        for provider in ("openrouter", "gemini", "openai"):
+        for provider in ("openrouter", "gemini", "openai", "anthropic"):
             with self.subTest(provider=provider), patch(
                 f"nav.harness.llm_provider.call_{provider}",
                 return_value=json.dumps({

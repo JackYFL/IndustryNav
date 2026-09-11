@@ -38,6 +38,7 @@ from contextlib import closing
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
 
+import anthropic
 import numpy as np
 import requests
 
@@ -57,6 +58,9 @@ GEMINI_MAX_REQUEST_ATTEMPTS = 4
 _gemini_last_request_at = 0.0
 OPENAI_TRANSIENT_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 OPENAI_MAX_REQUEST_ATTEMPTS = 4
+
+ANTHROPIC_MAX_REQUEST_ATTEMPTS = 4
+_anthropic_last_request_at = 0.0
 _openai_last_request_at = 0.0
 
 
@@ -496,6 +500,148 @@ def call_openai(
         return _error_blob(f"API error: OpenAI failure: {e}")
 
 
+def _check_anthropic_api_key() -> str:
+    """Return ``ANTHROPIC_API_KEY`` or raise with a safe setup hint."""
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise ValueError(
+            "ANTHROPIC_API_KEY is not set. Export it before using the Anthropic provider."
+        )
+    return api_key
+
+
+def _reserve_anthropic_request() -> bool:
+    return _reserve_shared_request("ANTHROPIC")
+
+
+def _wait_for_anthropic_request_interval(min_interval_sec: float) -> None:
+    """Pace direct Anthropic calls within one process (shared pacing is separate)."""
+    global _anthropic_last_request_at
+    if min_interval_sec <= 0:
+        return
+    remaining = _anthropic_last_request_at + min_interval_sec - time.time()
+    if remaining > 0:
+        time.sleep(remaining)
+    _anthropic_last_request_at = time.time()
+
+
+def _anthropic_image_blocks(images: List[Tuple[str, np.ndarray]]) -> List[dict]:
+    """Convert ``[(name, rgb_uint8), ...]`` to Messages API base64 image blocks."""
+    prefix = "data:image/png;base64,"
+    blocks = []
+    for _name, rgb in images:
+        data_url = data_url_png_from_rgb(rgb)
+        blocks.append({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": data_url[len(prefix):],
+            },
+        })
+    return blocks
+
+
+def _anthropic_retry_delay(exc: "anthropic.APIStatusError", attempt: int) -> float:
+    """Honor ``retry-after`` when present; otherwise back off exponentially."""
+    try:
+        header = exc.response.headers.get("retry-after")
+    except AttributeError:
+        header = None
+    if header:
+        try:
+            return max(1.0, min(float(header), 60.0))
+        except (TypeError, ValueError):
+            pass
+    return float(2**attempt)
+
+
+def _anthropic_response_text(message) -> str:
+    """Return the concatenated text blocks; surface refusals and empty replies."""
+    if message.stop_reason == "refusal":
+        details = getattr(message, "stop_details", None)
+        category = getattr(details, "category", None) if details else None
+        raise ValueError(f"Anthropic refusal (category={category})")
+    text = "".join(
+        block.text for block in message.content if getattr(block, "type", "") == "text"
+    )
+    if not text.strip():
+        raise ValueError(
+            f"Anthropic response contained no text (stop_reason={message.stop_reason})"
+        )
+    return text
+
+
+def call_anthropic(
+    prompt: str,
+    images: List[Tuple[str, np.ndarray]],
+    model: str,
+    max_tokens: int = LLM_DEFAULT_MAX_TOKENS,
+    min_request_interval_sec: float = 0.0,
+) -> str:
+    """Call the Anthropic Messages API directly and return the response text.
+
+    Uses the official SDK with adaptive thinking (the default on current
+    models) and streaming, which the SDK requires for large ``max_tokens``.
+    Transport errors, rate limits, and 5xx responses are retried up to
+    ``ANTHROPIC_MAX_REQUEST_ATTEMPTS`` times; every attempt consumes one slot
+    of the optional shared request budget, mirroring the OpenAI provider.
+    Failures return an error blob so the benchmark loop can decide whether to
+    re-query or stop.
+    """
+    api_key = _check_anthropic_api_key()
+    content: List[dict] = _anthropic_image_blocks(images)
+    content.append({"type": "text", "text": prompt})
+    attempts = max(1, min(ANTHROPIC_MAX_REQUEST_ATTEMPTS, int(
+        os.getenv("ANTHROPIC_MAX_REQUEST_ATTEMPTS", str(ANTHROPIC_MAX_REQUEST_ATTEMPTS))
+    )))
+    # The SDK's own retries are disabled so that the shared budget and the
+    # per-decision attempt count stay accurate.
+    client = anthropic.Anthropic(
+        api_key=api_key, max_retries=0, timeout=float(LLM_REQUEST_TIMEOUT_SEC),
+    )
+    try:
+        for attempt in range(attempts):
+            _wait_for_anthropic_request_interval(min_request_interval_sec)
+            if not _reserve_anthropic_request():
+                return _error_blob(
+                    "API error: Anthropic request limit reached before sending"
+                )
+            try:
+                with client.messages.stream(
+                    model=model,
+                    max_tokens=max_tokens,
+                    thinking={"type": "adaptive"},
+                    messages=[{"role": "user", "content": content}],
+                ) as stream:
+                    message = stream.get_final_message()
+                usage = getattr(message, "usage", None)
+                if usage is not None:
+                    logging.getLogger(__name__).info(
+                        "Anthropic usage: input=%s cache_read=%s output=%s stop=%s",
+                        getattr(usage, "input_tokens", None),
+                        getattr(usage, "cache_read_input_tokens", None),
+                        getattr(usage, "output_tokens", None),
+                        message.stop_reason,
+                    )
+                return _anthropic_response_text(message)
+            except (anthropic.RateLimitError, anthropic.InternalServerError) as e:
+                if attempt + 1 >= attempts:
+                    return _error_blob(f"API error: Anthropic request failed: {e}")
+                time.sleep(_anthropic_retry_delay(e, attempt))
+            except anthropic.APIConnectionError as e:  # includes APITimeoutError
+                if attempt + 1 >= attempts:
+                    return _error_blob(f"API error: Anthropic request failed: {e}")
+                time.sleep(float(2**attempt))
+            except anthropic.APIStatusError as e:
+                return _error_blob(f"API error: Anthropic request failed: {e}")
+        raise RuntimeError("Anthropic request loop produced no response")
+    except ValueError as e:
+        return _error_blob(f"API error: unexpected Anthropic response: {e}")
+    except Exception as e:  # noqa: BLE001 — last-line defense for benchmark runs
+        return _error_blob(f"API error: Anthropic failure: {e}")
+
+
 def llm_openrouter(
     prompt: str,
     images: List[Tuple[str, np.ndarray]],
@@ -579,6 +725,14 @@ def llm_generate_decision(
         )
     elif provider == "openai":
         text = call_openai(
+            prompt,
+            images,
+            model,
+            max_tokens=max_tokens,
+            min_request_interval_sec=min_request_interval_sec,
+        )
+    elif provider == "anthropic":
+        text = call_anthropic(
             prompt,
             images,
             model,
