@@ -289,15 +289,20 @@ class CheckpointStore:
             world = re.search(r"World position X/Z: \(([-\d.]+), ([-\d.]+)\)", prompt)
             heading = re.search(r"Heading: ([-\d.]+)", prompt)
             distance = re.search(r"World distance to target: ([-\d.]+)", prompt)
+            # World-coordinate prompts no longer print the minimap pixel line;
+            # it is optional here because history rendering prefers the world
+            # position and only falls back to pixels when that is missing.
             pixel = re.search(r"Minimap position/target: \(([-\d.]+), ([-\d.]+)\)", prompt)
-            if not all((world, heading, distance, pixel)):
+            if not all((world, heading, distance)):
                 raise ValueError("Legacy Q&A is missing request-time state; recovery is unsupported.")
+            history_entry = {"world_position": list(map(float, world.groups())),
+                             "theta": float(heading.group(1)),
+                             "distance_to_target_m": float(distance.group(1))}
+            if pixel:
+                history_entry["position"] = list(map(float, pixel.groups()))
             decisions[step] = {"action": action, "observation": observation, "reasoning": reasoning,
                                "prompt": prompt.strip(), "error": False,
-                               "history_entry": {"position": list(map(float, pixel.groups())),
-                                                 "world_position": list(map(float, world.groups())),
-                                                 "theta": float(heading.group(1)),
-                                                 "distance_to_target_m": float(distance.group(1))}}
+                               "history_entry": history_entry}
         settings = self.config["settings"]
         first, last = rows[0], rows[-1]
         initial = [float(first[k]) for k in ("init_world_x", "init_world_z")]

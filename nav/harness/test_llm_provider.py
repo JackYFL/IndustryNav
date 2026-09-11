@@ -17,6 +17,7 @@ import requests
 from nav.harness.llm_provider import (
     _reserve_openai_request,
     _reserve_openrouter_request,
+    call_anthropic,
     call_gemini,
     call_openai,
     call_openrouter,
@@ -394,6 +395,99 @@ class OpenAIProviderTest(unittest.TestCase):
             allowed_actions=["forward", "turn right", "turn left", "stop"],
         )
 
+        self.assertEqual(action, "turn left")
+        self.assertEqual(reasoning, "avoid")
+
+
+def _anthropic_message(text, stop_reason="end_turn"):
+    message = Mock(stop_reason=stop_reason, stop_details=None)
+    message.content = [Mock(type="thinking", thinking=""), Mock(type="text", text=text)]
+    message.usage = Mock(input_tokens=1, cache_read_input_tokens=0, output_tokens=1)
+    return message
+
+
+def _anthropic_client(messages):
+    """Build a mocked SDK client whose ``messages.stream`` yields ``messages`` in order."""
+    import anthropic as anthropic_sdk
+
+    client = Mock()
+    outcomes = list(messages)
+
+    def stream(**kwargs):
+        outcome = outcomes.pop(0)
+        cm = Mock()
+        if isinstance(outcome, Exception):
+            cm.__enter__ = Mock(side_effect=outcome)
+        else:
+            cm.__enter__ = Mock(return_value=Mock(get_final_message=Mock(return_value=outcome)))
+        cm.__exit__ = Mock(return_value=False)
+        return cm
+
+    client.messages.stream.side_effect = stream
+    client.sdk = anthropic_sdk
+    return client
+
+
+class AnthropicProviderTest(unittest.TestCase):
+    @patch("nav.harness.llm_provider.anthropic.Anthropic")
+    def test_multimodal_payload_and_response(self, ctor: Mock) -> None:
+        client = _anthropic_client([_anthropic_message('{"action":"forward","reasoning":"clear"}')])
+        ctor.return_value = client
+        image = np.zeros((2, 2, 3), dtype=np.uint8)
+
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
+            text = call_anthropic("navigate", [("ego", image)], "claude-test-model", max_tokens=12345)
+
+        self.assertEqual(text, '{"action":"forward","reasoning":"clear"}')
+        self.assertEqual(ctor.call_args.kwargs["api_key"], "test-key")
+        self.assertEqual(ctor.call_args.kwargs["max_retries"], 0)
+        kwargs = client.messages.stream.call_args.kwargs
+        self.assertEqual(kwargs["model"], "claude-test-model")
+        self.assertEqual(kwargs["max_tokens"], 12345)
+        self.assertEqual(kwargs["thinking"], {"type": "adaptive"})
+        self.assertNotIn("temperature", kwargs)
+        content = kwargs["messages"][0]["content"]
+        self.assertEqual(kwargs["messages"][0]["role"], "user")
+        self.assertEqual(content[0]["type"], "image")
+        self.assertEqual(content[0]["source"]["media_type"], "image/png")
+        self.assertFalse(content[0]["source"]["data"].startswith("data:"))
+        self.assertEqual(content[-1], {"type": "text", "text": "navigate"})
+
+    @patch("nav.harness.llm_provider.anthropic.Anthropic")
+    def test_refusal_and_empty_reply_become_error_blobs(self, ctor: Mock) -> None:
+        import json as _json
+
+        for message in (_anthropic_message("", stop_reason="refusal"),
+                        _anthropic_message("   ", stop_reason="max_tokens")):
+            ctor.return_value = _anthropic_client([message])
+            with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
+                text = call_anthropic("navigate", [], "claude-test-model")
+            blob = _json.loads(text)
+            self.assertTrue(blob["error"])
+            self.assertIn("unexpected Anthropic response", blob["reasoning"])
+
+    @patch("nav.harness.llm_provider.time.sleep")
+    @patch("nav.harness.llm_provider.anthropic.Anthropic")
+    def test_rate_limit_is_retried_then_succeeds(self, ctor: Mock, sleep: Mock) -> None:
+        import anthropic as anthropic_sdk
+
+        limited = anthropic_sdk.RateLimitError(
+            "429", response=Mock(status_code=429, headers={"retry-after": "3"}), body=None,
+        )
+        ctor.return_value = _anthropic_client([limited, _anthropic_message('{"action":"stop"}')])
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
+            text = call_anthropic("navigate", [], "claude-test-model")
+        self.assertEqual(text, '{"action":"stop"}')
+        self.assertEqual(ctor.return_value.messages.stream.call_count, 2)
+        sleep.assert_called_once_with(3.0)
+
+    @patch("nav.harness.llm_provider.call_anthropic")
+    def test_provider_neutral_wrapper_parses_anthropic_action(self, call: Mock) -> None:
+        call.return_value = '{"action":"turn left","reasoning":"avoid"}'
+        action, reasoning = llm_generate(
+            "navigate", [], "claude-test-model", provider="anthropic",
+            allowed_actions=["forward", "turn left", "turn right", "stop"],
+        )
         self.assertEqual(action, "turn left")
         self.assertEqual(reasoning, "avoid")
 
