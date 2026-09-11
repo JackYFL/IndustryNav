@@ -308,6 +308,22 @@ never delete or replace a counter to resume an experiment.
 and requires that shared budget. `OPENAI_MAX_REQUEST_ATTEMPTS` controls HTTP
 attempts per decision (1–4, default 4); every attempt consumes one slot before
 sending, including transport failures. The call limit is not a dollar limit.
+
+### Direct Anthropic runs
+
+For `--llm_provider anthropic`, load `ANTHROPIC_API_KEY` outside the repository
+(for example from `tmp/secrets.sh`) and pass any Claude model id accepted by
+the Anthropic Messages API (for example `claude-opus-5`; see the Anthropic
+Models API for the current list). Requests go through the official `anthropic`
+SDK with adaptive thinking enabled and streaming, so `--max_tokens` can be
+raised for thinking models (40000 is a reasonable ceiling) without hitting
+HTTP timeouts. The same budget and pacing variables exist with the `ANTHROPIC_`
+prefix: `ANTHROPIC_MAX_REQUESTS`, `ANTHROPIC_REQUEST_COUNTER_FILE`,
+`ANTHROPIC_MIN_REQUEST_INTERVAL_SEC`, and `ANTHROPIC_MAX_REQUEST_ATTEMPTS`
+(1–4, default 4). Rate limits, 5xx responses, and transport errors are retried
+within that attempt count; a safety refusal or an empty reply is reported as a
+decision error so the in-episode retry can re-query. Thinking mode, effort, and
+attempt settings are recorded under `anthropic_options` in `run_config.json`.
 Responses use `max_output_tokens`, `store=false`, the prompt's JSON contract,
 and provider-default reasoning. Effective transport settings are included in
 `run_config.json`; credentials are never recorded there.

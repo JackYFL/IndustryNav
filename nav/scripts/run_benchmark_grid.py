@@ -492,7 +492,7 @@ def parse_args():
                    help="Model ids to benchmark. Example: google/gemini-3.8-flash")
     p.add_argument(
         "--llm_provider",
-        choices=("openrouter", "gemini", "openai"),
+        choices=("openrouter", "gemini", "openai", "anthropic"),
         default="openrouter",
         help="LLM transport for every cell in this grid.",
     )

@@ -210,9 +210,9 @@ def parse_args():
     p.add_argument("--model_id", type=str, default="openai/gpt-4o-mini")
     p.add_argument(
         "--llm_provider",
-        choices=("openrouter", "gemini", "openai"),
+        choices=("openrouter", "gemini", "openai", "anthropic"),
         default="openrouter",
-        help="LLM transport: OpenRouter, direct Google Gemini, or direct OpenAI API.",
+        help="LLM transport: OpenRouter, direct Google Gemini, direct OpenAI, or direct Anthropic API.",
     )
     p.add_argument("--max_tokens", type=int, default=LLM_DEFAULT_MAX_TOKENS)
     p.add_argument(

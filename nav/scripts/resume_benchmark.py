@@ -24,7 +24,7 @@ def resume_command(folder, config, base_port=5507):
     allowed = navigation_run_config(argparse.Namespace(llm_provider="gemini"), "")["settings"]
     if set(config["settings"]) - set(allowed):
         raise ValueError("Run configuration contains unsupported settings; refusing to print/execute them.")
-    if config["settings"]["llm_provider"] not in {"openai", "openrouter", "gemini"}:
+    if config["settings"]["llm_provider"] not in {"openai", "openrouter", "gemini", "anthropic"}:
         raise ValueError("This run needs its original CLI/Kiro adapter; it is not an API-provider run.")
     command = [sys.executable, "-m", "nav.scripts.run_benchmark_cell",
                "--baseline", "llm", "--resume", "--frame_save_dir", str(folder),
@@ -50,6 +50,10 @@ def resume_environment(config, checkpoint, current=None):
         options = config.get("openai_options", {})
         env["OPENAI_MAX_REQUEST_ATTEMPTS"] = str(options.get("max_request_attempts", 4))
         env["OPENAI_MIN_REQUEST_INTERVAL_SEC"] = str(options.get("shared_min_request_interval_sec", "0"))
+    elif provider == "anthropic":
+        options = config.get("anthropic_options", {})
+        env["ANTHROPIC_MAX_REQUEST_ATTEMPTS"] = str(options.get("max_request_attempts", 4))
+        env["ANTHROPIC_MIN_REQUEST_INTERVAL_SEC"] = str(options.get("shared_min_request_interval_sec", "0"))
     elif provider == "openrouter":
         mapping = {"reasoning_enabled": "REASONING_ENABLED", "json_mode": "JSON_MODE",
                    "min_request_interval_sec": "MIN_REQUEST_INTERVAL_SEC", "max_request_attempts": "MAX_REQUEST_ATTEMPTS"}
