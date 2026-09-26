@@ -63,6 +63,7 @@ MODEL_LABELS = {
     "gpt-5.6-luna": "GPT-5.6 Luna",
     "gpt-5.6-terra": "GPT-5.6 Terra",
     "openai/gpt-4o-mini": "GPT-4o mini",
+    "pointgoal-dagger-ppoarch": "PointGoal DAgger (PPO Architecture)",
     "qwen/qwen3.8-flash": "Qwen 3.8 Flash",
 }
 

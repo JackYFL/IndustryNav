@@ -140,8 +140,19 @@ class AStarParams:
     contrast_background_px: int = 21
     contrast_threshold: int = 35
     contrast_min_area_px: int = 300
+    # The top-down render contains long, narrow floor-boundary seams which are
+    # visually dark but have no corresponding navigation obstacle. Suppress
+    # only sufficiently long/thin seams; solid racks and walls remain blocked.
+    decorative_edge_max_width_m: float = 0.65
+    decorative_edge_min_length_m: float = 3.0
+    decorative_edge_min_aspect_ratio: float = 4.0
+    decorative_edge_color_saturation_threshold: int = 80
     min_free_ratio: float = 0.55
     obstacle_clearance_m: float = 0.6
+    # Retry disconnected plans with the smallest clearance that still leaves
+    # a physical body margin. This opens scene21's narrow aisle without making
+    # ordinary routes hug obstacles as they do with a global 0.3 m clearance.
+    minimum_obstacle_clearance_m: float = 0.3
     path_smoothing: bool = True
     path_corner_smoothing_m: float = 1.0
     stanley_gain: float = 1.0
@@ -161,7 +172,10 @@ class AStarParams:
     front_cone_deg: float = 140.0
     hysteresis_reset_deg: float = 45.0
     hysteresis_lock_deg: float = 165.0
-    stuck_distance_m: float = 0.05
+    # Contacts with walls can still produce about 0.06-0.12 m of sliding per
+    # decision. Treat that collision creep as stuck instead of letting the
+    # controller oscillate forever along the same short segment.
+    stuck_distance_m: float = 0.15
     stuck_steps: int = 4
     recovery_turn_steps: int = 3
     stuck_block_ahead_m: float = 2.1
@@ -233,7 +247,9 @@ RESULTS_CSV_FIELDS: List[str] = [
     "provider",
     "model",
     "vision_input",
+    "topdown_input",
     "max_steps",
+    "step_budget_max",
     "step_budget_mode",
     "initial_step_budget",
     "astar_max_planned_path_m",
@@ -300,6 +316,7 @@ GRID_CSV_FIELDS: List[str] = [
     "model",
     "seed_id",
     "vision_input",
+    "topdown_input",
     "history_size",
     "dynamic_objects",
     *MOTION_SPEED_CSV_FIELDS,
@@ -322,6 +339,8 @@ GRID_CSV_FIELDS: List[str] = [
 # Prompts and analysis output
 
 DEFAULT_PROMPT_VISION: str = str(_prompt_path_of(PromptName.EGO_STATE_HISTORY))
+DEFAULT_PROMPT_TOPDOWN: str = str(_prompt_path_of(PromptName.EGO_MINIMAP))
+DEFAULT_PROMPT_TOPDOWN_ONLY: str = str(_prompt_path_of(PromptName.MINIMAP_ONLY))
 DEFAULT_PROMPT_NOVISION: str = str(_prompt_path_of(PromptName.STATE_HISTORY_NO_VISION))
 
 ANALYSIS_ROOT: Path = Path("analysis")
@@ -332,6 +351,9 @@ STATS_METRIC_FIELDS: Tuple[str, ...] = (
     "distance_ratio",
     "collision_rate",
     "warning_rate",
+    "efficiency",
+    "optimal_steps",
+    "efficiency_max_steps",
     "efficiency_steps",
     "steps_taken",
 )
@@ -341,6 +363,7 @@ STATS_REPORT_BASE_METRICS: Tuple[Tuple[str, str, str], ...] = (
     ("cr", "collision_rate", "CR"),
 )
 STATS_REPORT_OPTIONAL_METRICS: Dict[str, Tuple[str, str, str]] = {
+    "efficiency": ("eff", "efficiency", "Efficiency"),
     "warning_rate": ("wr", "warning_rate", "WR"),
     "distance_world": ("dist", "distance_world", "Mean dist (m)"),
 }
@@ -550,6 +573,7 @@ BENCHMARK_BASELINES: List[str] = ["random", "llm", "bc", "ppo", "astar"]
 EVAL_RUN_PREFIXES: List[str] = [
     "llm",
     "bc",
+    "ppo",
     "dagger",
     "astar",
     "random",

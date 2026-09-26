@@ -34,8 +34,23 @@ class AStarBaseline:
         contrast_background_px: int = ASTAR_DEFAULTS.contrast_background_px,
         contrast_threshold: int = ASTAR_DEFAULTS.contrast_threshold,
         contrast_min_area_px: int = ASTAR_DEFAULTS.contrast_min_area_px,
+        decorative_edge_max_width_m: float = (
+            ASTAR_DEFAULTS.decorative_edge_max_width_m
+        ),
+        decorative_edge_min_length_m: float = (
+            ASTAR_DEFAULTS.decorative_edge_min_length_m
+        ),
+        decorative_edge_min_aspect_ratio: float = (
+            ASTAR_DEFAULTS.decorative_edge_min_aspect_ratio
+        ),
+        decorative_edge_color_saturation_threshold: int = (
+            ASTAR_DEFAULTS.decorative_edge_color_saturation_threshold
+        ),
         min_free_ratio: float = ASTAR_DEFAULTS.min_free_ratio,
         obstacle_clearance_m: float = ASTAR_DEFAULTS.obstacle_clearance_m,
+        minimum_obstacle_clearance_m: float = (
+            ASTAR_DEFAULTS.minimum_obstacle_clearance_m
+        ),
         path_smoothing: bool = ASTAR_DEFAULTS.path_smoothing,
         path_corner_smoothing_m: float = ASTAR_DEFAULTS.path_corner_smoothing_m,
         stanley_gain: float = ASTAR_DEFAULTS.stanley_gain,
@@ -64,6 +79,7 @@ class AStarBaseline:
         proxy_stop_distance_m: float = ASTAR_DEFAULTS.proxy_stop_distance_m,
         pixel_scale: float = 1.0,
         minimap_has_baked_markers: bool = False,
+        static_scene: bool = False,
         policy_actions: bool = False,
         policy_forward_tolerance_deg: float = 12.5,
         debug_viz: bool = False,
@@ -89,11 +105,39 @@ class AStarBaseline:
         self.contrast_min_area_px = max(
             1, int(round(float(contrast_min_area_px) * self.pixel_scale ** 2))
         )
+        self.decorative_edge_max_width_m = self._nonnegative(
+            decorative_edge_max_width_m,
+            "decorative_edge_max_width_m",
+        )
+        self.decorative_edge_min_length_m = self._positive(
+            decorative_edge_min_length_m,
+            "decorative_edge_min_length_m",
+        )
+        self.decorative_edge_min_aspect_ratio = self._positive(
+            decorative_edge_min_aspect_ratio,
+            "decorative_edge_min_aspect_ratio",
+        )
+        self.decorative_edge_color_saturation_threshold = int(
+            decorative_edge_color_saturation_threshold
+        )
+        if not 0 <= self.decorative_edge_color_saturation_threshold <= 255:
+            raise ValueError(
+                "decorative_edge_color_saturation_threshold must be in [0, 255]."
+            )
         self.adaptive_obstacle_denoise_px = max(3, scaled_int(5) | 1)
         self.min_free_ratio = float(min_free_ratio)
         self.obstacle_clearance_m = self._nonnegative(
             obstacle_clearance_m, "obstacle_clearance_m"
         )
+        self.minimum_obstacle_clearance_m = self._nonnegative(
+            minimum_obstacle_clearance_m,
+            "minimum_obstacle_clearance_m",
+        )
+        if self.minimum_obstacle_clearance_m > self.obstacle_clearance_m:
+            # Preserve callers that intentionally lower/disable the nominal
+            # clearance without also overriding the adaptive floor.
+            self.minimum_obstacle_clearance_m = self.obstacle_clearance_m
+        self.using_minimum_obstacle_clearance = False
         self.path_smoothing = bool(path_smoothing)
         self.path_corner_smoothing_m = self._nonnegative(
             path_corner_smoothing_m, "path_corner_smoothing_m"
@@ -112,6 +156,7 @@ class AStarBaseline:
             "stanley_forward_tolerance_deg",
         )
         self.minimap_has_baked_markers = bool(minimap_has_baked_markers)
+        self.static_scene = bool(static_scene)
         # Dataset collection must execute exactly the same four atomic actions
         # as the learned policy.  The ordinary A* benchmark keeps its smoother
         # annotation controls (including simultaneous forward+turn actions).
@@ -171,6 +216,10 @@ class AStarBaseline:
         self.grid_step_y_px = 1
         self.obstacle_clearance_x_px = 0
         self.obstacle_clearance_y_px = 0
+        self.decorative_edge_max_width_x_px = 0
+        self.decorative_edge_max_width_y_px = 0
+        self.decorative_edge_min_length_x_px = 1
+        self.decorative_edge_min_length_y_px = 1
         self.stuck_block_radius_x_px = 1
         self.stuck_block_radius_y_px = 1
         self.world_per_pixel = np.eye(2, dtype=np.float64)
@@ -203,6 +252,9 @@ class AStarBaseline:
         self.plan_revision = 0
         self.dynamic_blocked_count = 0
         self.virtual_obstacles: List[Tuple[int, int, int, int, int]] = []
+        self._static_protected_colored_edges: Optional[np.ndarray] = None
+        self._static_ignored_continuous_edges: Optional[np.ndarray] = None
+        self._static_ignored_dashed_edges: Optional[np.ndarray] = None
 
     @staticmethod
     def _positive(value: float, name: str) -> float:
@@ -253,11 +305,32 @@ class AStarBaseline:
         self.grid_step_y_px = max(
             1, int(round(self.grid_cell_m / meters_per_pixel_y))
         )
+        active_clearance_m = (
+            self.minimum_obstacle_clearance_m
+            if self.using_minimum_obstacle_clearance
+            else self.obstacle_clearance_m
+        )
         self.obstacle_clearance_x_px = max(
-            0, int(math.ceil(self.obstacle_clearance_m / meters_per_pixel_x))
+            0, int(math.ceil(active_clearance_m / meters_per_pixel_x))
         )
         self.obstacle_clearance_y_px = max(
-            0, int(math.ceil(self.obstacle_clearance_m / meters_per_pixel_y))
+            0, int(math.ceil(active_clearance_m / meters_per_pixel_y))
+        )
+        self.decorative_edge_max_width_x_px = max(
+            0,
+            int(math.ceil(self.decorative_edge_max_width_m / meters_per_pixel_x)),
+        )
+        self.decorative_edge_max_width_y_px = max(
+            0,
+            int(math.ceil(self.decorative_edge_max_width_m / meters_per_pixel_y)),
+        )
+        self.decorative_edge_min_length_x_px = max(
+            1,
+            int(math.ceil(self.decorative_edge_min_length_m / meters_per_pixel_x)),
+        )
+        self.decorative_edge_min_length_y_px = max(
+            1,
+            int(math.ceil(self.decorative_edge_min_length_m / meters_per_pixel_y)),
         )
         self.stuck_block_radius_x_px = max(
             1, int(math.ceil(self.stuck_block_radius_m / meters_per_pixel_x))
@@ -345,7 +418,20 @@ class AStarBaseline:
         path = self.last_path
         if should_replan:
             self.plan_revision += 1
-            path = self._plan_path(walkable, curr_xy, target_xy)
+            path, walkable, reduced_clearance = (
+                self._plan_path_with_adaptive_clearance(
+                    minimap_rgb,
+                    walkable,
+                    curr_xy,
+                    target_xy,
+                    point_to_world,
+                )
+            )
+            if reduced_clearance:
+                replan_reason += (
+                    f"_adaptive_clearance_"
+                    f"{self.minimum_obstacle_clearance_m:g}m"
+                )
             self.follow_waypoints = self._build_follow_waypoints(
                 path,
                 curr_xy,
@@ -615,6 +701,320 @@ class AStarBaseline:
             )
         return free_u8.astype(bool)
 
+    def _long_thin_components(
+        self,
+        mask: np.ndarray,
+        *,
+        vertical: bool,
+    ) -> np.ndarray:
+        """Keep only line-like components with the configured physical length."""
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(
+            mask.astype(np.uint8),
+            8,
+        )
+        keep = np.zeros(count, dtype=bool)
+        min_span_px = (
+            self.decorative_edge_min_length_y_px
+            if vertical
+            else self.decorative_edge_min_length_x_px
+        )
+        for label in range(1, count):
+            width = int(stats[label, cv2.CC_STAT_WIDTH])
+            height = int(stats[label, cv2.CC_STAT_HEIGHT])
+            span = height if vertical else width
+            thickness = width if vertical else height
+            if (
+                span >= min_span_px
+                and span >= self.decorative_edge_min_aspect_ratio * thickness
+            ):
+                keep[label] = True
+        return keep[labels]
+
+    def _decorative_edge_obstacles(
+        self,
+        free: np.ndarray,
+        gray: np.ndarray,
+        effective_obstacle_bright_threshold: int,
+        protected: np.ndarray,
+    ) -> np.ndarray:
+        """Find long narrow dark seams that do not represent physical objects.
+
+        A directional closing proposes only gaps with traversable floor on both
+        sides. The component filters then require a long, thin shape. Bright
+        pixels are never cleared, so partition highlights remain obstacles even
+        when their adjacent dark shadow is narrow.
+        """
+        ignored = np.zeros(free.shape, dtype=bool)
+        if self.decorative_edge_max_width_m <= 0:
+            return ignored
+
+        free_u8 = free.astype(np.uint8)
+        directions = (
+            (True, self.decorative_edge_max_width_x_px),
+            (False, self.decorative_edge_max_width_y_px),
+        )
+        for vertical, max_gap_px in directions:
+            if max_gap_px <= 0:
+                continue
+            # A closing kernel must be one pixel wider than the largest gap it
+            # should bridge. Even-sized kernels are intentional and harmless:
+            # only newly filled pixels are considered below.
+            kernel_shape = (
+                (1, max_gap_px + 1)
+                if vertical
+                else (max_gap_px + 1, 1)
+            )
+            closed = cv2.morphologyEx(
+                free_u8,
+                cv2.MORPH_CLOSE,
+                np.ones(kernel_shape, dtype=np.uint8),
+            ).astype(bool)
+            candidates = (
+                closed
+                & ~free
+                & (gray <= effective_obstacle_bright_threshold)
+                & ~protected
+            )
+            ignored |= self._long_thin_components(
+                candidates,
+                vertical=vertical,
+            )
+        return ignored
+
+    def _decorative_edge_color_protection(self, rgb: np.ndarray) -> np.ndarray:
+        """Protect colored rails/posts from decorative-edge suppression."""
+        protected = np.zeros(rgb.shape[:2], dtype=bool)
+        if self.decorative_edge_max_width_m <= 0:
+            return protected
+
+        saturation = cv2.cvtColor(rgb, cv2.COLOR_RGB2HSV)[:, :, 1]
+        colorful = (
+            saturation >= self.decorative_edge_color_saturation_threshold
+        ).astype(np.uint8)
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (
+                self.decorative_edge_max_width_x_px * 2 + 1,
+                self.decorative_edge_max_width_y_px * 2 + 1,
+            ),
+        )
+        return cv2.dilate(colorful, kernel, iterations=1).astype(bool)
+
+    def _decorative_dashed_line_obstacles(
+        self,
+        free: np.ndarray,
+        gray: np.ndarray,
+        effective_obstacle_threshold: int,
+        protected: np.ndarray,
+    ) -> np.ndarray:
+        """Find small dark floor marks arranged into long diagonal dashed lines.
+
+        Individual dots are retained unless a probabilistic Hough segment shows
+        that several of them form a long diagonal. Only the original tiny dark
+        components are cleared; pixels between dashes are never synthesized as
+        free space. This avoids globally deleting small real obstacles.
+        """
+        ignored = np.zeros(gray.shape, dtype=bool)
+        if self.decorative_edge_max_width_m <= 0:
+            return ignored
+
+        dark = (gray <= effective_obstacle_threshold) & ~protected
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(
+            dark.astype(np.uint8),
+            8,
+        )
+        max_component_width = max(
+            1,
+            int(math.ceil(self.decorative_edge_max_width_x_px / 2.0)),
+        )
+        max_component_height = max(
+            1,
+            int(math.ceil(self.decorative_edge_max_width_y_px / 2.0)),
+        )
+        max_component_area = max_component_width * max_component_height
+        small_labels = np.zeros(count, dtype=bool)
+        for label in range(1, count):
+            width = int(stats[label, cv2.CC_STAT_WIDTH])
+            height = int(stats[label, cv2.CC_STAT_HEIGHT])
+            area = int(stats[label, cv2.CC_STAT_AREA])
+            if (
+                width <= max_component_width
+                and height <= max_component_height
+                and area <= max_component_area
+            ):
+                small_labels[label] = True
+        small_dark = small_labels[labels]
+        # Individual arms and endpoint fragments are substantially shorter
+        # than the continuous floor seams. Requiring one quarter of the seam
+        # length still needs several aligned dots, while detecting the short
+        # fragments that otherwise become clearance-sized black blobs.
+        dashed_min_length_m = self.decorative_edge_min_length_m / 4.0
+        min_line_px = max(
+            2,
+            int(
+                math.ceil(
+                    min(
+                        self.decorative_edge_min_length_x_px,
+                        self.decorative_edge_min_length_y_px,
+                    )
+                    / 4.0
+                )
+            ),
+        )
+        hough_votes = max(4, int(round(min_line_px / 6.0)))
+        max_line_gap_px = max(
+            2,
+            int(
+                round(
+                    2.0
+                    * max(
+                        self.decorative_edge_max_width_x_px,
+                        self.decorative_edge_max_width_y_px,
+                    )
+                )
+            ),
+        )
+        lines = cv2.HoughLinesP(
+            small_dark.astype(np.uint8) * 255,
+            1,
+            np.pi / 180.0,
+            threshold=hough_votes,
+            minLineLength=min_line_px,
+            maxLineGap=max_line_gap_px,
+        )
+        if lines is None:
+            return ignored
+
+        support = np.zeros(gray.shape, dtype=np.uint8)
+        support_width = (
+            max(max_component_width, max_component_height)
+            + max(2, int(round(max_line_gap_px / 3.0)))
+        )
+        accepted_line_count = 0
+        for x1, y1, x2, y2 in lines[:, 0]:
+            delta = self.world_per_pixel @ np.array(
+                [float(x2 - x1), float(y2 - y1)],
+                dtype=np.float64,
+            )
+            if float(np.linalg.norm(delta)) < dashed_min_length_m:
+                continue
+            angle = (
+                math.degrees(math.atan2(float(y2 - y1), float(x2 - x1)))
+                % 180.0
+            )
+            distance_from_axis = min(
+                angle,
+                abs(angle - 90.0),
+                abs(angle - 180.0),
+            )
+            if distance_from_axis < 12.0:
+                continue
+            pixel_length = math.hypot(float(x2 - x1), float(y2 - y1))
+            if pixel_length <= 1e-9:
+                continue
+            # Hough segments usually stop one or two dashes before the visual
+            # end of the marking. Extend the detected axis so every component
+            # in that same dashed chain is considered below.
+            extension_px = 2.0 * max_line_gap_px
+            unit_x = float(x2 - x1) / pixel_length
+            unit_y = float(y2 - y1) / pixel_length
+            cv2.line(
+                support,
+                (
+                    int(round(float(x1) - unit_x * extension_px)),
+                    int(round(float(y1) - unit_y * extension_px)),
+                ),
+                (
+                    int(round(float(x2) + unit_x * extension_px)),
+                    int(round(float(y2) + unit_y * extension_px)),
+                ),
+                1,
+                support_width,
+            )
+            accepted_line_count += 1
+
+        if accepted_line_count == 0:
+            return ignored
+
+        # Absorb every small obstacle component near an accepted axis, not only
+        # the exact dark pixels which cast the original Hough votes. This gets
+        # the endpoints and antialiased fragments of each dash while refusing
+        # to punch holes through a wall/rack component crossed by that axis.
+        # Label before subtracting the color-protection mask. Subtracting it
+        # first can chop one long rail edge into several apparently tiny pieces
+        # that then look like dashes.
+        obstacle_pixels = ~free
+        obstacle_count, obstacle_labels, obstacle_stats, _ = (
+            cv2.connectedComponentsWithStats(
+                obstacle_pixels.astype(np.uint8),
+                8,
+            )
+        )
+        max_obstacle_width = 2 * max_component_width
+        max_obstacle_height = 2 * max_component_height
+        small_obstacle_labels = np.zeros(obstacle_count, dtype=bool)
+        for label in range(1, obstacle_count):
+            width = int(obstacle_stats[label, cv2.CC_STAT_WIDTH])
+            height = int(obstacle_stats[label, cv2.CC_STAT_HEIGHT])
+            area = int(obstacle_stats[label, cv2.CC_STAT_AREA])
+            if (
+                width <= max_obstacle_width
+                and height <= max_obstacle_height
+                and area <= max_obstacle_width * max_obstacle_height
+            ):
+                small_obstacle_labels[label] = True
+        small_obstacles = small_obstacle_labels[obstacle_labels]
+        touched_labels = np.unique(
+            obstacle_labels[small_obstacles & (support > 0)]
+        )
+        touched_labels = touched_labels[touched_labels != 0]
+        if touched_labels.size:
+            ignored = np.isin(obstacle_labels, touched_labels) & ~protected
+        return ignored
+
+    def _stabilize_static_decorative_masks(
+        self,
+        protected: np.ndarray,
+        ignored_continuous: np.ndarray,
+        ignored_dashed: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Accumulate static floor markings across noisy rendered frames.
+
+        Unity's top-down render changes many floor pixels by one or two gray
+        levels even when every scene object is static.  A dashed marking can
+        therefore receive enough Hough votes in one frame but not the next.
+        For a static scene the geometry cannot disappear, so accumulate both
+        detections monotonically.  Colored obstacle evidence is accumulated as
+        well and always wins, preventing a rail edge from ever being cleared
+        merely because one noisy frame briefly missed its colored post.
+        """
+        if not self.static_scene:
+            return protected, ignored_continuous, ignored_dashed
+
+        shape_changed = (
+            self._static_protected_colored_edges is None
+            or self._static_protected_colored_edges.shape != protected.shape
+        )
+        if shape_changed:
+            self._static_protected_colored_edges = np.zeros_like(protected)
+            self._static_ignored_continuous_edges = np.zeros_like(
+                ignored_continuous
+            )
+            self._static_ignored_dashed_edges = np.zeros_like(ignored_dashed)
+
+        self._static_protected_colored_edges |= protected
+        self._static_ignored_continuous_edges |= ignored_continuous
+        self._static_ignored_dashed_edges |= ignored_dashed
+        self._static_ignored_continuous_edges &= (
+            ~self._static_protected_colored_edges
+        )
+        self._static_ignored_dashed_edges &= ~self._static_protected_colored_edges
+        return (
+            self._static_protected_colored_edges.copy(),
+            self._static_ignored_continuous_edges.copy(),
+            self._static_ignored_dashed_edges.copy(),
+        )
+
     def _forced_free_points(self, curr_xy: Point, target_xy: Point) -> Tuple[Point, ...]:
         """Points whose surroundings are forced free before grid pooling.
 
@@ -632,8 +1032,23 @@ class AStarBaseline:
             return (curr_xy, target_xy)
         return (target_xy,)
 
+    def build_navigation_grid(
+        self, minimap_rgb: np.ndarray, point_to_world: PointToWorld,
+        *, marker_points: Tuple[Point, ...] = (),
+    ) -> np.ndarray:
+        """Extract geometry without planning or forcing hypothetical goals free.
+
+        Only actual baked markers may be erased. This is also used by offline
+        task sampling and training-only distance rewards, never actor inputs.
+        """
+        self._update_pixel_geometry((0, 0), point_to_world)
+        return self._build_walkable_grid(
+            minimap_rgb, (0, 0), (0, 0), forced_free_points=marker_points,
+        )
+
     def _build_walkable_grid(
-        self, minimap_rgb: np.ndarray, curr_xy: Point, target_xy: Point
+        self, minimap_rgb: np.ndarray, curr_xy: Point, target_xy: Point,
+        *, forced_free_points: Optional[Tuple[Point, ...]] = None,
     ) -> np.ndarray:
         rgb = self._to_uint8_rgb(minimap_rgb)
         gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
@@ -671,9 +1086,39 @@ class AStarBaseline:
                 obstacle_noise_kernel,
             )
             threshold_free = denoised_obstacles == 0
+
+        protected_colored_edges = self._decorative_edge_color_protection(rgb)
+        ignored_continuous_edges = self._decorative_edge_obstacles(
+            threshold_free,
+            gray,
+            effective_obstacle_bright_threshold,
+            protected_colored_edges,
+        )
+        ignored_dashed_edges = self._decorative_dashed_line_obstacles(
+            threshold_free,
+            gray,
+            effective_obstacle_threshold,
+            protected_colored_edges,
+        )
+        (
+            protected_colored_edges,
+            ignored_continuous_edges,
+            ignored_dashed_edges,
+        ) = self._stabilize_static_decorative_masks(
+            protected_colored_edges,
+            ignored_continuous_edges,
+            ignored_dashed_edges,
+        )
+        ignored_decorative_edges = (
+            ignored_continuous_edges | ignored_dashed_edges
+        )
+        threshold_free = threshold_free | ignored_decorative_edges
         free = threshold_free.copy()
 
-        forced_free = self._forced_free_points(curr_xy, target_xy)
+        forced_free = (
+            self._forced_free_points(curr_xy, target_xy)
+            if forced_free_points is None else forced_free_points
+        )
         free = self._clear_discs(free, forced_free)
 
         if self.obstacle_clearance_x_px > 0 or self.obstacle_clearance_y_px > 0:
@@ -728,12 +1173,29 @@ class AStarBaseline:
                 self.adaptive_obstacle_denoise_px if lighting_adapted else 0
             ),
             "low_contrast_obstacles": low_contrast,
+            "protected_colored_edges": protected_colored_edges,
+            "ignored_continuous_edges": ignored_continuous_edges,
+            "ignored_dashed_edges": ignored_dashed_edges,
+            "ignored_decorative_edges": ignored_decorative_edges,
             "inflated_free": free,
             "walkable": walkable,
             "grid_step_px": (self.grid_step_x_px, self.grid_step_y_px),
             "obstacle_clearance_px": (
                 self.obstacle_clearance_x_px,
                 self.obstacle_clearance_y_px,
+            ),
+            "active_obstacle_clearance_m": (
+                self.minimum_obstacle_clearance_m
+                if self.using_minimum_obstacle_clearance
+                else self.obstacle_clearance_m
+            ),
+            "decorative_edge_max_width_px": (
+                self.decorative_edge_max_width_x_px,
+                self.decorative_edge_max_width_y_px,
+            ),
+            "decorative_edge_min_length_px": (
+                self.decorative_edge_min_length_x_px,
+                self.decorative_edge_min_length_y_px,
             ),
         }
         return walkable
@@ -762,6 +1224,20 @@ class AStarBaseline:
             threshold_img = self._mask_to_bgr(threshold_free)
             self._draw_points(threshold_img, curr_xy, target_xy)
             cv2.imwrite(f"{prefix}_free_threshold.png", threshold_img)
+
+        ignored_decorative_edges = self.last_debug.get(
+            "ignored_decorative_edges"
+        )
+        if ignored_decorative_edges is not None:
+            ignored_img = self._mask_to_bgr(ignored_decorative_edges)
+            self._draw_points(ignored_img, curr_xy, target_xy)
+            cv2.imwrite(f"{prefix}_ignored_decorative_edges.png", ignored_img)
+
+        protected_colored_edges = self.last_debug.get("protected_colored_edges")
+        if protected_colored_edges is not None:
+            protected_img = self._mask_to_bgr(protected_colored_edges)
+            self._draw_points(protected_img, curr_xy, target_xy)
+            cv2.imwrite(f"{prefix}_protected_colored_edges.png", protected_img)
 
         inflated_free = self.last_debug.get("inflated_free")
         if inflated_free is not None:
@@ -884,6 +1360,43 @@ class AStarBaseline:
         )
         raw_path = self._reconstruct_path(came_from, best_reachable, proxy_xy)
         return self._smooth_path(walkable, raw_path)
+
+    def _plan_path_with_adaptive_clearance(
+        self,
+        minimap_rgb: np.ndarray,
+        walkable: np.ndarray,
+        curr_xy: Point,
+        target_xy: Point,
+        point_to_world: PointToWorld,
+    ) -> Tuple[List[Point], np.ndarray, bool]:
+        """Retry a disconnected nominal plan with the configured safe minimum."""
+        path = self._plan_path(walkable, curr_xy, target_xy)
+        can_reduce_clearance = (
+            not self.using_minimum_obstacle_clearance
+            and self.minimum_obstacle_clearance_m
+            < self.obstacle_clearance_m - 1e-9
+        )
+        if self.last_plan_status == "target_reachable" or not can_reduce_clearance:
+            return path, walkable, False
+
+        self.using_minimum_obstacle_clearance = True
+        self._update_pixel_geometry(curr_xy, point_to_world)
+        reduced_walkable = self._build_walkable_grid(
+            minimap_rgb,
+            curr_xy,
+            target_xy,
+        )
+        reduced_path = self._plan_path(reduced_walkable, curr_xy, target_xy)
+        if reduced_path:
+            return reduced_path, reduced_walkable, True
+
+        # A reduced mask should only add free cells, but preserve the nominal
+        # result if numerical/grid effects ever make the retry unusable.
+        self.using_minimum_obstacle_clearance = False
+        self._update_pixel_geometry(curr_xy, point_to_world)
+        walkable = self._build_walkable_grid(minimap_rgb, curr_xy, target_xy)
+        path = self._plan_path(walkable, curr_xy, target_xy)
+        return path, walkable, False
 
     def _using_unreachable_proxy(self) -> bool:
         return self.last_plan_status.startswith("target_unreachable_proxy=")
@@ -1158,6 +1671,9 @@ class AStarBaseline:
         if closest_idx >= len(self.last_path) - 1:
             self.dynamic_blocked_count = 0
             return True, "path_exhausted"
+        if self.static_scene:
+            self.dynamic_blocked_count = 0
+            return False, f"cached_path_dist_{closest_dist:.2f}{unit}_static_map"
         if not self.last_action_was_move:
             self.dynamic_blocked_count = 0
             return False, (

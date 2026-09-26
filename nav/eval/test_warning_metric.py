@@ -9,10 +9,21 @@ from pathlib import Path
 
 import numpy as np
 
+from nav.eval.io import find_actions_csv, find_depth_dir
 from nav.eval.warning import WarningDetector, compute_warning_rate
 
 
 class WarningDetectorTest(unittest.TestCase):
+    def test_ppo_artifacts_are_discovered(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            (run_dir / "ppo_depth").mkdir()
+            (run_dir / "ppo_actions.csv").touch()
+            self.assertEqual(find_depth_dir(run_dir), run_dir / "ppo_depth")
+            self.assertEqual(
+                find_actions_csv(run_dir), run_dir / "ppo_actions.csv"
+            )
+
     def test_positive_move_extends_warning_distance(self) -> None:
         depth = np.full((240, 320), 1.0, dtype=np.float32)
         detector = WarningDetector()

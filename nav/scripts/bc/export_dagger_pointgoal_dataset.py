@@ -21,6 +21,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--raw-root", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--round-id", required=True)
+    parser.add_argument(
+        "--split",
+        default="train",
+        help="Collection-manifest split to export, or 'all' for every split.",
+    )
+    parser.add_argument(
+        "--output-split",
+        default="train",
+        choices=("train", "val", "test"),
+        help="Dataset split assigned to every exported DAgger episode.",
+    )
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
@@ -112,7 +123,7 @@ def main() -> None:
         "skipped": [],
     }
     for task in read_jsonl(args.manifest):
-        if task["split"] != "train":
+        if args.split != "all" and task["split"] != args.split:
             continue
         summary["episodes_considered"] += 1
         raw_dir = args.raw_root / task["scene_name"] / task["episode_id"]
@@ -145,7 +156,7 @@ def main() -> None:
             "episode_dir": str(relative),
             "scene_name": task["scene_name"],
             "episode_id": episode_id,
-            "split": "train",
+            "split": args.output_split,
             "steps": steps,
             "source": "dagger",
             "round_id": args.round_id,

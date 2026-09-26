@@ -43,6 +43,7 @@ import os
 import platform
 import shlex
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -57,6 +58,8 @@ from nav.config import (
     ASTAR_DEFAULTS,
     DEFAULT_REACH_DISTANCE_M,
     DEFAULT_PROMPT_NOVISION,
+    DEFAULT_PROMPT_TOPDOWN,
+    DEFAULT_PROMPT_TOPDOWN_ONLY,
     DEFAULT_PROMPT_VISION,
     GRID_CSV_FIELDS,
     LLM_DEFAULT_HISTORY_SIZE,
@@ -106,6 +109,7 @@ class Cell:
     target_x: int
     target_y: int
     output_root: Optional[str] = None
+    topdown_input: bool = False  # attach minimap; ego RGB is independently optional
 
     @property
     def model_short(self) -> str:
@@ -114,7 +118,11 @@ class Cell:
 
     @property
     def model_dir(self) -> str:
-        return self.model_short + ("" if self.vision_input else "_novision")
+        return (
+            self.model_short
+            + ("" if self.vision_input else "_novision")
+            + ("_topdown" if self.topdown_input else "")
+        )
 
     @property
     def frame_save_dir(self) -> Path:
@@ -132,7 +140,11 @@ class Cell:
     @property
     def label(self) -> str:
         v = "v" if self.vision_input else "x"
-        return f"{self.scene_name}/{self.point_id}/{self.model_short}/seed{self.seed_id}/{v}/hs{self.history_size}"
+        td = "td" if self.topdown_input else "no-td"
+        return (
+            f"{self.scene_name}/{self.point_id}/{self.model_short}/"
+            f"seed{self.seed_id}/{v}/{td}/hs{self.history_size}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +152,29 @@ class Cell:
 # ---------------------------------------------------------------------------
 def load_input_points() -> dict:
     return json.loads(INPUT_POINTS.read_text(encoding="utf-8"))
+
+
+def load_task_filter(path: str) -> List[tuple[str, str]]:
+    """Load an ordered scene/point subset without duplicating point geometry."""
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    raw_tasks = payload.get("tasks") if isinstance(payload, dict) else payload
+    if not isinstance(raw_tasks, list) or not raw_tasks:
+        raise SystemExit("--tasks_file must contain a non-empty JSON 'tasks' list.")
+    tasks: List[tuple[str, str]] = []
+    seen = set()
+    for index, task in enumerate(raw_tasks):
+        if not isinstance(task, dict):
+            raise SystemExit(f"Invalid task at index {index}: expected an object.")
+        key = (str(task.get("scene_name", "")), str(task.get("point_id", "")))
+        if not all(key):
+            raise SystemExit(
+                f"Invalid task at index {index}: scene_name and point_id are required."
+            )
+        if key in seen:
+            raise SystemExit(f"Duplicate task in --tasks_file: {key[0]}/{key[1]}")
+        seen.add(key)
+        tasks.append(key)
+    return tasks
 
 
 def build_grid(
@@ -150,8 +185,12 @@ def build_grid(
     history_sizes: List[int],
     points: Optional[List[str]] = None,
     output_root: Optional[str] = None,
+    topdown_modes: Optional[List[bool]] = None,
+    tasks: Optional[List[tuple[str, str]]] = None,
 ) -> List[Cell]:
     pts = load_input_points()
+    topdown_modes = [False] if topdown_modes is None else list(topdown_modes)
+    task_keys = set(tasks or [])
     unknown_scenes = [scene for scene in scenes if scene not in SCENE_ID_MAP]
     if unknown_scenes:
         raise SystemExit(
@@ -166,6 +205,8 @@ def build_grid(
             pid = entry["point_id"]
             if points and pid not in points:
                 continue
+            if task_keys and (scene, pid) not in task_keys:
+                continue
             init_world_x = float(entry["start"]["x"])
             init_world_z = float(entry["start"]["z"])
             init_dir = float(entry["start"]["direction"])
@@ -175,19 +216,30 @@ def build_grid(
                 for seed in seeds:
                     for vis in vision_modes:
                         for hs in history_sizes:
-                            cells.append(Cell(
-                                model=model,
-                                scene_name=scene,
-                                point_id=pid,
-                                seed_id=str(seed),
-                                vision_input=vis,
-                                history_size=int(hs),
-                                init_world_x=init_world_x,
-                                init_world_z=init_world_z,
-                                init_direction=init_dir,
-                                target_x=tx, target_y=ty,
-                                output_root=output_root,
-                            ))
+                            for topdown in topdown_modes:
+                                cells.append(Cell(
+                                    model=model,
+                                    scene_name=scene,
+                                    point_id=pid,
+                                    seed_id=str(seed),
+                                    vision_input=vis,
+                                    history_size=int(hs),
+                                    init_world_x=init_world_x,
+                                    init_world_z=init_world_z,
+                                    init_direction=init_dir,
+                                    target_x=tx, target_y=ty,
+                                    output_root=output_root,
+                                    topdown_input=bool(topdown),
+                                ))
+    if task_keys:
+        available = {
+            (cell.scene_name, cell.point_id)
+            for cell in cells
+        }
+        missing = task_keys - available
+        if missing:
+            formatted = ", ".join(f"{scene}/{point}" for scene, point in sorted(missing))
+            raise SystemExit(f"Tasks not found in the selected input points/scenes: {formatted}")
     return cells
 
 
@@ -208,12 +260,25 @@ def cell_run_config(args, cell: Cell, file_name: str) -> dict:
         "model_id": cell.model, "scene_id": SCENE_ID_MAP[cell.scene_name],
         "scene_name": cell.scene_name, "point_id": cell.point_id,
         "seed_id": cell.seed_id, "vision_input": cell.vision_input,
+        "topdown_input": cell.topdown_input,
         "history_size": cell.history_size, "init_world_x": cell.init_world_x,
         "init_world_z": cell.init_world_z, "init_curr_direction": cell.init_direction,
         "target_x": cell.target_x, "target_y": cell.target_y, "file_name": file_name,
     })
-    prompt = DEFAULT_PROMPT_VISION if cell.vision_input else DEFAULT_PROMPT_NOVISION
-    return navigation_run_config(settings, load_prompt_template(prompt))
+    return navigation_run_config(
+        settings,
+        load_prompt_template(cell_prompt_file(args, cell)),
+    )
+
+
+def cell_prompt_file(args, cell: Cell) -> str:
+    """Resolve the prompt for a cell, including the top-down modality."""
+    if cell.topdown_input:
+        default = DEFAULT_PROMPT_TOPDOWN if cell.vision_input else DEFAULT_PROMPT_TOPDOWN_ONLY
+        return getattr(args, "topdown_prompt_file", "") or default
+    if cell.vision_input:
+        return getattr(args, "prompt_file", "") or DEFAULT_PROMPT_VISION
+    return DEFAULT_PROMPT_NOVISION
 
 
 def cell_completed(cell: Cell) -> bool:
@@ -222,6 +287,60 @@ def cell_completed(cell: Cell) -> bool:
     with cell.results_csv.open(newline="") as stream:
         rows = list(csv.DictReader(stream))
     return bool(rows) and rows[-1].get("stop_reason") in {"max_steps", "reached_vicinity"}
+
+
+def owned_cell_process_groups(pid):
+    """Find descendant sessions too: ML-Agents starts Unity in its own session."""
+    groups = {pid}
+    try:
+        listing = subprocess.check_output(["ps", "-eo", "pid=,ppid=,pgid="], text=True)
+        processes = [tuple(map(int, line.split())) for line in listing.splitlines()]
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return groups
+    descendants = {pid}
+    while True:
+        extended = descendants | {child for child, parent, _ in processes if parent in descendants}
+        if extended == descendants:
+            break
+        descendants = extended
+    # Only signal groups whose leader is one of our owned descendants.
+    groups.update(group for child, _, group in processes
+                  if child in descendants and group in descendants)
+    return groups
+
+
+def run_cell_subprocess(cmd, *, timeout=None, **kwargs):
+    """Isolate each cell so a timeout also stops its xvfb/Unity descendants."""
+    process = subprocess.Popen(cmd, start_new_session=(os.name == "posix"), **kwargs)
+    try:
+        return subprocess.CompletedProcess(cmd, process.wait(timeout=timeout))
+    except BaseException:
+        # On POSIX this group belongs only to the session we just created.
+        # Killing only xvfb-run would leave the cell holding its output lock.
+        if os.name == "posix":
+            groups = owned_cell_process_groups(process.pid)
+            for group in groups:
+                try:
+                    os.killpg(group, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+        else:
+            process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        if os.name == "posix":
+            # The wrapper may already have exited while descendants remain.
+            for group in groups:
+                try:
+                    os.killpg(group, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        elif process.poll() is None:
+            process.kill()
+        process.wait()
+        raise
 
 
 def run_cell(args_dict: dict) -> dict:
@@ -283,7 +402,7 @@ def run_cell(args_dict: dict) -> dict:
     cell.frame_save_dir.mkdir(parents=True, exist_ok=True)
     log_path = cell.frame_save_dir / "run.log"
 
-    prompt_file = DEFAULT_PROMPT_VISION if cell.vision_input else DEFAULT_PROMPT_NOVISION
+    prompt_file = cell_prompt_file(argparse.Namespace(**args_dict), cell)
     base_port = free_tcp_port()
 
     cmd: List[str] = []
@@ -298,6 +417,7 @@ def run_cell(args_dict: dict) -> dict:
         "--point_id", cell.point_id,
         "--seed_id", cell.seed_id,
         "--vision_input", "true" if cell.vision_input else "false",
+        "--topdown_input", "true" if cell.topdown_input else "false",
         "--history_size", str(cell.history_size),
         "--worker_id", "0",
         "--base_port", str(base_port),
@@ -366,12 +486,11 @@ def run_cell(args_dict: dict) -> dict:
         with open(log_path, "a" if resume_cell else "w") as logf:
             logf.write("# command: " + " ".join(shlex.quote(c) for c in cmd) + "\n")
             logf.flush()
-            proc = subprocess.run(
+            proc = run_cell_subprocess(
                 cmd,
                 stdout=logf,
                 stderr=subprocess.STDOUT,
                 cwd=str(REPO_ROOT),
-                check=False,
                 timeout=args_dict.get("per_cell_timeout_sec"),
             )
         duration = time.time() - started
@@ -433,6 +552,7 @@ def append_grid_row(grid_csv: Path, status: dict):
         "model": cell["model"],
         "seed_id": cell["seed_id"],
         "vision_input": cell["vision_input"],
+        "topdown_input": cell["topdown_input"],
         "history_size": cell["history_size"],
         "dynamic_objects": status["dynamic_objects"],
         **status["motion"],
@@ -462,6 +582,7 @@ def append_failure_row(failures_csv: Path, status: dict, attempts: int):
         "model": cell["model"],
         "seed_id": cell["seed_id"],
         "vision_input": cell["vision_input"],
+        "topdown_input": cell["topdown_input"],
         "history_size": cell["history_size"],
         "dynamic_objects": status.get("dynamic_objects", ""),
         **status.get("motion", {}),
@@ -513,10 +634,41 @@ def parse_args():
                    help="Run-replicate ids. Closed-source LLMs ignore these for sampling; the script just labels each replicate.")
     p.add_argument("--vision_input", choices=["on", "off", "both"], default="on",
                    help="Whether to enable vision (egocentric image). 'both' runs each cell twice.")
+    p.add_argument(
+        "--topdown_input",
+        choices=["on", "off", "both"],
+        default="off",
+        help=(
+            "Whether to attach the annotated top-down minimap. Egocentric RGB "
+            "is independently controlled by --vision_input. 'both' adds a grid axis."
+        ),
+    )
     p.add_argument("--history_sizes", nargs="+", type=int, default=[LLM_DEFAULT_HISTORY_SIZE],
                    help="LLM prompt history depths to sweep (6th grid axis). Default-size cells "
                         "land in the canonical outputs/ tree; other sizes under "
                         "outputs/_history_size/hs<k>/ so the stats loader isn't polluted.")
+    p.add_argument(
+        "--tasks_file",
+        type=str,
+        default="",
+        help=(
+            "Optional JSON manifest containing an ordered 'tasks' list of "
+            "{scene_name, point_id} objects. Geometry is still read from the "
+            "canonical input_points.json."
+        ),
+    )
+    p.add_argument(
+        "--prompt_file",
+        type=str,
+        default="",
+        help="Optional egocentric prompt override for vision-enabled cells.",
+    )
+    p.add_argument(
+        "--topdown_prompt_file",
+        type=str,
+        default="",
+        help="Optional prompt override for cells that receive the top-down map.",
+    )
     p.add_argument("--output_root", type=str, default=str(REPO_ROOT / "outputs"),
                    help="Output root; use a fresh directory to preserve older protocol results.")
     p.add_argument("--max_concurrency", type=int, default=4,
@@ -659,6 +811,10 @@ def main():
         raise SystemExit(str(exc)) from exc
 
     vision_modes = {"on": [True], "off": [False], "both": [True, False]}[args.vision_input]
+    topdown_modes = {
+        "on": [True], "off": [False], "both": [False, True]
+    }[args.topdown_input]
+    tasks = load_task_filter(args.tasks_file) if args.tasks_file else None
     scenes = args.scenes if args.scenes is not None else list(SCENE_CODES)
     cells = build_grid(
         models=args.models,
@@ -668,6 +824,8 @@ def main():
         history_sizes=args.history_sizes,
         points=args.points,
         output_root=str(Path(args.output_root).resolve()),
+        topdown_modes=topdown_modes,
+        tasks=tasks,
     )
 
     # Aggregates default to a per-invocation timestamped dir under analysis/.
@@ -728,6 +886,7 @@ def main():
           f"budget_range={args.step_budget_min}-{args.step_budget_max} | "
           f"steps_per_meter={args.steps_per_path_meter:g} | "
           f"budget_overhead={args.step_budget_overhead} | vision={args.vision_input} | "
+          f"topdown={args.topdown_input} | "
           f"reach_m={args.reach_m:g} | "
           f"ego={args.ego_width}x{args.ego_height} | "
           f"minimap={args.minimap_width}x{args.minimap_height} | "
@@ -765,6 +924,8 @@ def main():
                         "llm_min_request_interval_sec": (
                             args.llm_min_request_interval_sec
                         ),
+                        "prompt_file": args.prompt_file,
+                        "topdown_prompt_file": args.topdown_prompt_file,
                         "max_tokens": args.max_tokens,
                         "max_steps": args.max_steps,
                         "dynamic_step_budget": args.dynamic_step_budget,

@@ -435,10 +435,12 @@ For a planner-style baseline, put the implementation under:
 nav/baselines/
 ```
 
-For a learned controller, use the existing pattern in:
+For a learned agent, implement the shared contract and follow the existing BC
+pattern in:
 
 ```text
-nav/train/controller.py
+nav/core/agent.py
+nav/baselines/bc/agent.py
 ```
 
 The implementation should expose a small method that returns a benchmark action string. For example:

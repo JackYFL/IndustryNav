@@ -57,7 +57,9 @@ checkpoints/
 runs/
 wandb/
 tensorboard/
+experiments/
 analysis/
+configs/pointgoal_best_20260913/
 tests/
 !nav/scripts/tests/
 !nav/scripts/tests/*.py

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 from pathlib import Path
 from typing import Callable
 
@@ -290,6 +291,79 @@ def draw_planned_path(minimap: Image.Image, path: PlannedPath) -> Image.Image:
     return annotated.convert("RGB")
 
 
+def draw_agent_heading(
+    minimap: Image.Image,
+    action_row: dict[str, str] | None,
+) -> Image.Image:
+    """Draw the agent's Unity yaw as an arrow on the top-down view."""
+    if not action_row:
+        return minimap
+
+    center = scaled_minimap_point(
+        action_row,
+        "curr_px",
+        "curr_py",
+        minimap.size,
+    )
+    yaw_deg = row_float(action_row, "curr_direction_y", float("nan"))
+    if center is None or not np.isfinite(yaw_deg):
+        return minimap
+
+    # Unity yaw 0 faces +world-z. In the fixed minimap projection, +world-z
+    # points left and +world-x points upward.
+    yaw_rad = math.radians(yaw_deg)
+    direction_x = -math.cos(yaw_rad)
+    direction_y = -math.sin(yaw_rad)
+    perpendicular_x = -direction_y
+    perpendicular_y = direction_x
+
+    scale = max(1.0, minimap.width / UNITY_MAP_SIZE[0])
+    tail_offset = 4.0 * scale
+    arrow_length = 30.0 * scale
+    head_length = 9.0 * scale
+    head_half_width = 5.0 * scale
+    start = (
+        center[0] + tail_offset * direction_x,
+        center[1] + tail_offset * direction_y,
+    )
+    tip = (
+        center[0] + arrow_length * direction_x,
+        center[1] + arrow_length * direction_y,
+    )
+    head_base = (
+        tip[0] - head_length * direction_x,
+        tip[1] - head_length * direction_y,
+    )
+    arrow_head = (
+        tip,
+        (
+            head_base[0] + head_half_width * perpendicular_x,
+            head_base[1] + head_half_width * perpendicular_y,
+        ),
+        (
+            head_base[0] - head_half_width * perpendicular_x,
+            head_base[1] - head_half_width * perpendicular_y,
+        ),
+    )
+
+    annotated = minimap.convert("RGBA")
+    draw = ImageDraw.Draw(annotated)
+    outline = (12, 18, 24, 255)
+    heading_color = (35, 225, 255, 255)
+    draw.line(
+        (start, tip),
+        fill=outline,
+        width=max(5, round(7 * scale)),
+    )
+    draw.line(
+        (start, tip),
+        fill=heading_color,
+        width=max(2, round(4 * scale)),
+    )
+    draw.polygon(arrow_head, fill=heading_color, outline=outline)
+    return annotated.convert("RGB")
+
+
 def success_zone_geometry(
     calibration_row: dict[str, str],
     reach_m: float,
@@ -404,6 +478,7 @@ def compose_frame(
     minimap_source = Image.open(astar_path).convert("RGB")
     if planned_path:
         minimap_source = draw_planned_path(minimap_source, planned_path)
+    minimap_source = draw_agent_heading(minimap_source, action_row)
     minimap_source, status, reach_m = annotate_top_view(
         minimap_source,
         calibration_row,
@@ -455,6 +530,8 @@ def compose_frame(
     )
     if path_overlay:
         minimap_label += " | yellow route"
+    if action_row:
+        minimap_label += " | cyan arrow heading"
     draw.text((8, top_height + 9), minimap_label, fill="white")
     return canvas
 

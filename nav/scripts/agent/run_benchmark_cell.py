@@ -35,6 +35,8 @@ from nav.config import (
     BEHAVIOR_NAME,
     DEFAULT_REACH_DISTANCE_M,
     BENCHMARK_BASELINES,
+    DEFAULT_PROMPT_TOPDOWN,
+    DEFAULT_PROMPT_TOPDOWN_ONLY,
     DEFAULT_PROMPT_VISION,
     DEFAULT_PROMPT_NOVISION,
     LLM_DEFAULT_HISTORY_SIZE,
@@ -161,6 +163,16 @@ def parse_args():
                    help="If False, suppress the egocentric image when calling the LLM. "
                         "Pair with --prompt_file prompts/nav_state_history_no_vision.txt "
                         "for the matching no-vision-language prompt.")
+    p.add_argument(
+        "--topdown_input",
+        type=lambda s: str(s).lower() in {"1", "true", "yes", "on"},
+        default=False,
+        help=(
+            "Attach the current annotated top-down minimap as an LLM image. "
+            "Egocentric RGB is independently controlled by --vision_input. "
+            "The map shows the agent/heading in red and target in green."
+        ),
+    )
     p.add_argument("--worker_id", type=int, default=1)
     p.add_argument("--base_port", type=int, default=5507)
     p.add_argument("--screen_width", type=int, default=1724,
@@ -272,6 +284,30 @@ def parse_args():
         type=float,
         default=ASTAR_DEFAULTS.obstacle_clearance_m,
         help="Physical clearance around minimap obstacles in Unity world meters.",
+    )
+    p.add_argument(
+        "--astar_minimum_obstacle_clearance_m",
+        type=float,
+        default=ASTAR_DEFAULTS.minimum_obstacle_clearance_m,
+        help=(
+            "Fallback clearance used only when the nominal A* mask disconnects "
+            "the target."
+        ),
+    )
+    p.add_argument(
+        "--astar_decorative_edge_max_width_m",
+        type=float,
+        default=ASTAR_DEFAULTS.decorative_edge_max_width_m,
+        help=(
+            "Maximum width of a long dark minimap seam that A* may treat as "
+            "decorative; set to 0 to disable."
+        ),
+    )
+    p.add_argument(
+        "--astar_decorative_edge_min_length_m",
+        type=float,
+        default=ASTAR_DEFAULTS.decorative_edge_min_length_m,
+        help="Minimum length required before A* ignores a narrow dark seam.",
     )
     p.add_argument(
         "--astar_proxy_stop_distance_m",
@@ -745,7 +781,15 @@ def main():
     if args.resume and (args.baseline != "llm" or not args.checkpoint):
         raise SystemExit("--resume currently requires --baseline llm and checkpointing enabled.")
     if args.prompt_file is None:
-        args.prompt_file = DEFAULT_PROMPT_VISION if args.vision_input else DEFAULT_PROMPT_NOVISION
+        args.prompt_file = (
+            DEFAULT_PROMPT_TOPDOWN_ONLY
+            if args.topdown_input and not args.vision_input
+            else DEFAULT_PROMPT_TOPDOWN
+            if args.topdown_input
+            else DEFAULT_PROMPT_VISION
+            if args.vision_input
+            else DEFAULT_PROMPT_NOVISION
+        )
     if args.sim_steps_per_decision <= 0:
         raise SystemExit("--sim_steps_per_decision must be positive.")
     if args.history_size < 0 or args.max_tokens <= 0:
@@ -848,8 +892,10 @@ def main():
     if args.baseline == "llm":
         logger.info(f"LLM provider: {args.llm_provider} | model={args.model_id}")
         logger.info(
-            "Navigation protocol: %s | history=%s | max_tokens=%s | config=%s",
-            NAVIGATION_PROTOCOL_VERSION, args.history_size, args.max_tokens,
+            "Navigation protocol: %s | history=%s | topdown=%s | "
+            "max_tokens=%s | config=%s",
+            NAVIGATION_PROTOCOL_VERSION, args.history_size, args.topdown_input,
+            args.max_tokens,
             Path(args.frame_save_dir) / "run_config.json",
         )
     history_deque = deque(maxlen=args.history_size if args.history_size > 0 else None)
@@ -878,6 +924,15 @@ def main():
         )
         astar_planner = AStarBaseline(
             obstacle_clearance_m=args.astar_obstacle_clearance_m,
+            minimum_obstacle_clearance_m=(
+                args.astar_minimum_obstacle_clearance_m
+            ),
+            decorative_edge_max_width_m=(
+                args.astar_decorative_edge_max_width_m
+            ),
+            decorative_edge_min_length_m=(
+                args.astar_decorative_edge_min_length_m
+            ),
             proxy_stop_distance_m=args.astar_proxy_stop_distance_m,
             dynamic_replan_lookahead_m=(
                 args.astar_dynamic_replan_lookahead_m
@@ -885,6 +940,7 @@ def main():
             dynamic_replan_confirm_steps=args.astar_dynamic_replan_confirm_steps,
             pixel_scale=pixel_scale,
             minimap_has_baked_markers=astar_baked_markers,
+            static_scene=args.dynamic_objects == "static",
             policy_actions=astar_policy_actions,
             debug_viz=args.astar_debug_viz,
             debug_dir=astar_debug_dir,
@@ -898,7 +954,12 @@ def main():
             f"@k{ASTAR_DEFAULTS.contrast_background_px}"
             f"/area>={ASTAR_DEFAULTS.contrast_min_area_px} | "
             f"baked_markers={astar_baked_markers} | "
+            f"static_scene={args.dynamic_objects == 'static'} | "
             f"obstacle_clearance_m={args.astar_obstacle_clearance_m:g} | "
+            f"minimum_obstacle_clearance_m="
+            f"{args.astar_minimum_obstacle_clearance_m:g} | "
+            f"decorative_edges=<={args.astar_decorative_edge_max_width_m:g}m"
+            f"/>={args.astar_decorative_edge_min_length_m:g}m | "
             f"proxy_stop_distance_m={args.astar_proxy_stop_distance_m:g} | "
             f"dynamic_replan_lookahead_m="
             f"{args.astar_dynamic_replan_lookahead_m:g} | "
@@ -911,8 +972,8 @@ def main():
 
     bc_controller = None
     if args.baseline in {"bc", "dagger"}:
-        from nav.train.controller import BCNavController
-        bc_controller = BCNavController(
+        from nav.baselines.bc.agent import BCNavAgent
+        bc_controller = BCNavAgent(
             ckpt_path=args.bc_ckpt,
             device=args.bc_device,
             seq_len_override=args.bc_seq_len,
@@ -923,10 +984,10 @@ def main():
         )
     ppo_controller = None
     if args.baseline == "ppo":
-        from nav.baselines.rl.controller import PPOPointGoalController
+        from nav.baselines.rl.agent import PPOPointGoalAgent
         if not args.ppo_ckpt:
             raise SystemExit("--baseline ppo requires --ppo_ckpt")
-        ppo_controller = PPOPointGoalController(
+        ppo_controller = PPOPointGoalAgent(
             checkpoint_path=args.ppo_ckpt,
             device=args.ppo_device,
         )
@@ -944,6 +1005,9 @@ def main():
         spawn_args.init_world_z = restored["pose"]["z"]
         spawn_args.init_curr_direction = restored["pose"]["yaw"]
         spawn_args._resume_world_y = restored["pose"]["y"]
+        projector = restored.get("minimap_projector") or {}
+        if projector.get("target_pixel") is not None:
+            spawn_args._resume_target_unity_pixel = projector["target_pixel"]
     try:
         primed = setup_and_prime(spawn_args, logger)
     except EnvSetupError as e:
@@ -1269,17 +1333,19 @@ def main():
                 if detected_init_xy is None:
                     detected_init_xy = curr_xy
 
-            if should_save_frame and true_minimap_rgb is not None and subdir_ann is not None:
-                annotated = draw_curr_target_heading_rgb(
+            annotated_minimap_rgb = None
+            if true_minimap_rgb is not None:
+                annotated_minimap_rgb = draw_curr_target_heading_rgb(
                     true_minimap_rgb,
                     curr_xy,
                     target_xy,
                     curr_heading_xy=curr_heading_xy,
                     pixel_scale=pixel_scale,
                 )
+            if should_save_frame and annotated_minimap_rgb is not None and subdir_ann is not None:
                 cv2.imwrite(
                     os.path.join(subdir_ann, f"{step_count}.png"),
-                    cv2.cvtColor(annotated, cv2.COLOR_RGB2BGR),
+                    cv2.cvtColor(annotated_minimap_rgb, cv2.COLOR_RGB2BGR),
                 )
             if should_save_frame:
                 last_saved_step = step_count
@@ -1442,10 +1508,21 @@ def main():
                                 stop_reason = "vision_unavailable"
                                 logger.error("Requested vision but no egocentric RGB observation is available.")
                                 break
-                            agent_images = (
-                                [("ego", ego_rgb)] if (args.vision_input and ego_rgb is not None) else []
+                            if args.topdown_input and annotated_minimap_rgb is None:
+                                stop_reason = "topdown_unavailable"
+                                logger.error(
+                                    "Requested top-down input but no annotated minimap "
+                                    "observation is available."
+                                )
+                                break
+                            agent_images = []
+                            if args.vision_input and ego_rgb is not None:
+                                agent_images.append(("ego", ego_rgb))
+                            if args.topdown_input and annotated_minimap_rgb is not None:
+                                agent_images.append(("topdown", annotated_minimap_rgb))
+                            prompt = add_api_observation_contract(
+                                prompt, [name for name, _ in agent_images]
                             )
-                            prompt = add_api_observation_contract(prompt, bool(agent_images))
                             last_prompt = prompt
                             payload = {
                                 "prompt": prompt,
@@ -1506,6 +1583,7 @@ def main():
                             "curr_yaw_deg": float(rot_y),
                             "target_world_x": target_world_x,
                             "target_world_z": target_world_z,
+                            "scene_id": int(args.scene_id),
                         }
                     elif args.baseline == "dagger":
                         if curr_xy is not None and target_xy is not None:
@@ -1688,7 +1766,9 @@ def main():
                 "provider": args.llm_provider if args.baseline == "llm" else "",
                 "model": args.model_id,
                 "vision_input": bool(args.vision_input),
+                "topdown_input": bool(args.topdown_input),
                 "max_steps": int(step_budget),
+                "step_budget_max": int(args.step_budget_max),
                 "step_budget_mode": step_budget_mode,
                 "initial_step_budget": int(initial_step_budget),
                 "astar_max_planned_path_m": astar_max_planned_path_m,

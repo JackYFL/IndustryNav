@@ -1,28 +1,39 @@
-"""Behavior-cloning training + inference.
+"""Algorithm-neutral training infrastructure.
 
-- :mod:`nav.train.dataset` — episode datasets (single-frame + sequence).
-- :mod:`nav.train.loop` — the model-agnostic training loop (:func:`train`).
-- :mod:`nav.train.controller` — the inference-time :class:`BCNavController`
-  used by the benchmark harness in ``bc_agent`` mode.
+- :mod:`nav.train.base` — reusable trainer lifecycle.
+- :mod:`nav.train.advantages` — policy-gradient advantage estimators.
+- :mod:`nav.train.initialization` — cross-method checkpoint initialization.
 
-``controller`` is imported lazily (it pulls in torch via the policy import);
-``from nav.train import BCNavController`` still works.
+Legacy BC exports remain available here, but new code should use
+``nav.baselines.bc`` and ``nav.data`` directly.
 """
 
-from nav.train.dataset import NavEpisodeDataset, NavEpisodeSequenceDataset
-from nav.train.loop import train
+from nav.train.base import BaseTrainer, TrainerState
 
 __all__ = [
     "NavEpisodeDataset",
     "NavEpisodeSequenceDataset",
     "train",
     "BCNavController",
+    "BaseTrainer",
+    "TrainerState",
 ]
 
 
-def __getattr__(name: str):  # lazy re-export to avoid importing the controller eagerly
+def __getattr__(name: str):
+    if name in {"NavEpisodeDataset", "NavEpisodeSequenceDataset"}:
+        from nav.data import NavEpisodeDataset, NavEpisodeSequenceDataset
+
+        return {
+            "NavEpisodeDataset": NavEpisodeDataset,
+            "NavEpisodeSequenceDataset": NavEpisodeSequenceDataset,
+        }[name]
+    if name == "train":
+        from nav.baselines.bc.trainer import train
+
+        return train
     if name == "BCNavController":
-        from nav.train.controller import BCNavController
+        from nav.baselines.bc.agent import BCNavController
 
         return BCNavController
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

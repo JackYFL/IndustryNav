@@ -6,6 +6,7 @@ import argparse
 import csv
 import json
 import math
+import re
 from html import escape
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -19,11 +20,19 @@ from nav.config import (
     UNITY_MAP_SIZE,
 )
 from nav.eval.collision import compute_collision_rate
+from nav.eval.efficiency import (
+    DEFAULT_ASTAR_RESULTS_DIR,
+    DEFAULT_EFFICIENCY_STEP_MARGIN,
+    AStarStepReference,
+    TaskKey,
+    attach_step_efficiency,
+    load_astar_step_references,
+)
 from nav.eval.metrics import (
     compute_success_at_thresholds,
     compute_success_efficiency_distance,
 )
-from nav.eval.warning import WarningDetector
+from nav.safety import WarningDetector
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -73,6 +82,14 @@ def parse_args() -> argparse.Namespace:
         help="Add new runs to the existing manifest and preserve all existing gallery entries/GIFs.",
     )
     parser.add_argument(
+        "--replace",
+        action="store_true",
+        help=(
+            "Replace existing cards with the same model/scene/point while "
+            "preserving their GIF filenames."
+        ),
+    )
+    parser.add_argument(
         "--skip-incomplete", action="store_true",
         help="Skip run directories with missing or empty results.csv; do not infer final outcomes.",
     )
@@ -90,9 +107,41 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Optional page title. Derived from the result models when omitted.",
     )
+    parser.add_argument(
+        "--astar-root",
+        type=Path,
+        default=Path("outputs"),
+        help="Output tree containing the per-pair A* references.",
+    )
+    parser.add_argument(
+        "--astar-results-dir",
+        action="append",
+        default=None,
+        help=(
+            "A* result directory name below each scene/point. Repeat to layer "
+            "newer per-pair static references over the default set."
+        ),
+    )
+    parser.add_argument(
+        "--efficiency-step-margin", "--efficiency-k",
+        dest="efficiency_step_margin",
+        type=int,
+        default=DEFAULT_EFFICIENCY_STEP_MARGIN,
+        help=(
+            "K in efficiency max_steps = optimal_steps + K "
+            f"(default: {DEFAULT_EFFICIENCY_STEP_MARGIN})."
+        ),
+    )
     args = parser.parse_args()
+    if args.append and args.replace:
+        parser.error("--append and --replace are mutually exclusive")
     if args.html_only and (
-        args.input_glob or args.limit or args.append or args.skip_incomplete or args.normal_only
+        args.input_glob
+        or args.limit
+        or args.append
+        or args.replace
+        or args.skip_incomplete
+        or args.normal_only
     ):
         parser.error("--html-only uses the existing manifest; do not combine it with run-selection options.")
     return args
@@ -106,6 +155,22 @@ def numeric_files(directory: Path, suffix: str = ".png") -> dict[int, Path]:
         except ValueError:
             continue
     return files
+
+
+def available_frame_steps(
+    rgb_files: dict[int, Path],
+    depth_files: dict[int, Path],
+    minimap_files: dict[int, Path],
+) -> list[int]:
+    """Return aligned steps while allowing honest minimap-only replays."""
+    if not minimap_files:
+        return []
+    frame_sets = [set(minimap_files)]
+    if rgb_files:
+        frame_sets.append(set(rgb_files))
+    if depth_files:
+        frame_sets.append(set(depth_files))
+    return sorted(set.intersection(*frame_sets))
 
 
 def choose_steps(steps: list[int], max_frames: int) -> list[int]:
@@ -354,6 +419,35 @@ def panel(image: Image.Image, size: tuple[int, int]) -> Image.Image:
     return ImageOps.fit(image.convert("RGB"), size, method=Image.Resampling.LANCZOS)
 
 
+def capture_panel(path: Path | None, size: tuple[int, int]) -> Image.Image:
+    """Render a captured view or an explicit placeholder for minimap-only runs."""
+    if path is not None:
+        with Image.open(path) as source:
+            return panel(source, size)
+
+    result = Image.new("RGB", size, (19, 31, 48))
+    draw = ImageDraw.Draw(result)
+    title_font = load_font(18, bold=True)
+    detail_font = load_font(13)
+    title = "NOT CAPTURED"
+    detail = "MINIMAP-ONLY RUN"
+    title_box = draw.textbbox((0, 0), title, font=title_font)
+    detail_box = draw.textbbox((0, 0), detail, font=detail_font)
+    draw.text(
+        ((size[0] - (title_box[2] - title_box[0])) // 2, size[1] // 2 - 24),
+        title,
+        fill=(184, 199, 220),
+        font=title_font,
+    )
+    draw.text(
+        ((size[0] - (detail_box[2] - detail_box[0])) // 2, size[1] // 2 + 5),
+        detail,
+        fill=(113, 132, 158),
+        font=detail_font,
+    )
+    return result
+
+
 def draw_badge(
     draw: ImageDraw.ImageDraw,
     xy: tuple[int, int],
@@ -371,8 +465,8 @@ def draw_badge(
 def compose_frame(
     run_dir: Path,
     step: int,
-    rgb_path: Path,
-    depth_path: Path,
+    rgb_path: Path | None,
+    depth_path: Path | None,
     minimap_path: Path,
     row: dict[str, str],
     result_row: dict[str, str],
@@ -384,8 +478,8 @@ def compose_frame(
     total_frames: int,
 ) -> Image.Image:
     canvas = Image.new("RGB", (CANVAS_WIDTH, CANVAS_HEIGHT), (12, 18, 29))
-    rgb = panel(Image.open(rgb_path), (PANEL_SIZE, PANEL_SIZE))
-    depth = panel(Image.open(depth_path), (PANEL_SIZE, PANEL_SIZE))
+    rgb = capture_panel(rgb_path, (PANEL_SIZE, PANEL_SIZE))
+    depth = capture_panel(depth_path, (PANEL_SIZE, PANEL_SIZE))
     minimap_source = add_trajectory(
         Image.open(minimap_path),
         trail,
@@ -472,7 +566,7 @@ def export_run(
     rgb_files = numeric_files(run_dir / f"{stream_prefix}_fp")
     depth_files = numeric_files(run_dir / f"{stream_prefix}_depth")
     minimap_files = numeric_files(run_dir / f"{stream_prefix}_minimap_target")
-    common_steps = sorted(rgb_files.keys() & depth_files.keys() & minimap_files.keys())
+    common_steps = available_frame_steps(rgb_files, depth_files, minimap_files)
     if not common_steps:
         raise FileNotFoundError(f"No matching frames under {run_dir}")
 
@@ -488,8 +582,8 @@ def export_run(
         compose_frame(
             run_dir,
             step,
-            rgb_files[step],
-            depth_files[step],
+            rgb_files.get(step),
+            depth_files.get(step),
             minimap_files[step],
             rows[step] if step < len(rows) else {},
             result_row,
@@ -561,7 +655,44 @@ def export_run(
     }
 
 
-def gallery_html(items: list[dict], gallery_title: str) -> str:
+def attach_gallery_efficiency(
+    items: list[dict],
+    astar_references: dict[TaskKey, AStarStepReference],
+    step_margin: int = DEFAULT_EFFICIENCY_STEP_MARGIN,
+) -> list[dict]:
+    """Return gallery items enriched with per-pair normalized efficiency."""
+    metric_rows = [
+        {
+            **item,
+            "scene_name": item.get("scene", ""),
+            "point_id": item.get("point", ""),
+            "steps_taken": item.get("steps"),
+            "model_short": item.get("run_name", ""),
+            "exec_mode": item.get("exec_mode", item.get("run_name", "")),
+            "sim_steps_per_decision": item.get("sim_steps_per_decision", 2),
+        }
+        for item in items
+    ]
+    metric_rows = attach_step_efficiency(
+        metric_rows,
+        astar_references,
+        step_margin=step_margin,
+    )
+    enriched: list[dict] = []
+    for item, metrics in zip(items, metric_rows):
+        result = dict(item)
+        for field in ("optimal_steps", "efficiency_max_steps", "efficiency"):
+            value = metrics[field]
+            result[field] = round(float(value), 5) if math.isfinite(value) else None
+        enriched.append(result)
+    return enriched
+
+
+def gallery_html(
+    items: list[dict],
+    gallery_title: str,
+    efficiency_step_margin: int = DEFAULT_EFFICIENCY_STEP_MARGIN,
+) -> str:
     gallery_title = escape(gallery_title)
     totals = {
         "runs": len(items),
@@ -584,43 +715,50 @@ def gallery_html(items: list[dict], gallery_title: str) -> str:
 <style>
 :root{{--bg:#07111f;--panel:#0e1b2d;--panel2:#13243b;--text:#edf4ff;--muted:#91a5c2;--line:#223a59;--good:#3ddc97;--bad:#ff6b6b;--warn:#ffbf47;--cyan:#5bc0eb}}
 *{{box-sizing:border-box}}body{{margin:0;background:radial-gradient(circle at top,#102844 0,#07111f 46%);color:var(--text);font:14px/1.45 Inter,ui-sans-serif,system-ui,-apple-system,sans-serif}}
-.shell{{max-width:1500px;margin:auto;padding:34px 28px 80px}}h1{{margin:0;font-size:31px;letter-spacing:-.03em}}.sub{{color:var(--muted);margin:7px 0 24px}}
+.shell{{max-width:1800px;margin:auto;padding:34px 28px 80px}}h1{{margin:0;font-size:31px;letter-spacing:-.03em}}.sub{{color:var(--muted);margin:7px 0 24px}}
 .kpis{{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:18px}}.kpi{{background:linear-gradient(145deg,var(--panel2),var(--panel));border:1px solid var(--line);border-radius:14px;padding:15px 17px}}.kpi b{{display:block;font-size:25px}}.kpi span{{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.08em}}
 .toolbar{{position:sticky;top:0;z-index:5;display:flex;gap:10px;align-items:center;padding:12px;margin:0 0 18px;background:#091627e8;backdrop-filter:blur(14px);border:1px solid var(--line);border-radius:13px}}select,input{{color:var(--text);background:#0c1b2e;border:1px solid #294461;border-radius:9px;padding:9px 11px}}input{{min-width:220px}}#count{{margin-left:auto;color:var(--muted)}}
-.grid{{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px}}.card{{overflow:hidden;background:var(--panel);border:1px solid var(--line);border-radius:14px;box-shadow:0 14px 35px #0004}}.card.success{{border-color:#246d55}}.visual{{display:block;aspect-ratio:720/852;background:#050b13}}.visual img{{display:block;width:100%;height:100%;object-fit:cover}}.body{{padding:13px 15px 15px}}.title{{display:flex;align-items:center;gap:9px;font-size:16px;font-weight:750}}.badge{{font-size:10px;padding:3px 7px;border-radius:99px;letter-spacing:.08em}}.success .badge{{color:#8bf4c9;background:#173f36}}.failure .badge{{color:#ffabab;background:#4a232a}}.metrics{{display:grid;grid-template-columns:repeat(4,1fr);gap:7px;margin-top:11px}}.metric{{background:#0a1727;border-radius:8px;padding:8px}}.metric b{{display:block;font-size:14px}}.metric span{{font-size:10px;color:var(--muted)}}
+.grid{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px}}.card{{overflow:hidden;background:var(--panel);border:1px solid var(--line);border-radius:14px;box-shadow:0 14px 35px #0004}}.card.success{{border-color:#246d55}}.visual{{display:block;aspect-ratio:720/852;background:#050b13}}.visual img{{display:block;width:100%;height:100%;object-fit:cover}}.body{{padding:13px 15px 15px}}.title{{display:flex;align-items:center;gap:9px;font-size:15px;font-weight:750}}.badge{{font-size:10px;padding:3px 7px;border-radius:99px;letter-spacing:.08em}}.success .badge{{color:#8bf4c9;background:#173f36}}.failure .badge{{color:#ffabab;background:#4a232a}}.metrics{{display:grid;grid-template-columns:repeat(4,1fr);gap:7px;margin-top:11px}}.metric{{background:#0a1727;border-radius:8px;padding:8px}}.metric b{{display:block;font-size:14px}}.metric span{{font-size:9px;color:var(--muted)}}
 .empty{{display:none;text-align:center;color:var(--muted);padding:70px}}@media(max-width:1050px){{.grid{{grid-template-columns:repeat(2,1fr)}}.kpis{{grid-template-columns:repeat(3,1fr)}}}}@media(max-width:700px){{.shell{{padding:22px 14px}}.grid{{grid-template-columns:1fr}}.kpis{{grid-template-columns:repeat(2,1fr)}}.toolbar{{flex-wrap:wrap;position:static}}#count{{margin-left:0;width:100%}}}}
 </style></head><body><main class="shell">
-<h1>{gallery_title} · Navigation Replay</h1><p class="sub">RGB / egocentric depth with warning and collision overlays / minimap trajectory</p>
+<h1>{gallery_title} · Navigation Replay</h1><p class="sub">RGB / egocentric depth / minimap trajectory · Efficiency uses per-pair static A* optimal steps + K (K={efficiency_step_margin})</p>
 <section class="kpis" id="kpis"></section>
-<section class="toolbar"><select id="model"><option value="all">All Models</option></select><select id="scene"><option value="all">All Scenes</option></select><select id="outcome"><option value="all">All Results</option><option value="success">Success Only</option><option value="failure">Failures Only</option></select><select id="sort"><option value="scene">Scene Order</option><option value="distance">Final Distance</option><option value="collision">Highest Collision Rate</option><option value="warning">Highest Warning Rate</option></select><input id="search" placeholder="Search model / scene / point"><span id="count"></span></section>
+<section class="toolbar"><select id="model"><option value="all">All Models</option></select><select id="scene"><option value="all">All Scenes</option></select><select id="outcome"><option value="all">All Results</option><option value="success">Success Only</option><option value="failure">Failures Only</option></select><select id="sort"><option value="scene">Scene Order</option><option value="efficiency">Highest Efficiency</option><option value="distance_ratio">Highest Distance Ratio</option><option value="distance">Final Distance</option><option value="collision">Highest Collision Rate</option><option value="warning">Highest Warning Rate</option></select><input id="search" placeholder="Search model / scene / point"><span id="count"></span></section>
 <section class="grid" id="grid"></section><p class="empty" id="empty">No trajectories match the current filters.</p>
 </main><script>
 const items={payload}, totals={summary};
-const pct=x=>`${{(100*x).toFixed(1)}}%`;
-function updateKpis(rows){{const t={{runs:rows.length,success2:rows.reduce((n,x)=>n+x.success_at_2m,0),success5:rows.reduce((n,x)=>n+x.success_at_5m,0),success10:rows.reduce((n,x)=>n+x.success_at_10m,0),forward:rows.reduce((n,x)=>n+x.forward_steps,0),collisions:rows.reduce((n,x)=>n+x.collision_steps,0),warning_frames:rows.reduce((n,x)=>n+x.warning_frames,0),warnings:rows.reduce((n,x)=>n+x.warning_steps,0),rotations:rows.reduce((n,x)=>n+(x.rotation_steps||0),0),actions:rows.reduce((n,x)=>n+(x.action_steps??Object.values(x.action_counts).reduce((a,b)=>a+b,0)),0)}};const sr=(n)=>`${{n}}/${{t.runs}} · ${{pct(n/Math.max(1,t.runs))}}`;document.querySelector('#kpis').innerHTML=[['Runs',t.runs],['Success@2m',sr(t.success2)],['Success@5m',sr(t.success5)],['Success@10m',sr(t.success10)],['Forward CR',`${{t.collisions}}/${{t.forward}} · ${{pct(t.collisions/Math.max(1,t.forward))}}`],['Warning Rate',`${{t.warnings}}/${{t.warning_frames}} · ${{pct(t.warnings/Math.max(1,t.warning_frames))}}`],['Rotation Ratio',pct(t.rotations/Math.max(1,t.actions))]].map(([a,b])=>`<article class="kpi"><b>${{b}}</b><span>${{a}}</span></article>`).join('');}}
+const pct=x=>`${{(100*x).toFixed(2)}}%`;
+function updateKpis(rows){{const validEff=rows.filter(x=>Number.isFinite(x.efficiency)),validDistanceRatio=rows.filter(x=>Number.isFinite(x.distance_ratio));const t={{runs:rows.length,success2:rows.reduce((n,x)=>n+x.success_at_2m,0),success5:rows.reduce((n,x)=>n+x.success_at_5m,0),success10:rows.reduce((n,x)=>n+x.success_at_10m,0),efficiency:validEff.reduce((n,x)=>n+x.efficiency,0),efficiencyN:validEff.length,distanceRatio:validDistanceRatio.reduce((n,x)=>n+x.distance_ratio,0),distanceRatioN:validDistanceRatio.length,forward:rows.reduce((n,x)=>n+x.forward_steps,0),collisions:rows.reduce((n,x)=>n+x.collision_steps,0),warning_frames:rows.reduce((n,x)=>n+x.warning_frames,0),warnings:rows.reduce((n,x)=>n+x.warning_steps,0),rotations:rows.reduce((n,x)=>n+(x.rotation_steps||0),0),actions:rows.reduce((n,x)=>n+(x.action_steps??Object.values(x.action_counts).reduce((a,b)=>a+b,0)),0)}};const sr=(n)=>`${{n}}/${{t.runs}} · ${{pct(n/Math.max(1,t.runs))}}`;const meanEff=t.efficiencyN?pct(t.efficiency/t.efficiencyN):'—',meanDistanceRatio=t.distanceRatioN?pct(t.distanceRatio/t.distanceRatioN):'—';document.querySelector('#kpis').innerHTML=[['Runs',t.runs],['Success@2m',sr(t.success2)],['Success@5m',sr(t.success5)],['Success@10m',sr(t.success10)],['Mean Efficiency',meanEff],['Mean Distance Ratio',meanDistanceRatio],['Forward CR',`${{t.collisions}}/${{t.forward}} · ${{pct(t.collisions/Math.max(1,t.forward))}}`],['Warning Rate',`${{t.warnings}}/${{t.warning_frames}} · ${{pct(t.warnings/Math.max(1,t.warning_frames))}}`],['Rotation Ratio',pct(t.rotations/Math.max(1,t.actions))]].map(([a,b])=>`<article class="kpi"><b>${{b}}</b><span>${{a}}</span></article>`).join('');}}
 const modelSelect=document.querySelector('#model');[...new Set(items.map(x=>x.model))].sort().forEach(model=>modelSelect.insertAdjacentHTML('beforeend',`<option value="${{model}}">${{model}}</option>`));
+const requestedModel=new URLSearchParams(location.search).get('model');if(items.some(x=>x.model===requestedModel))modelSelect.value=requestedModel;
 const sceneSelect=document.querySelector('#scene');for(let i=1;i<=24;i++)sceneSelect.insertAdjacentHTML('beforeend',`<option value="${{i}}">Scene ${{i}}</option>`);
 const grid=document.querySelector('#grid'), count=document.querySelector('#count'), empty=document.querySelector('#empty');let observer;
-function render(){{const model=modelSelect.value,scene=sceneSelect.value,outcome=document.querySelector('#outcome').value,q=document.querySelector('#search').value.toLowerCase(),sort=document.querySelector('#sort').value;let shown=items.filter(x=>(model==='all'||x.model===model)&&(scene==='all'||x.scene_number===+scene)&&(outcome==='all'||(outcome==='success')===!!x.success)&&(`${{x.model}} ${{x.scene}} ${{x.point}}`.toLowerCase().includes(q)));shown.sort((a,b)=>sort==='distance'?a.final_distance_m-b.final_distance_m:sort==='collision'?b.collision_rate-a.collision_rate:sort==='warning'?b.warning_rate-a.warning_rate:(a.model.localeCompare(b.model)||a.scene_number-b.scene_number||parseInt(a.point.slice(5))-parseInt(b.point.slice(5))));grid.innerHTML=shown.map(x=>`<article class="card ${{x.success?'success':'failure'}}"><a class="visual" href="gifs/${{x.gif}}" target="_blank"><img loading="lazy" data-src="gifs/${{x.gif}}" alt="${{x.model}} ${{x.scene}} ${{x.point}} navigation replay"></a><div class="body"><div class="title">${{x.model}} · ${{x.scene.toUpperCase()}} / ${{x.point.toUpperCase()}} <span class="badge">${{x.success?'SUCCESS':'FAILED'}}</span></div><div class="metrics"><div class="metric"><b>${{x.final_distance_m.toFixed(2)}} m</b><span>FINAL DIST</span></div><div class="metric"><b>${{pct(x.distance_ratio)}}</b><span>PROGRESS</span></div><div class="metric"><b>${{pct(x.collision_rate)}}</b><span>COLLISION</span></div><div class="metric"><b>${{pct(x.warning_rate)}}</b><span>WARNING</span></div></div></div></article>`).join('');count.textContent=`Showing ${{shown.length}} / ${{items.length}}`;empty.style.display=shown.length?'none':'block';updateKpis(shown);if(observer)observer.disconnect();observer=new IntersectionObserver(entries=>entries.forEach(e=>{{if(e.isIntersecting){{const img=e.target;if(!img.src)img.src=img.dataset.src;observer.unobserve(img)}}}}),{{rootMargin:'500px'}});document.querySelectorAll('img[data-src]').forEach(img=>observer.observe(img));}}
+function render(){{const model=modelSelect.value,scene=sceneSelect.value,outcome=document.querySelector('#outcome').value,q=document.querySelector('#search').value.toLowerCase(),sort=document.querySelector('#sort').value;let shown=items.filter(x=>(model==='all'||x.model===model)&&(scene==='all'||x.scene_number===+scene)&&(outcome==='all'||(outcome==='success')===!!x.success)&&(`${{x.model}} ${{x.scene}} ${{x.point}}`.toLowerCase().includes(q)));shown.sort((a,b)=>sort==='efficiency'?(Number.isFinite(b.efficiency)?b.efficiency:-1)-(Number.isFinite(a.efficiency)?a.efficiency:-1):sort==='distance_ratio'?(Number.isFinite(b.distance_ratio)?b.distance_ratio:-1)-(Number.isFinite(a.distance_ratio)?a.distance_ratio:-1):sort==='distance'?a.final_distance_m-b.final_distance_m:sort==='collision'?b.collision_rate-a.collision_rate:sort==='warning'?b.warning_rate-a.warning_rate:(a.model.localeCompare(b.model)||a.scene_number-b.scene_number||parseInt(a.point.slice(5))-parseInt(b.point.slice(5))));grid.innerHTML=shown.map(x=>`<article class="card ${{x.success?'success':'failure'}}"><a class="visual" href="gifs/${{x.gif}}" target="_blank"><img loading="lazy" data-src="gifs/${{x.gif}}" alt="${{x.model}} ${{x.scene}} ${{x.point}} navigation replay"></a><div class="body"><div class="title">${{x.model}} · ${{x.scene.toUpperCase()}} / ${{x.point.toUpperCase()}} <span class="badge">${{x.success?'SUCCESS':'FAILED'}}</span></div><div class="metrics"><div class="metric"><b>${{Number.isFinite(x.efficiency)?pct(x.efficiency):'—'}}</b><span>EFFICIENCY</span></div><div class="metric"><b>${{x.steps}}</b><span>ACTUAL STEPS</span></div><div class="metric"><b>${{Number.isFinite(x.optimal_steps)?x.optimal_steps:'—'}}</b><span>OPTIMAL STEPS</span></div><div class="metric"><b>${{x.final_distance_m.toFixed(2)}} m</b><span>FINAL DIST</span></div><div class="metric"><b>${{Number.isFinite(x.distance_ratio)?pct(x.distance_ratio):'—'}}</b><span>DISTANCE RATIO</span></div><div class="metric"><b>${{pct(x.collision_rate)}}</b><span>COLLISION</span></div><div class="metric"><b>${{pct(x.warning_rate)}}</b><span>WARNING</span></div></div></div></article>`).join('');count.textContent=`Showing ${{shown.length}} / ${{items.length}}`;empty.style.display=shown.length?'none':'block';updateKpis(shown);if(observer)observer.disconnect();observer=new IntersectionObserver(entries=>entries.forEach(e=>{{if(e.isIntersecting){{const img=e.target;if(!img.src)img.src=img.dataset.src;observer.unobserve(img)}}}}),{{rootMargin:'500px'}});document.querySelectorAll('img[data-src]').forEach(img=>observer.observe(img));}}
 ['model','scene','outcome','sort','search'].forEach(id=>document.querySelector('#'+id).addEventListener(id==='search'?'input':'change',render));render();
 </script></body></html>"""
 
 
 def run_identity(run_dir: Path) -> tuple[str, str, str]:
-    """Return ``(scene, point, run_name)`` for seeded or unseeded run layouts."""
+    """Return ``(scene, episode, run_name)`` for benchmark run layouts."""
     parts = run_dir.parts
     for index in range(len(parts) - 1):
         scene = parts[index]
-        point = parts[index + 1]
+        episode = parts[index + 1]
         if (
             scene.startswith("scene")
             and scene.removeprefix("scene").isdigit()
-            and point.startswith("point")
-            and point.removeprefix("point").isdigit()
         ):
             run_name = parts[index + 2] if index + 2 < len(parts) else run_dir.name
-            return scene, point, run_name
-    raise ValueError(f"Cannot identify scene/point from run directory: {run_dir}")
+            return scene, episode, run_name
+    raise ValueError(f"Cannot identify scene/episode from run directory: {run_dir}")
+
+
+def episode_sort_index(episode: str) -> tuple[str, int, str]:
+    """Natural-sort both legacy ``pointN`` and resampled episode identifiers."""
+    match = re.match(r"^(.*?)(\d+)$", episode)
+    if match is None:
+        return episode, -1, episode
+    return match.group(1), int(match.group(2)), episode
 
 
 def discover_run_dirs(patterns: str | list[str]) -> list[Path]:
@@ -632,7 +770,7 @@ def discover_run_dirs(patterns: str | list[str]) -> list[Path]:
         return (
             run_name,
             int(scene.removeprefix("scene")),
-            int(point.removeprefix("point")),
+            episode_sort_index(point),
         )
 
     matched = {
@@ -644,14 +782,22 @@ def discover_run_dirs(patterns: str | list[str]) -> list[Path]:
     return sorted(matched, key=sort_key)
 
 
-def write_gallery_page(output_dir: Path, items: list[dict], gallery_title: str = "") -> Path:
+def write_gallery_page(
+    output_dir: Path,
+    items: list[dict],
+    gallery_title: str = "",
+    efficiency_step_margin: int = DEFAULT_EFFICIENCY_STEP_MARGIN,
+) -> Path:
     """Write the English UI while preserving the original result metadata."""
     models = sorted({item["model"] for item in items})
     title = gallery_title.strip()
     if not title:
         title = models[0] if len(models) == 1 else "Navigation Baseline Comparison"
     index_path = output_dir / "index.html"
-    index_path.write_text(gallery_html(items, title), encoding="utf-8")
+    index_path.write_text(
+        gallery_html(items, title, efficiency_step_margin),
+        encoding="utf-8",
+    )
     return index_path
 
 
@@ -682,6 +828,59 @@ def pending_gallery_runs(
     return pending, skipped
 
 
+def load_gallery_astar_references(
+    astar_root: Path,
+    results_dir_names: list[str] | None,
+) -> dict[TaskKey, AStarStepReference]:
+    """Load the canonical references, then apply newer per-pair overlays."""
+    names = results_dir_names or [DEFAULT_ASTAR_RESULTS_DIR]
+    references: dict[TaskKey, AStarStepReference] = {}
+    for name in names:
+        references.update(load_astar_step_references(astar_root, name))
+    return references
+
+
+def select_gallery_replacements(
+    run_dirs: list[Path],
+    existing_items: list[dict],
+) -> tuple[list[dict], dict[Path, str]]:
+    """Remove matching cards and map replacement runs to their GIF filenames."""
+    replacement_gifs: dict[Path, str] = {}
+    replacement_keys: set[tuple[str, str, str]] = set()
+    for run_dir in run_dirs:
+        result_rows = load_csv_rows(run_dir / "results.csv")
+        if not result_rows:
+            continue
+        scene, point, _ = run_identity(run_dir)
+        model = result_rows[-1].get("model", run_dir.name)
+        key = (str(model), scene, point)
+        matches = [
+            item
+            for item in existing_items
+            if (
+                str(item.get("model", "")),
+                str(item.get("scene", "")),
+                str(item.get("point", "")),
+            )
+            == key
+        ]
+        if matches:
+            replacement_gifs[run_dir.resolve()] = str(matches[0]["gif"])
+            replacement_keys.add(key)
+
+    retained = [
+        item
+        for item in existing_items
+        if (
+            str(item.get("model", "")),
+            str(item.get("scene", "")),
+            str(item.get("point", "")),
+        )
+        not in replacement_keys
+    ]
+    return retained, replacement_gifs
+
+
 def allocate_gallery_gif(run_dir: Path, gifs_dir: Path, reserved: set[str], *, qualified: bool, append: bool) -> Path:
     """Avoid collisions across models/seeds and never overwrite a GIF on append."""
     scene, point, run_name = run_identity(run_dir)
@@ -702,10 +901,24 @@ def allocate_gallery_gif(run_dir: Path, gifs_dir: Path, reserved: set[str], *, q
 def main() -> None:
     args = parse_args()
     output_dir = args.output_dir.resolve()
+    astar_references = load_gallery_astar_references(
+        args.astar_root.resolve(),
+        args.astar_results_dir,
+    )
     if args.html_only:
         manifest_path = output_dir / "manifest.json"
         items = json.loads(manifest_path.read_text(encoding="utf-8"))
-        index_path = write_gallery_page(output_dir, items, args.gallery_title)
+        items = attach_gallery_efficiency(
+            items,
+            astar_references,
+            args.efficiency_step_margin,
+        )
+        index_path = write_gallery_page(
+            output_dir,
+            items,
+            args.gallery_title,
+            args.efficiency_step_margin,
+        )
         print(f"Gallery refreshed: {index_path} ({len(items)} existing trajectories)")
         return
     input_globs = args.input_glob or ["outputs/scene*/point*/gpt-5.6-sol/seed0"]
@@ -714,9 +927,16 @@ def main() -> None:
         raise FileNotFoundError(f"No run directories matched {input_globs!r}")
 
     manifest_path = output_dir / "manifest.json"
-    items = json.loads(manifest_path.read_text(encoding="utf-8")) if args.append and manifest_path.exists() else []
+    items = (
+        json.loads(manifest_path.read_text(encoding="utf-8"))
+        if (args.append or args.replace) and manifest_path.exists()
+        else []
+    )
     run_dirs, skipped = pending_gallery_runs(
-        run_dirs, items, args.skip_incomplete, args.normal_only,
+        run_dirs,
+        [] if args.replace else items,
+        args.skip_incomplete,
+        args.normal_only,
     )
     for run_dir, reason in skipped:
         print(f"Skipping {run_dir}: {reason}", flush=True)
@@ -725,6 +945,10 @@ def main() -> None:
     if not run_dirs:
         print("No new eligible runs to export; the existing gallery is unchanged.")
         return
+
+    replacement_gifs: dict[Path, str] = {}
+    if args.replace:
+        items, replacement_gifs = select_gallery_replacements(run_dirs, items)
 
     gifs_dir = output_dir / "gifs"
     gifs_dir.mkdir(parents=True, exist_ok=True)
@@ -739,11 +963,21 @@ def main() -> None:
         futures = {}
         for run_dir in run_dirs:
             scene, point, _ = run_identity(run_dir)
-            output_path = allocate_gallery_gif(
-                run_dir, gifs_dir, reserved_gifs,
-                qualified=args.append or pair_counts[(scene, point)] > 1,
-                append=args.append,
-            )
+            replacement_gif = replacement_gifs.get(run_dir.resolve())
+            if replacement_gif is not None:
+                output_path = gifs_dir / replacement_gif
+            else:
+                output_path = allocate_gallery_gif(
+                    run_dir,
+                    gifs_dir,
+                    reserved_gifs,
+                    qualified=(
+                        args.append
+                        or args.replace
+                        or pair_counts[(scene, point)] > 1
+                    ),
+                    append=args.append or args.replace,
+                )
             future = executor.submit(
                 export_run,
                 run_dir,
@@ -766,14 +1000,22 @@ def main() -> None:
         key=lambda item: (
             item["model"],
             item["scene_number"],
-            int(item["point"][5:]),
+            episode_sort_index(item["point"]),
         )
+    )
+    items = attach_gallery_efficiency(
+        items,
+        astar_references,
+        args.efficiency_step_margin,
     )
     (output_dir / "manifest.json").write_text(
         json.dumps(items, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    print(f"Gallery: {write_gallery_page(output_dir, items, args.gallery_title)}")
+    print(
+        "Gallery: "
+        f"{write_gallery_page(output_dir, items, args.gallery_title, args.efficiency_step_margin)}"
+    )
 
 
 if __name__ == "__main__":

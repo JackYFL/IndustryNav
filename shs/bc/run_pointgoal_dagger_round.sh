@@ -13,6 +13,7 @@ BETA="${BETA:-0.5}"
 EPISODES_PER_SCENE="${EPISODES_PER_SCENE:-4}"
 COLLECT_WORKERS="${COLLECT_WORKERS:-4}"
 BASE_PORT="${BASE_PORT:-30700}"
+COLLECT_SPLIT="${COLLECT_SPLIT:-train}"
 
 INIT_CHECKPOINT="${INIT_CHECKPOINT:-ckpts/astar_pointgoal_pilot_tuned_v5_goalfix/best.pt}"
 BASE_DATA_ROOT="${BASE_DATA_ROOT:-datasets/astar_pointgoal_expanded_v3/bc}"
@@ -34,6 +35,7 @@ echo "[dagger] collect ${ROUND_ID} with beta=${BETA}"
   --unity "${UNITY_CLIENT}" \
   --python "${PYTHON_BIN}" \
   --round-id "${ROUND_ID}" \
+  --split "${COLLECT_SPLIT}" \
   --beta "${BETA}" \
   --episodes-per-scene "${EPISODES_PER_SCENE}" \
   --workers "${COLLECT_WORKERS}" \
@@ -46,6 +48,8 @@ echo "[dagger] export policy-visited observations with A* labels"
   --raw-root "${RAW_ROOT}" \
   --output-root "${DAGGER_DATA_ROOT}" \
   --round-id "${ROUND_ID}" \
+  --split "${COLLECT_SPLIT}" \
+  --output-split train \
   --overwrite
 
 echo "[dagger] aggregate expert and recovery datasets"

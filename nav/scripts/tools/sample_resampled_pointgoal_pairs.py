@@ -533,11 +533,11 @@ def main() -> None:
         for split in ("train", "val", "test")
     }
     spec = {
-        "name": "astar_pointgoal_resampled_v1",
+        "name": args.output.parent.name,
         "sampling": "interior states of successful A* trajectories",
         "benchmark_points_role": "exclusion-only; never used as sampled endpoints",
         "benchmark_points_sha256": hashlib.sha256(args.benchmark_points.read_bytes()).hexdigest(),
-        "source_trajectory_root": str(args.trajectory_root.resolve()),
+        "source_trajectory_root": str(args.trajectory_root),
         "source_successful_routes": sum(len(value) for value in routes.values()),
         "scenes": len(SCENE_CODES),
         "pairs_per_scene": args.pairs_per_scene,
@@ -546,9 +546,9 @@ def main() -> None:
         "split_policy": "scene1-16 train, scene17-20 val, scene21-24 test",
         "benchmark_clearance_m": args.benchmark_clearance_m,
         "benchmark_target_clearance_px": args.benchmark_target_clearance_px,
-        "excluded_manifests": [str(path.resolve()) for path in args.exclude_manifest],
+        "excluded_manifests": [str(path) for path in args.exclude_manifest],
         "excluded_manifest_sha256": {
-            str(path.resolve()): hashlib.sha256(path.read_bytes()).hexdigest()
+            str(path): hashlib.sha256(path.read_bytes()).hexdigest()
             for path in args.exclude_manifest
         },
         "excluded_world_clearance_m": args.excluded_world_clearance_m,

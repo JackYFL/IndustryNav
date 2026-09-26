@@ -12,8 +12,11 @@ the harness rather than in any one script.
 from __future__ import annotations
 
 import os
+import math
 import platform
+import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional, Tuple
 
 from mlagents_envs.environment import UnityEnvironment
@@ -39,6 +42,39 @@ from nav.harness.side_channels import BoundsSideChannel, TargetSideChannel
 
 class EnvSetupError(RuntimeError):
     """Env couldn't be launched, or spawn/target priming failed unrecoverably."""
+
+
+def unity_build_scene_count(file_name: str | os.PathLike[str]) -> int | None:
+    """Return the number of serialized scenes in a standalone Unity build."""
+    build_path = Path(file_name)
+    if build_path.suffix == ".app":
+        data_dir = build_path / "Contents" / "Resources" / "Data"
+    elif build_path.is_file():
+        data_dir = build_path.parent / f"{build_path.stem}_Data"
+    else:
+        return None
+    if not data_dir.is_dir():
+        return None
+    levels = [
+        path
+        for path in data_dir.iterdir()
+        if path.is_file() and re.fullmatch(r"level\d+", path.name)
+    ]
+    return len(levels) or None
+
+
+def validate_unity_scene_id(
+    file_name: str | os.PathLike[str], scene_id: int
+) -> int | None:
+    """Reject a scene index that Unity's SceneSwitcher would silently clamp."""
+    scene_count = unity_build_scene_count(file_name)
+    if scene_count is not None and not 0 <= int(scene_id) < scene_count:
+        raise EnvSetupError(
+            f"Unity build {file_name} contains {scene_count} scenes, but "
+            f"scene_id={scene_id} was requested. Refusing to let Unity clamp "
+            f"the request to scene_id={scene_count - 1}."
+        )
+    return scene_count
 
 
 @dataclass
@@ -82,7 +118,35 @@ def _resolve_dynamic_objects_mode(args) -> str:
     return mode
 
 
+def _unity_threading_args(environ=None) -> list[str]:
+    """Opt-in player threading diagnostics; defaults preserve existing runs.
+
+    These affect execution, not navigation inputs/reward/shield. Their presence
+    is recorded in the player launch log. They are not a known crash fix.
+    """
+    environ = os.environ if environ is None else environ
+    result = []
+    count = environ.get("INDUSTRYNAV_UNITY_JOB_WORKERS", "").strip()
+    if count:
+        try:
+            value = int(count)
+        except ValueError as exc:
+            raise EnvSetupError("INDUSTRYNAV_UNITY_JOB_WORKERS must be a positive integer") from exc
+        if value <= 0:
+            raise EnvSetupError("INDUSTRYNAV_UNITY_JOB_WORKERS must be a positive integer")
+        result.extend(["-job-worker-count", str(value)])
+    direct = environ.get("INDUSTRYNAV_UNITY_SINGLE_THREADED_RENDER", "0").strip()
+    if direct not in {"0", "1"}:
+        raise EnvSetupError("INDUSTRYNAV_UNITY_SINGLE_THREADED_RENDER must be 0 or 1")
+    if direct == "1":
+        result.append("-force-gfx-direct")
+    return result
+
+
 def _launch_env(args, logger):
+    scene_count = validate_unity_scene_id(args.file_name, args.scene_id)
+    if scene_count is not None:
+        logger.info("Validated Unity build scene count: %d", scene_count)
     engine = EngineConfigurationChannel()
     bounds_sc = BoundsSideChannel()
     target_sc = TargetSideChannel()
@@ -127,6 +191,7 @@ def _launch_env(args, logger):
                 "INDUSTRYNAV_UNITY_DEVICE_INDEX must be a non-negative integer"
             )
         unity_args.extend(["-force-device-index", str(parsed_device_index)])
+    unity_args.extend(_unity_threading_args())
     if use_batchmode:
         unity_args.insert(0, "-batchmode")
 
@@ -289,12 +354,25 @@ def _prime_target(
     args,
     logger,
 ) -> Optional[Tuple[float, float]]:
-    tgt_upx, tgt_upy = visual_to_unity_coords(
-        margin,
-        target_xy[0],
-        target_xy[1],
-        map_size=(args.minimap_width, args.minimap_height),
-    )
+    checkpoint_pixel = getattr(args, "_resume_target_unity_pixel", None)
+    if checkpoint_pixel is not None:
+        # A fresh margin detection can move with the restored agent marker.
+        # Reuse Unity's original acknowledged pixel, then validate the world
+        # target normally. Never remap an existing checkpoint's goal.
+        try:
+            tgt_upx, tgt_upy = map(float, checkpoint_pixel)
+        except (TypeError, ValueError) as exc:
+            raise EnvSetupError("Invalid checkpoint target pixel.") from exc
+        if not all(math.isfinite(v) for v in (tgt_upx, tgt_upy)):
+            raise EnvSetupError("Invalid checkpoint target pixel.")
+        logger.info("Restoring checkpoint target Unity pixel (%s, %s).", tgt_upx, tgt_upy)
+    else:
+        tgt_upx, tgt_upy = visual_to_unity_coords(
+            margin,
+            target_xy[0],
+            target_xy[1],
+            map_size=(args.minimap_width, args.minimap_height),
+        )
     env_params.set_float_parameter("target_px", float(tgt_upx))
     env_params.set_float_parameter("target_py", float(tgt_upy))
     env.reset()

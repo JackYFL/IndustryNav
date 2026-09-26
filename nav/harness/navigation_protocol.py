@@ -61,14 +61,23 @@ def navigation_run_config(args, prompt_template: str) -> dict:
         for suffix in ("mps", "min_mps", "max_mps"):
             defaults[f"{category}_speed_{suffix}"] = None
     values = {name: getattr(args, name, default) for name, default in defaults.items()}
+    topdown_input = bool(getattr(args, "topdown_input", False))
+    # Omit the default false value to keep existing ego-only run manifests
+    # byte-for-byte compatible. A map-enabled run records the new setting and
+    # therefore cannot accidentally resume into an ego-only output directory.
+    if topdown_input:
+        values["topdown_input"] = True
     if values["dynamic_step_budget"] is None:
         values["dynamic_step_budget"] = True
+    input_modalities = ["ego"] if values["vision_input"] else []
+    if topdown_input:
+        input_modalities.append("topdown")
     config = {
         "protocol": NAVIGATION_PROTOCOL_VERSION,
         "prompt_sha256": hashlib.sha256(prompt_template.encode("utf-8")).hexdigest(),
         "action_space": ACTION_SPACE_AGENTS,
         "request_timeout_sec": LLM_REQUEST_TIMEOUT_SEC,
-        "input_modalities": ["ego"] if values["vision_input"] else [],
+        "input_modalities": input_modalities,
         "settings": values,
     }
     if values["llm_provider"] == "openrouter":

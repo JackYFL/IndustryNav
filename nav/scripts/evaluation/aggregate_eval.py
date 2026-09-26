@@ -27,6 +27,11 @@ from nav.eval.aggregate import (
     write_aggregate_csv,
     write_aggregate_xlsx,
 )
+from nav.eval.efficiency import (
+    DEFAULT_ASTAR_RESULTS_DIR,
+    DEFAULT_EFFICIENCY_STEP_MARGIN,
+    load_astar_step_references,
+)
 from nav.eval.metrics import EvaluateOptions
 from nav.utils import logger_config
 
@@ -55,6 +60,26 @@ def _parse_args() -> argparse.Namespace:
         type=str,
         default="scene_name",
         help="Column to group the summary sheet by (default: scene_name).",
+    )
+    p.add_argument(
+        "--astar-root", default="outputs",
+        help="Output tree containing per-task A* results (default: outputs).",
+    )
+    p.add_argument(
+        "--astar-results-dir", default=DEFAULT_ASTAR_RESULTS_DIR,
+        help=(
+            "A* result directory name below each scene/point "
+            f"(default: {DEFAULT_ASTAR_RESULTS_DIR})."
+        ),
+    )
+    p.add_argument(
+        "--efficiency-step-margin", "--efficiency-k",
+        dest="efficiency_step_margin", type=int,
+        default=DEFAULT_EFFICIENCY_STEP_MARGIN,
+        help=(
+            "K in per-task max_steps = optimal_steps + K "
+            f"(default: {DEFAULT_EFFICIENCY_STEP_MARGIN})."
+        ),
     )
     p.add_argument(
         "--log-dir",
@@ -139,10 +164,18 @@ def main() -> None:
         opts.success_dist_m = args.success_dist_m
     if args.no_use_actions:
         opts.use_actions = False
+    opts.efficiency_step_margin = args.efficiency_step_margin
 
     input_dirs = sorted(Path(".").glob(args.input_glob))
     logger.info(f"Aggregating {len(input_dirs)} run dirs (glob: {args.input_glob!r})")
-    rows = aggregate_runs(input_dirs, opts=opts)
+    astar_references = load_astar_step_references(
+        Path(args.astar_root), args.astar_results_dir
+    )
+    rows = aggregate_runs(
+        input_dirs,
+        opts=opts,
+        astar_references=astar_references,
+    )
 
     if write_aggregate_xlsx(out_path, rows, summary_axis=args.summary_axis):
         logger.info(f"Wrote xlsx with {len(rows)} rows -> {out_path.resolve()}")

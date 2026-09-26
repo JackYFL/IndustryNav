@@ -16,6 +16,12 @@ import numpy as np
 
 from nav.config import EVAL_DEFAULT_LOG_DIR
 from nav.eval.aggregate import aggregate_runs, write_aggregate_csv
+from nav.eval.efficiency import (
+    DEFAULT_ASTAR_RESULTS_DIR,
+    DEFAULT_EFFICIENCY_STEP_MARGIN,
+    attach_step_efficiency,
+    load_astar_step_references,
+)
 from nav.eval.metrics import SUCCESS_THRESHOLD_FIELDS, EvaluateOptions, evaluate_run
 from nav.utils import logger_config
 
@@ -31,6 +37,17 @@ def _parse_args() -> argparse.Namespace:
                    help="Single run output dir to evaluate.")
     p.add_argument("--input-glob", type=str, default="",
                    help="Glob of run dirs (e.g. \"outputs/*/point*/Astar\").")
+    p.add_argument("--astar-root", default="outputs")
+    p.add_argument("--astar-results-dir", default=DEFAULT_ASTAR_RESULTS_DIR)
+    p.add_argument(
+        "--efficiency-step-margin", "--efficiency-k",
+        dest="efficiency_step_margin", type=int,
+        default=DEFAULT_EFFICIENCY_STEP_MARGIN,
+        help=(
+            "K in per-task max_steps = optimal_steps + K "
+            f"(default: {DEFAULT_EFFICIENCY_STEP_MARGIN})."
+        ),
+    )
     p.add_argument("--summary-csv", type=str, default="",
                    help="Glob mode: where to write the per-run summary CSV.")
     p.add_argument(
@@ -123,6 +140,7 @@ def _opts_from_args(args: argparse.Namespace) -> EvaluateOptions:
             setattr(opts, attr_name, val)
     if args.no_use_actions:
         opts.use_actions = False
+    opts.efficiency_step_margin = args.efficiency_step_margin
     return opts
 
 
@@ -132,6 +150,13 @@ def _log_metrics(metrics: dict) -> None:
     for threshold_m, field in SUCCESS_THRESHOLD_FIELDS:
         logger.info(f"Success@{threshold_m:g}m: {metrics[field]}")
     logger.info(f"Efficiency (total steps): {metrics['efficiency_steps']}")
+    if np.isfinite(metrics.get("efficiency", float("nan"))):
+        logger.info(
+            "Efficiency (A*-normalized): %.4f (optimal=%s, max=%s)",
+            metrics["efficiency"],
+            metrics["optimal_steps"],
+            metrics["efficiency_max_steps"],
+        )
     logger.info(f"Distance ratio: {metrics['distance_ratio']:.4f}")
     if metrics["final_distance_world"] is not None:
         logger.info(f"Final distance world: {metrics['final_distance_world']:.2f} m")
@@ -150,10 +175,17 @@ def main() -> None:
 
     log_dir = args.log_dir or (args.input_dir if args.input_dir else EVAL_DEFAULT_LOG_DIR)
     logger_config(log_dir)
+    astar_references = load_astar_step_references(
+        Path(args.astar_root), args.astar_results_dir
+    )
 
     if args.input_glob:
         input_dirs = sorted(Path(".").glob(args.input_glob))
-        rows = aggregate_runs(input_dirs, opts=opts)
+        rows = aggregate_runs(
+            input_dirs,
+            opts=opts,
+            astar_references=astar_references,
+        )
         if args.summary_csv:
             write_aggregate_csv(Path(args.summary_csv), rows)
 
@@ -178,6 +210,16 @@ def main() -> None:
                 f"Average steps: "
                 f"{np.mean([float(r['efficiency_steps']) for r in ok_rows]):.2f}"
             )
+            normalized_efficiency = [
+                float(r["efficiency"])
+                for r in ok_rows
+                if np.isfinite(r.get("efficiency", float("nan")))
+            ]
+            if normalized_efficiency:
+                logger.info(
+                    "Average A*-normalized efficiency: %.4f",
+                    np.mean(normalized_efficiency),
+                )
             world_dists = [
                 float(r['final_distance_world'])
                 for r in ok_rows if r['final_distance_world'] is not None
@@ -195,6 +237,11 @@ def main() -> None:
         return
 
     metrics = evaluate_run(Path(args.input_dir), opts=opts)
+    metrics = attach_step_efficiency(
+        [metrics],
+        astar_references,
+        step_margin=args.efficiency_step_margin,
+    )[0]
     _log_metrics(metrics)
 
 

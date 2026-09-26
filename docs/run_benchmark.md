@@ -77,11 +77,28 @@ The full list of valid `<scene_code>` values (and their `scene_id` mapping) is d
   baseline token instead of a model name. `llm` (default) is the only one that calls OpenRouter.
   The same routing interface can be extended for additional baselines. For A* commands, tuning, debug visualizations, and extension notes, see [`astar_workflow.md`](astar_workflow.md).
   For BC data collection, training, and checkpoint inference, see [`bc_workflow.md`](bc_workflow.md).
-- **Grid sweeps** across `model × scene × point × seed × vision × history_size` go through the
+- **Grid sweeps** across `model × scene × point × seed × vision × history_size × topdown_input` go through the
   orchestrator: `python -m nav.scripts.agent.run_benchmark_grid --models … --scenes … [--history_sizes 0 5 10]`.
   Aggregates land under `analysis/grid_runs/<timestamp>/`; non-default history sizes are routed under
   `outputs/_history_size/hs<k>/` so the stats loader isn't polluted. Omit `--history_sizes` for a normal
-  single-history sweep.
+  single-history sweep. Use `--topdown_input both` for paired map-off/map-on cells;
+  map-on model directories receive the `_topdown` suffix. `--tasks_file` accepts
+  a frozen JSON list of `{scene_name, point_id}` pairs for sampled evaluations.
+
+For a **minimap-only** evaluation, combine `--vision_input off`,
+`--topdown_input on`, and `--history_sizes 0`. The default prompt for this
+combination is `nav/prompts/nav_minimap_only.txt`; it has no history block.
+The API receives only the annotated minimap, not egocentric RGB or depth.
+Pose/goal state, the action contract, and safety evaluation remain enabled.
+Directories use the `_novision_topdown` suffix, isolated from RGB + map results.
+The fixed Gemini/GLM 32-task extension is prepared by
+`shs/agent/run_llm_topdown_only_ablation.sh` (`DRY_RUN=1` makes no API calls).
+Paid launch requires separate authorization, `CONFIRM_TOPDOWN_ONLY_API=1`, and
+a dedicated persistent request counter; retries count against its allowance.
+Add `--include-topdown-only` to `nav.scripts.evaluation.summarize_llm_ablation`
+to include this extra condition. Since its prompt differs from the RGB + map
+prompt, report it as a prompt-and-input variant, not a prompt-controlled
+image-only causal ablation.
 
 ### API navigation protocol
 
@@ -90,10 +107,12 @@ API runs share the following navigation protocol:
 - The vision navigation prompt specifies world-axis directions
   (`+X = North`, `+Z = West`), obstacle recovery rules,
   and the action descriptions (approximately 45° per turn and 1.50 m forward).
-- Each request includes only the latest egocentric RGB image, pose/target state,
+- By default, each request includes only the latest egocentric RGB image, pose/target state,
   and the last five actions with the model's `observation` descriptions. The
   API attaches the image bytes directly.
-  Depth and minimap are not sent to the model. No-vision runs store no visual memory.
+  Depth is never sent to the model. With `--topdown_input on`, the annotated
+  minimap is attached as a second image (agent/heading in red, target in green)
+  and recorded in `run_config.json`; no-vision runs store no visual memory.
 - Default LLM sensors are RGB/depth **320×240** and minimap **431×256**. A*/BC/random
   retain their previous defaults. Explicit resolution overrides remain supported.
 - Defaults include two simulation steps per decision, a dynamic initial budget
@@ -315,7 +334,8 @@ and provider-default reasoning. Effective transport settings are included in
 ### English GIF gallery
 
 `python -m nav.scripts.gallery.export_llm_gallery` generates English page labels and
-GIF annotations, including success thresholds and warning/collision overlays.
+GIF annotations, including success thresholds, per-run distance ratio, the filtered
+mean distance ratio, and warning/collision overlays.
 To refresh only an existing page while preserving its manifest and GIFs:
 
 ```bash
@@ -326,6 +346,27 @@ python -m nav.scripts.gallery.export_llm_gallery \
 
 Generated galleries remain local under the gitignored `analysis/` directory;
 the generator and its regression tests are version-controlled.
+
+For a complete 96-point PPO evaluation without recorded images, archive its
+audited `summary.json` alongside the gallery. This does not add a summary table
+or GIF cards, or mix the original score with a later visual replay:
+
+```bash
+python -m nav.scripts.gallery.register_pointgoal_evaluation \
+  --summary outputs/original_ppo_evaluation/summary.json \
+  --gallery-dir analysis/cli_agent_gif_gallery \
+  --id ppo-original --name "PPO original evaluation" \
+  --recording-note "Not recorded; original metrics only"
+```
+
+To record a new run, use the persistent point-goal evaluator with `--save-visuals`;
+it saves RGB, depth PNG and float32 depth NPY (meters), minimaps, actions/poses,
+and final results. Use a new output directory and model ID, append its GIFs,
+then register its own summary under a different `--id` with `--model` matching
+the replay cards. Original reports are copied byte-for-byte into `reports/`,
+and `evaluation_runs.json` survives HTML-only refreshes without appearing on
+the page. A model-specific page
+can be opened with `index.html?model=<model-id>`.
 
 To add another model without regenerating or replacing existing entries:
 
@@ -340,6 +381,20 @@ python -m nav.scripts.gallery.export_llm_gallery \
 final distances or success outcomes. It does not rerun any navigation tasks.
 Add `--normal-only` to exclude provider/JSON/Unity errors and retain only runs
 whose latest `stop_reason` is `max_steps` or `reached_vicinity`.
+
+To replace corrected runs in place and layer their static A* results over the
+canonical efficiency references:
+
+```bash
+python -m nav.scripts.gallery.export_llm_gallery \
+  --input-glob 'outputs/scene21/point2/astar_corrected_dynamic' \
+  --output-dir analysis/cli_agent_gif_gallery --replace --normal-only \
+  --astar-results-dir astar_static_all_points \
+  --astar-results-dir astar_corrected_static
+```
+
+Replacement matching uses model, scene, and point, so the existing GIF name is
+reused and the gallery keeps exactly one card for that tuple.
 
 ### Top-down trajectory comparison gallery
 
@@ -706,6 +761,32 @@ reports `success_at_2m`, `success_at_5m`, and `success_at_10m` together with
 the backward-compatible `success_ratio` column. These variants are derived
 from the saved final world distance and therefore do not require rerunning the
 agent.
+
+Step efficiency is reported on `[0, 1]` (higher is better):
+
+```text
+success * clip((max_steps - actual_steps) /
+               (max_steps - optimal_steps), 0, 1)
+
+max_steps = optimal_steps + K
+```
+
+`optimal_steps` is derived from the successful **static-scene** A* trajectory
+for the same `scene/point` (`dynamic_objects=static`). It is action-space aware:
+A* forward and turn control effort is converted to equivalent atomic agent
+steps, so A*'s smaller smooth steering increments are not counted as if they
+were the agent's larger turns. Evaluated A* runs use their native step count,
+but are still compared against the static A* reference. The normalization ceiling is task-specific:
+`max_steps = optimal_steps + K`, so the equivalent simplified score is
+`success * clip((optimal_steps + K - actual_steps) / K, 0, 1)`. `K` defaults
+to 100 steps and can be changed with `--efficiency-step-margin K` (or the short
+alias `--efficiency-k K`) on the evaluation/statistics CLIs. This metric-only
+ceiling does not change the benchmark's runtime termination budget. Failed
+episodes receive zero efficiency. If the matching A* trajectory is unavailable,
+efficiency is left undefined rather than silently substituting another task.
+
+The evaluation CLIs use `outputs/scene*/point*/astar_static_all_points` by
+default. Override the source with `--astar-root` or `--astar-results-dir`.
 
 Each saved depth step contains two files. `<step>.png` is a fixed-scale
 grayscale view of the Unity sensor output; `<step>.npy` is a float32 depth map

@@ -194,6 +194,13 @@ class CheckpointLoopTest(unittest.TestCase):
                 target = (0., -3.1) if mode == "dynamic" else (10., -10.)
 
                 def setup(args, logger):
+                    if hasattr(args, "_resume_world_y"):
+                        if mode == "legacy":
+                            self.assertFalse(hasattr(args, "_resume_target_unity_pixel"))
+                        else:
+                            self.assertEqual(args._resume_target_unity_pixel, [200.0, 200.0])
+                    else:
+                        self.assertFalse(hasattr(args, "_resume_target_unity_pixel"))
                     env = FakeEnv(args, fail[0], calls)
                     environments.append(env)
                     return argparse.Namespace(env=env, init_world=(args.init_world_x, args.init_world_z),
@@ -211,6 +218,10 @@ class CheckpointLoopTest(unittest.TestCase):
                         "--frame_save_dir", str(folder), "--model_id", "test-model", "--vision_input", "true",
                         "--init_world_x", "0", "--init_world_z", "0", "--init_curr_direction", "180",
                         "--target_x", "200", "--target_y", "200", "--max_steps", "3", "--no-dynamic_step_budget"]
+                # Legacy recovery requires the historical request-state labels,
+                # not whichever prompt is the current production default.
+                argv += ["--prompt_file", str(Path(__file__).resolve().parents[1]
+                    / "prompts" / "nav_ego_state_history_kiro_v1.txt")]
                 if mode == "dynamic":
                     argv += ["--dynamic_step_budget", "--step_budget_min", "1", "--step_budget_max", "10",
                              "--steps_per_path_meter", ".8", "--step_budget_overhead", "1", "--reach_m", ".1"]

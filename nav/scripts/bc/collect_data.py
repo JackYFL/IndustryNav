@@ -4,7 +4,7 @@ Drives the unified client with keyboard control (WASD/arrows via an OpenCV
 window), letting a human assign spawn/target points and walk a trajectory while
 per-frame RGB/depth/minimap + a ``keyboard_actions.csv`` are recorded. The saved
 layout (``keyboard_fp/`` / ``keyboard_depth/`` / ``keyboard_actions.csv``) is
-what the BC datasets in :mod:`nav.train.dataset` consume.
+what the BC datasets in :mod:`nav.data.pointgoal` consume.
 
 Shares the side-channel + minimap-margin + obs-decode plumbing with the
 benchmark entry via :mod:`nav.harness`. The spawn/target priming here is

@@ -425,17 +425,48 @@ def render_nav_prompt(
     )
 
 
-def add_api_observation_contract(prompt: str, has_image: bool) -> str:
+def add_api_observation_contract(prompt: str, image_modalities) -> str:
     """Adapt Kiro's file-read/output wrapper to an inline-image API request.
 
     The navigation task itself is identical. API models receive image bytes,
     not a local filename or a file-reading tool.
     """
-    observations = (
-        "Inspect the attached image before deciding. It is this timestep's sensor reading.\n"
-        "- Egocentric RGB camera (what the agent sees ahead): attached image\n"
-        if has_image else "No camera or map images are attached.\n"
-    )
+    # Keep accepting the historical bool argument so downstream callers do not
+    # break. New callers pass the ordered modality labels that are attached to
+    # the provider request; this makes a two-image map ablation unambiguous.
+    if isinstance(image_modalities, bool):
+        modalities = ["ego"] if image_modalities else []
+    else:
+        modalities = list(image_modalities or [])
+    if not modalities:
+        observations = "No camera or map images are attached.\n"
+    elif modalities == ["ego"]:
+        observations = (
+            "Inspect the attached image before deciding. It is this timestep's sensor reading.\n"
+            "- Egocentric RGB camera (what the agent sees ahead): attached image\n"
+        )
+    elif modalities == ["topdown"]:
+        observations = (
+            "Inspect the attached image before deciding. It is this timestep's sensor reading.\n"
+            "- Top-down minimap with the agent shown in red (arrow indicates heading) "
+            "and the target shown in green: attached image\n"
+        )
+    else:
+        descriptions = {
+            "ego": "Egocentric RGB camera showing what the agent sees ahead",
+            "topdown": (
+                "Top-down minimap with the agent shown in red (arrow indicates heading) "
+                "and the target shown in green"
+            ),
+        }
+        observations = (
+            "Inspect the attached images before deciding. They are this timestep's "
+            "sensor readings and appear in this order:\n"
+            + "".join(
+                f"{index}. {descriptions.get(name, name)}\n"
+                for index, name in enumerate(modalities, start=1)
+            )
+        )
     return (
         "## Observations\n" + observations + "\n" + prompt.rstrip()
         + "\n\n\n## Output contract\n"

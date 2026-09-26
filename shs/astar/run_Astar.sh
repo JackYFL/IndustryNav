@@ -75,6 +75,12 @@
 #       Output root. Default: <repo>/outputs.
 #   ASTAR_OBSTACLE_CLEARANCE_M
 #       Physical obstacle clearance in Unity world meters. Default: 0.6.
+#   ASTAR_MINIMUM_OBSTACLE_CLEARANCE_M
+#       Fallback clearance used only when the nominal mask disconnects the
+#       target. Default: 0.3.
+#   ASTAR_DECORATIVE_EDGE_MAX_WIDTH_M / ASTAR_DECORATIVE_EDGE_MIN_LENGTH_M
+#       Ignore long dark minimap seams up to 0.65 m wide and at least 3.0 m
+#       long. Set the maximum width to 0 to disable this suppression.
 #   ASTAR_PROXY_STOP_DISTANCE_M
 #       Meter threshold for switching from a reached proxy to direct terminal
 #       approach. Default: 4.9.
@@ -273,6 +279,9 @@ RUN_NAME="${RUN_NAME:-astar}"
 ASTAR_DEBUG_VIZ="${ASTAR_DEBUG_VIZ:-0}"
 ASTAR_POLICY_ACTIONS="${ASTAR_POLICY_ACTIONS:-0}"
 ASTAR_OBSTACLE_CLEARANCE_M="${ASTAR_OBSTACLE_CLEARANCE_M:-0.6}"
+ASTAR_MINIMUM_OBSTACLE_CLEARANCE_M="${ASTAR_MINIMUM_OBSTACLE_CLEARANCE_M:-0.3}"
+ASTAR_DECORATIVE_EDGE_MAX_WIDTH_M="${ASTAR_DECORATIVE_EDGE_MAX_WIDTH_M:-0.65}"
+ASTAR_DECORATIVE_EDGE_MIN_LENGTH_M="${ASTAR_DECORATIVE_EDGE_MIN_LENGTH_M:-3.0}"
 ASTAR_PROXY_STOP_DISTANCE_M="${ASTAR_PROXY_STOP_DISTANCE_M:-${ASTAR_PROXY_STOP_REAL_DIST_M:-4.9}}"
 DRY_RUN="${DRY_RUN:-0}"
 BASE_PORT_START="${BASE_PORT_START:-5507}"
@@ -301,6 +310,7 @@ echo "[astar] absolute_speed_mps=human:${HUMAN_SPEED_MPS:-default}[${HUMAN_SPEED
 echo "[astar] lighting=fixed:${LIGHT_INTENSITY_MULTIPLIER:-none} range:${LIGHT_INTENSITY_MIN:-none}-${LIGHT_INTENSITY_MAX:-none} seed=${LIGHT_RANDOM_SEED:-default} exposure=${LIGHT_FIXED_EXPOSURE:-default}"
 echo "[astar] marker_source=${MARKER_SOURCE}"
 echo "[astar] hide_unity_red_marker=${HIDE_UNITY_RED_MARKER}"
+echo "[astar] decorative_edges=max_width:${ASTAR_DECORATIVE_EDGE_MAX_WIDTH_M}m min_length:${ASTAR_DECORATIVE_EDGE_MIN_LENGTH_M}m"
 
 idx=0
 for scene_name in "${SCENES[@]}"; do
@@ -364,6 +374,9 @@ PY
          --frame_save_dir "$frame_save_dir"
          --model_id astar
          --astar_obstacle_clearance_m "$ASTAR_OBSTACLE_CLEARANCE_M"
+         --astar_minimum_obstacle_clearance_m "$ASTAR_MINIMUM_OBSTACLE_CLEARANCE_M"
+         --astar_decorative_edge_max_width_m "$ASTAR_DECORATIVE_EDGE_MAX_WIDTH_M"
+         --astar_decorative_edge_min_length_m "$ASTAR_DECORATIVE_EDGE_MIN_LENGTH_M"
          --astar_proxy_stop_distance_m "$ASTAR_PROXY_STOP_DISTANCE_M"
          --astar_dynamic_replan_lookahead_m "$ASTAR_DYNAMIC_REPLAN_LOOKAHEAD_M"
          --astar_dynamic_replan_confirm_steps "$ASTAR_DYNAMIC_REPLAN_CONFIRM_STEPS"
@@ -443,7 +456,7 @@ PY
 
     echo "[astar] output=${frame_save_dir}"
     echo "[astar] max_steps_for_point=${max_steps_for_point} dynamic_step_budget=${ASTAR_DYNAMIC_STEP_BUDGET}"
-    echo "[astar] obstacle_clearance_m=${ASTAR_OBSTACLE_CLEARANCE_M} proxy_terminal_dist_m=${ASTAR_PROXY_STOP_DISTANCE_M}"
+    echo "[astar] obstacle_clearance_m=${ASTAR_OBSTACLE_CLEARANCE_M} minimum_obstacle_clearance_m=${ASTAR_MINIMUM_OBSTACLE_CLEARANCE_M} proxy_terminal_dist_m=${ASTAR_PROXY_STOP_DISTANCE_M}"
     if [[ "$DRY_RUN" == "1" || "$DRY_RUN" == "true" || "$DRY_RUN" == "on" ]]; then
       printf '[astar] dry-run command:'
       printf ' %q' "${cmd[@]}"

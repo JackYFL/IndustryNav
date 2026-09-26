@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
+from nav.eval.efficiency import AStarStepReference
 from nav.scripts.gallery.export_llm_gallery import (
     COLLISION_COLOR,
     CURRENT_POSITION_RADIUS_CANONICAL,
@@ -19,18 +20,38 @@ from nav.scripts.gallery.export_llm_gallery import (
     WARNING_COLOR,
     add_trajectory,
     allocate_gallery_gif,
+    available_frame_steps,
+    attach_gallery_efficiency,
+    capture_panel,
     event_points,
     gallery_html,
+    load_gallery_astar_references,
     main,
     pending_gallery_runs,
     rotation_step_count,
     run_identity,
     scale_trajectory_points,
+    select_gallery_replacements,
     target_point,
 )
 
 
 class TrajectoryScalingTest(unittest.TestCase):
+    def test_available_frame_steps_supports_minimap_only_runs(self) -> None:
+        minimaps = {0: Path("0.png"), 2: Path("2.png")}
+        self.assertEqual(available_frame_steps({}, {}, minimaps), [0, 2])
+
+    def test_available_frame_steps_aligns_available_streams(self) -> None:
+        rgb = {0: Path("rgb0.png"), 1: Path("rgb1.png")}
+        depth = {1: Path("depth1.png"), 2: Path("depth2.png")}
+        minimaps = {1: Path("map1.png"), 2: Path("map2.png")}
+        self.assertEqual(available_frame_steps(rgb, depth, minimaps), [1])
+
+    def test_capture_panel_marks_missing_views(self) -> None:
+        placeholder = capture_panel(None, (120, 80))
+        self.assertEqual(placeholder.size, (120, 80))
+        self.assertNotEqual(placeholder.getbbox(), None)
+
     def test_half_resolution_cli_agent_minimap(self) -> None:
         self.assertEqual(
             scale_trajectory_points([(168, 184), (670, 390)], (431, 256)),
@@ -117,6 +138,14 @@ class TrajectoryScalingTest(unittest.TestCase):
             ("scene23", "point4", "astar_fix_all_points"),
         )
 
+    def test_run_identity_supports_resampled_episode_layout(self) -> None:
+        self.assertEqual(
+            run_identity(
+                Path("outputs/local_eval/scene21/resampled01")
+            ),
+            ("scene21", "resampled01", "resampled01"),
+        )
+
     def test_gallery_ui_is_english(self) -> None:
         html = gallery_html([], "Test Gallery")
         self.assertIn('<html lang="en">', html)
@@ -124,8 +153,44 @@ class TrajectoryScalingTest(unittest.TestCase):
         self.assertIn("All Scenes", html)
         self.assertIn("All Results", html)
         self.assertIn("Rotation Ratio", html)
+        self.assertIn("Mean Efficiency", html)
+        self.assertIn("Mean Distance Ratio", html)
+        self.assertIn("Highest Distance Ratio", html)
+        self.assertIn("DISTANCE RATIO", html)
+        self.assertIn("Highest Efficiency", html)
+        self.assertIn("grid-template-columns:repeat(4,minmax(0,1fr))", html)
+        self.assertIn("K=100", html)
         self.assertIn("Showing ", html)
         self.assertNotRegex(html, r"[\u4e00-\u9fff]")
+
+    def test_gallery_efficiency_uses_pair_optimum_plus_configurable_k(self) -> None:
+        items = [{
+            "scene": "scene1",
+            "point": "point1",
+            "model": "test-model",
+            "run_name": "test-model",
+            "steps": 14,
+            "success": 1,
+        }]
+        reference = AStarStepReference(7, 30.0, 90.0, 1)
+        enriched = attach_gallery_efficiency(
+            items,
+            {("scene1", "point1"): reference},
+            step_margin=20,
+        )[0]
+        self.assertEqual(enriched["optimal_steps"], 4)
+        self.assertEqual(enriched["efficiency_max_steps"], 24)
+        self.assertEqual(enriched["efficiency"], 0.5)
+
+    def test_gallery_efficiency_is_unknown_without_astar_reference(self) -> None:
+        item = {
+            "scene": "scene1", "point": "point1", "model": "model",
+            "steps": 10, "success": 1,
+        }
+        enriched = attach_gallery_efficiency([item], {})[0]
+        self.assertIsNone(enriched["optimal_steps"])
+        self.assertIsNone(enriched["efficiency_max_steps"])
+        self.assertIsNone(enriched["efficiency"])
 
     def test_gallery_title_is_escaped(self) -> None:
         html = gallery_html([], 'Models <A & B>')
@@ -156,7 +221,9 @@ class TrajectoryScalingTest(unittest.TestCase):
             html = (root / "index.html").read_text(encoding="utf-8")
             self.assertIn('<html lang="en">', html)
             for label in ("All Models", "All Scenes", "Success@2m", "Success@5m",
-                          "Success@10m", "Warning Rate", "Highest Collision Rate",
+                          "Success@10m", "Mean Efficiency", "Mean Distance Ratio",
+                          "Warning Rate", "Highest Efficiency", "Highest Distance Ratio",
+                          "Highest Collision Rate", "DISTANCE RATIO",
                           "No trajectories match the current filters."):
                 self.assertIn(label, html)
             self.assertNotRegex(html, r"[\u4e00-\u9fff]")
@@ -223,6 +290,56 @@ class TrajectoryScalingTest(unittest.TestCase):
             self.assertNotEqual(existing, new)
             self.assertEqual(existing.read_bytes(), original)
             self.assertIn("gemini-3.8-flash", new.name)
+
+    def test_replace_reuses_matching_model_scene_point_gif(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run = Path(tmpdir) / "outputs" / "scene3" / "point2" / "astar_new"
+            run.mkdir(parents=True)
+            (run / "results.csv").write_text(
+                "model,stop_reason\nastar,reached_vicinity\n",
+                encoding="utf-8",
+            )
+            existing = [
+                {
+                    "model": "astar",
+                    "scene": "scene3",
+                    "point": "point2",
+                    "gif": "astar_old__scene3_point2.gif",
+                },
+                {
+                    "model": "other",
+                    "scene": "scene3",
+                    "point": "point2",
+                    "gif": "other__scene3_point2.gif",
+                },
+            ]
+            retained, replacements = select_gallery_replacements([run], existing)
+            self.assertEqual(retained, [existing[1]])
+            self.assertEqual(
+                replacements,
+                {run.resolve(): "astar_old__scene3_point2.gif"},
+            )
+
+    def test_gallery_astar_references_apply_later_pair_overlay(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            for name, steps in (("base", 20), ("latest", 12)):
+                run = root / "scene1" / "point1" / name
+                run.mkdir(parents=True)
+                (run / "results.csv").write_text(
+                    "scene_name,point_id,distance_world,reach_m,steps_taken,sim_steps_per_decision\n"
+                    f"scene1,point1,1,2,{steps},2\n",
+                    encoding="utf-8",
+                )
+                (run / "astar_actions.csv").write_text(
+                    "step,move,look,action\n1,15,0,forward\n",
+                    encoding="utf-8",
+                )
+            references = load_gallery_astar_references(
+                root,
+                ["base", "latest"],
+            )
+            self.assertEqual(references[("scene1", "point1")].astar_steps, 12)
 
     def test_gif_filenames_distinguish_seeds(self) -> None:
         reserved = set()

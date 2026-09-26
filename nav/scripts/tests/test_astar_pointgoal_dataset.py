@@ -22,6 +22,8 @@ from nav.baselines.astar import AStarBaseline
 from nav.scripts.evaluation.evaluate_pointgoal_policy import (
     command_for as pointgoal_eval_command,
     select_held_out_tasks,
+    shard_tasks_by_scene,
+    tasks_from_input_points,
 )
 from nav.scripts.astar.export_astar_pointgoal_dataset import export_episode
 from nav.scripts.bc.export_dagger_pointgoal_dataset import (
@@ -283,6 +285,67 @@ class PointGoalCollectionTest(unittest.TestCase):
             [("scene21", "passed"), ("scene22", "passed")],
         )
 
+    def test_held_out_selection_supports_multiple_episodes_per_scene(self):
+        records = [
+            {"split": "train", "scene_name": "scene20", "episode_id": "point1"},
+            {"split": "test", "scene_name": "scene21", "episode_id": "point1"},
+            {"split": "test", "scene_name": "scene21", "episode_id": "point2"},
+            {"split": "test", "scene_name": "scene21", "episode_id": "point3"},
+            {"split": "test", "scene_name": "scene22", "episode_id": "point1"},
+            {"split": "test", "scene_name": "scene22", "episode_id": "point2"},
+            {"split": "test", "scene_name": "scene23", "episode_id": "point1"},
+        ]
+        selected = select_held_out_tasks(
+            records,
+            scene_count=2,
+            episodes_per_scene=2,
+        )
+        self.assertEqual(
+            [(item["scene_name"], item["episode_id"]) for item in selected],
+            [
+                ("scene21", "point1"),
+                ("scene21", "point2"),
+                ("scene22", "point1"),
+                ("scene22", "point2"),
+            ],
+        )
+
+    def test_input_points_are_translated_to_canonical_eval_tasks(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "input_points.json"
+            path.write_text(
+                json.dumps({
+                    "scene1": [{
+                        "point_id": "point1",
+                        "start": {"x": 3.5, "z": 7.0, "direction": 90.0},
+                        "target": {"x": 123.4, "y": 456.7},
+                    }],
+                }),
+                encoding="utf-8",
+            )
+            tasks = tasks_from_input_points(path, eval_seed=11)
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0]["scene_id"], 0)
+        self.assertEqual(tasks[0]["episode_id"], "point1")
+        self.assertEqual(tasks[0]["motion_random_seed"], 11)
+        self.assertEqual(tasks[0]["target_x"], 123)
+        self.assertEqual(tasks[0]["target_y"], 457)
+
+    def test_persistent_eval_shards_keep_scenes_together(self):
+        tasks = [
+            {"scene_name": f"scene{scene}", "episode_id": f"point{point}"}
+            for scene in range(1, 7)
+            for point in range(1, 5)
+        ]
+        shards = shard_tasks_by_scene(tasks, 4)
+        self.assertEqual(sum(map(len, shards)), 24)
+        owners = {}
+        for shard_index, shard in enumerate(shards):
+            for task in shard:
+                scene = task["scene_name"]
+                owners.setdefault(scene, shard_index)
+                self.assertEqual(owners[scene], shard_index)
+
     def test_pointgoal_evaluation_uses_scene_authored_lighting(self):
         args = SimpleNamespace(
             python="python",
@@ -314,6 +377,62 @@ class PointGoalCollectionTest(unittest.TestCase):
             "--light_fixed_exposure",
         ):
             self.assertNotIn(option, command)
+
+    def test_pointgoal_evaluation_forwards_inference_device(self):
+        args = SimpleNamespace(
+            python="python",
+            unity=Path("scene_all.app"),
+            checkpoint=Path("latest.pt"),
+            base_port=19507,
+            baseline="ppo",
+            device="cpu",
+        )
+        task = {
+            "scene_id": 20,
+            "scene_name": "scene21",
+            "episode_id": "resampled01",
+            "seed": 52001,
+            "dynamic_objects": "moving",
+            "init_world_x": 29.03,
+            "init_world_z": 39.78,
+            "init_direction": 180.0,
+            "target_x": 622.0,
+            "target_y": 239.0,
+            "motion_random_seed": 52001,
+        }
+        command = pointgoal_eval_command(args, task, 0, Path("eval/scene21"))
+        self.assertEqual(command[command.index("--ppo_device") + 1], "cpu")
+        self.assertEqual(command[command.index("--target_x") + 1], "622")
+        self.assertEqual(command[command.index("--target_y") + 1], "239")
+
+    def test_pointgoal_evaluation_accepts_gallery_model_label(self):
+        args = SimpleNamespace(
+            python="python",
+            unity=Path("scene_all.app"),
+            checkpoint=Path("latest.pt"),
+            base_port=19507,
+            baseline="ppo",
+            device="cpu",
+            model_id="pointgoal-dagger-ppoarch",
+        )
+        task = {
+            "scene_id": 0,
+            "scene_name": "scene1",
+            "episode_id": "point1",
+            "seed": 0,
+            "dynamic_objects": "moving",
+            "init_world_x": 1.0,
+            "init_world_z": 2.0,
+            "init_direction": 90.0,
+            "target_x": 100,
+            "target_y": 200,
+            "motion_random_seed": 0,
+        }
+        command = pointgoal_eval_command(args, task, 0, Path("eval/scene1"))
+        self.assertEqual(
+            command[command.index("--model_id") + 1],
+            "pointgoal-dagger-ppoarch",
+        )
 
     def test_transformer_goal_action_residual_is_optional(self):
         model = NavPolicyTransformer(
@@ -545,6 +664,18 @@ class PointGoalCollectionTest(unittest.TestCase):
         self.assertEqual(benchmark_planner.recovery_turn_steps, 3)
         self.assertEqual(benchmark_planner.recovery_forward_steps, 0)
 
+    def test_astar_treats_collision_creep_as_stuck(self):
+        planner = AStarBaseline()
+        planner.last_action_was_move = True
+        for z in (0.0, 0.1, 0.2, 0.3, 0.4):
+            reason = planner._update_stuck_state(
+                (10, 10),
+                (0.0, z),
+                0.0,
+            )
+        self.assertIn("start_recovery", reason)
+        self.assertEqual(planner.recovery_count, planner.recovery_turn_steps)
+
     def test_policy_astar_does_not_greedy_forward_through_temporary_block(self):
         planner = AStarBaseline(policy_actions=True, contrast_threshold=0)
         planner.virtual_obstacles = [(20, 20, 1, 1, 5)]
@@ -586,6 +717,143 @@ class PointGoalCollectionTest(unittest.TestCase):
         self.assertTrue(planner.last_debug["lighting_adapted"])
         self.assertTrue(adapted_free[20, 20])
         self.assertFalse(np.any(adapted_free[40:48, 40:48]))
+
+    def test_astar_ignores_long_thin_dark_seams_but_keeps_real_obstacles(self):
+        minimap = np.full((100, 120, 3), 127, dtype=np.uint8)
+        minimap[10:80, 25:30] = 0       # Decorative vertical floor seam.
+        minimap[10:80, 65:77] = 0       # Solid rack/wall.
+        minimap[10:25, 45:50] = 0       # Narrow but too short to ignore.
+        minimap[85:90, 10:100] = 255    # Bright partition edge.
+
+        planner = AStarBaseline(
+            contrast_threshold=0,
+            obstacle_clearance_m=0.0,
+            grid_cell_m=0.1,
+            decorative_edge_max_width_m=0.6,
+            decorative_edge_min_length_m=3.0,
+        )
+        point_to_world = lambda point: (point[0] * 0.1, point[1] * 0.1)
+        planner._update_pixel_geometry((5, 5), point_to_world)
+        planner._build_walkable_grid(minimap, (5, 50), (110, 50))
+
+        free = planner.last_debug["threshold_free"]
+        ignored = planner.last_debug["ignored_decorative_edges"]
+        self.assertTrue(np.all(free[10:80, 25:30]))
+        self.assertTrue(np.all(ignored[10:80, 25:30]))
+        self.assertFalse(np.any(free[10:80, 65:77]))
+        self.assertFalse(np.any(free[10:25, 45:50]))
+        self.assertFalse(np.any(free[85:90, 10:100]))
+
+    def test_astar_ignores_diagonal_dashes_but_protects_colored_rail(self):
+        minimap = np.full((120, 120, 3), 127, dtype=np.uint8)
+        for offset in range(10, 101, 7):
+            minimap[offset:offset + 2, offset:offset + 2] = 0
+
+        # A floor-colored rail top bounded by dark edges. Intermittent orange
+        # posts distinguish it from a purely visual dark floor seam.
+        minimap[10:105, 80:87] = 100
+        minimap[10:105, 80] = 30
+        minimap[10:105, 86] = 30
+        for y0 in range(15, 96, 20):
+            minimap[y0:y0 + 6, 81:86] = (137, 110, 71)
+
+        planner = AStarBaseline(
+            contrast_threshold=0,
+            obstacle_clearance_m=0.0,
+            grid_cell_m=0.1,
+            decorative_edge_max_width_m=0.6,
+            decorative_edge_min_length_m=3.0,
+        )
+        point_to_world = lambda point: (point[0] * 0.1, point[1] * 0.1)
+        planner._update_pixel_geometry((5, 5), point_to_world)
+        planner._build_walkable_grid(minimap, (5, 60), (110, 60))
+
+        free = planner.last_debug["threshold_free"]
+        ignored_dashes = planner.last_debug["ignored_dashed_edges"]
+        self.assertGreater(int(ignored_dashes.sum()), 20)
+        for offset in range(10, 75, 7):
+            self.assertTrue(np.all(free[offset:offset + 2, offset:offset + 2]))
+        self.assertFalse(np.any(free[10:105, 80]))
+        self.assertFalse(np.any(free[10:105, 86]))
+
+    def test_astar_static_scene_stabilizes_decorative_masks(self):
+        planner = AStarBaseline(static_scene=True)
+        empty = np.zeros((5, 5), dtype=bool)
+        first_dashes = empty.copy()
+        first_dashes[1, 1] = True
+        protected, continuous, dashes = planner._stabilize_static_decorative_masks(
+            empty.copy(),
+            empty.copy(),
+            first_dashes,
+        )
+        self.assertTrue(dashes[1, 1])
+
+        second_protected = empty.copy()
+        second_protected[1, 1] = True
+        second_continuous = empty.copy()
+        second_continuous[2, 2] = True
+        protected, continuous, dashes = planner._stabilize_static_decorative_masks(
+            second_protected,
+            second_continuous,
+            empty.copy(),
+        )
+        self.assertTrue(protected[1, 1])
+        self.assertFalse(dashes[1, 1])
+        self.assertTrue(continuous[2, 2])
+
+    def test_astar_static_scene_skips_dynamic_path_blockage(self):
+        planner = AStarBaseline(static_scene=True)
+        planner.last_path = [(0, 0), (5, 0)]
+        planner.last_action_was_move = True
+        should_replan, reason = planner._should_replan(
+            (0, 0),
+            walkable=np.zeros((10, 10), dtype=bool),
+            curr_world_xz=(0.0, 0.0),
+            point_to_world=lambda point: (float(point[0]), float(point[1])),
+        )
+        self.assertFalse(should_replan)
+        self.assertIn("static_map", reason)
+
+    def test_astar_reduces_clearance_only_after_disconnected_plan(self):
+        planner = AStarBaseline(
+            obstacle_clearance_m=0.6,
+            minimum_obstacle_clearance_m=0.3,
+        )
+        nominal_walkable = np.zeros((2, 2), dtype=bool)
+        reduced_walkable = np.ones((2, 2), dtype=bool)
+        nominal_path = [(0, 0), (1, 0)]
+        reduced_path = [(0, 0), (1, 1)]
+        geometry_updates = []
+
+        def fake_plan(walkable, _curr_xy, _target_xy):
+            if walkable is nominal_walkable:
+                planner.last_plan_status = "target_unreachable_proxy=(1, 0)"
+                return nominal_path
+            planner.last_plan_status = "target_reachable"
+            return reduced_path
+
+        planner._plan_path = fake_plan
+        planner._build_walkable_grid = (
+            lambda _rgb, _curr_xy, _target_xy: reduced_walkable
+        )
+        planner._update_pixel_geometry = (
+            lambda _curr_xy, _projection: geometry_updates.append(
+                planner.using_minimum_obstacle_clearance
+            )
+        )
+        path, walkable, reduced = planner._plan_path_with_adaptive_clearance(
+            np.zeros((2, 2, 3), dtype=np.uint8),
+            nominal_walkable,
+            (0, 0),
+            (1, 1),
+            lambda point: (float(point[0]), float(point[1])),
+        )
+        self.assertTrue(reduced)
+        self.assertTrue(planner.using_minimum_obstacle_clearance)
+        self.assertEqual(geometry_updates, [True])
+        self.assertIs(walkable, reduced_walkable)
+        self.assertEqual(path, reduced_path)
+        self.assertEqual(planner.last_plan_status, "target_reachable")
 
     def test_export_aligns_source_action_s_with_frame_s_minus_one(self):
         with tempfile.TemporaryDirectory() as temporary:

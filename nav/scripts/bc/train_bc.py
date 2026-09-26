@@ -12,9 +12,9 @@ from __future__ import annotations
 import argparse
 from dataclasses import fields, replace
 
+from nav.baselines.bc.trainer import BCTrainer
 from nav.config import BC_BASE_PRESETS, BCTrainConfig
-from nav.train.loop import train
-from nav.train.pointgoal import POINTGOAL_ENCODINGS
+from nav.core.pointgoal import POINTGOAL_ENCODINGS
 from nav.utils import logger_config
 
 
@@ -95,7 +95,7 @@ def main() -> None:
     logger = logger_config(cfg.output_dir)
     logger.info(f"BC training | policy={cfg.policy_type} | backbone={cfg.rgb_backbone} | "
                 f"output_dir={cfg.output_dir}")
-    train(cfg)
+    BCTrainer(cfg).run()
 
 
 if __name__ == "__main__":

@@ -35,9 +35,11 @@
 <a id="news"></a>
 ## 📰 News
 
+- **2026-09-10**
+  - Added gated PPO/DAgger recovery, reaching 61/96 (63.5%) Success@2m on the fixed-seed PointGoal benchmark while reducing collision and warning rates.
 - **2026-09-08**
   - Added resampled PointGoal/DAgger training and safety-aware PPO/DDP-PPO baselines.
-  - Reorganized Python and shell entry points by workflow, with dedicated RL documentation.
+  - Reorganized the Python architecture into reusable core, model, baseline, environment, safety, train, and evaluation layers.
 - **2026-09-06**
   - Added an A*-supervised PointGoal training pipeline and a 96-task top-down trajectory gallery with distinct safety markers.
   - Improved A* robustness under varied lighting and atomic-action recovery.
@@ -172,13 +174,16 @@ IndustryNav/
     │   ├── gallery/           # GIFs, trajectory galleries, and overviews
     │   ├── tools/             # Point sampling and task editing
     │   └── tests/             # Script/workflow regression tests
-    ├── harness/               # Unity/env setup, routing, prompts, side channels
-    ├── baselines/             # A* and reinforcement-learning baselines
-    │   └── rl/                # Recurrent PointGoal PPO model and Unity environment
-    ├── eval/                  # Post-hoc run evaluation
+    ├── core/                  # Stable agent contracts, types, and PointGoal geometry
+    ├── data/                  # Shared datasets and transforms
+    ├── harness/               # Benchmark orchestration, prompts, and side channels
+    ├── baselines/             # A*, BC, and RL method logic
+    ├── envs/                  # Unity and future environment adapters
+    ├── safety/                # Shared online collision and warning detectors
+    ├── eval/                  # Metric lifecycle and post-hoc aggregation
     ├── stats/                 # Aggregate statistical analysis
-    ├── models/                # BC model definitions
-    └── train/                 # BC training/inference utilities
+    ├── models/                # Reusable encoders and policy architectures
+    └── train/                 # Algorithm-neutral training infrastructure
 ```
 
 Main entry points:
@@ -192,6 +197,7 @@ Main entry points:
 Workflow and scene/client docs:
 
 - [`docs/run_benchmark.md`](docs/run_benchmark.md): benchmark commands, API protocol, checkpoint/resume, and GIF gallery workflows.
+- [`docs/architecture.md`](docs/architecture.md): package responsibilities, dependency direction, and extension contracts.
 - [`docs/scene_list.md`](docs/scene_list.md): all 24 scene codes, benchmark task definitions, cached point editing, and overview rendering.
 - [`docs/scene_files_and_interfaces.md`](docs/scene_files_and_interfaces.md): runtime scene codes, environment parameters, side channels, and spawn/target mapping.
 - [`docs/astar_workflow.md`](docs/astar_workflow.md): A* commands plus the shared baseline extension interface.

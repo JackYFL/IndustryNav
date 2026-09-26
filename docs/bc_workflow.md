@@ -18,10 +18,11 @@ human teleop episodes
 Relevant code:
 
 - `nav/scripts/bc/collect_data.py`: interactive keyboard data collection.
-- `nav/train/dataset.py`: parses collected episodes into BC samples.
+- `nav/data/pointgoal.py`: parses collected episodes into BC samples.
 - `nav/scripts/bc/train_bc.py`: CLI training entry.
 - `shs/bc/train_bc.sh`: thin shell wrapper around `nav.scripts.bc.train_bc`.
-- `nav/train/controller.py`: inference-time controller used by `BASELINE=bc`.
+- `nav/baselines/bc/trainer.py`: BC optimization and checkpoint logic.
+- `nav/baselines/bc/agent.py`: inference-time agent used by `BASELINE=bc`.
 - `nav/scripts/agent/run_benchmark_cell.py`: unified benchmark entry for LLM, A*, BC, and random baselines.
 
 ## 1. Data Collection
@@ -244,6 +245,7 @@ histories are updated with the action actually executed in Unity.
 Only `split=train` is collected. Scene17-20 validation and scene21-24 testing
 remain untouched, so DAgger cannot leak held-out layouts. Failed behavior
 rollouts are useful and are exported as long as they contain valid A* labels.
+This is the cross-scene generalization protocol.
 
 Run one balanced round after the corrected v5 checkpoint is available:
 
@@ -259,9 +261,27 @@ such as `0.5 -> 0.25 -> 0.1` and point `INIT_CHECKPOINT` and `BASE_DATA_ROOT` to
 the previous round. The A* minimap remains privileged supervision and is not a
 policy input.
 
+For the separate known-scene/unseen-point protocol, train on independently
+sampled endpoints from all 24 scenes while keeping `input_points.json`
+evaluation-only:
+
+```bash
+bash shs/bc/run_pointgoal_dagger_all_scenes.sh
+```
+
+The default base split holds out one validation and one test pair in every
+scene and uses all remaining resampled pairs for training. DAgger then collects
+four additional long-distance recovery
+rollouts per scene and assigns only those new rollouts to training. Thus every
+scene contributes gradients, validation still uses disjoint endpoints, and the
+canonical 96 benchmark pairs remain unseen. Report this result as in-domain
+scene generalization rather than cross-scene generalization.
+
 PPO and distributed PPO now have a dedicated guide. See
 [`docs/rl_workflow.md`](rl_workflow.md) for architecture, safety rewards,
-training, resume, evaluation, and troubleshooting.
+training, resume, evaluation, and troubleshooting. The complete
+provenance-checked 52.08% DAgger to Mixed400 PPO chain is documented in
+[`best_pointgoal_training_pipeline.md`](best_pointgoal_training_pipeline.md).
 
 ## 3. Inference
 

@@ -106,7 +106,11 @@ def main() -> None:
     if not args.unity.is_file():
         raise SystemExit(f"Unity executable not found: {args.unity}")
 
-    tasks = [task for task in read_jsonl(args.manifest) if task["split"] == args.split]
+    tasks = [
+        task
+        for task in read_jsonl(args.manifest)
+        if args.split == "all" or task["split"] == args.split
+    ]
     if args.episodes_per_scene > 0:
         scene_counts: dict[str, int] = {}
         balanced = []

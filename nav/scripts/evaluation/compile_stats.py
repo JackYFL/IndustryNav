@@ -29,6 +29,12 @@ from nav.config import (
     ANALYSIS_ROOT,
     DEFAULT_ANALYSIS_SUBDIR,
 )
+from nav.eval.efficiency import (
+    DEFAULT_ASTAR_RESULTS_DIR,
+    DEFAULT_EFFICIENCY_STEP_MARGIN,
+    attach_step_efficiency,
+    load_astar_step_references,
+)
 from nav.stats import (
     full as stats_full,
     load as stats_load,
@@ -60,6 +66,28 @@ def _build_parser() -> argparse.ArgumentParser:
         n_perm=10_000, n_boot=10_000, seed=0, spearman_split="halves",
     )
 
+    def _add_efficiency(sp: argparse.ArgumentParser) -> None:
+        sp.add_argument(
+            "--astar-root", default="outputs",
+            help="Output tree containing per-task A* results (default: outputs).",
+        )
+        sp.add_argument(
+            "--astar-results-dir", default=DEFAULT_ASTAR_RESULTS_DIR,
+            help=(
+                "A* result directory name below each scene/point "
+                f"(default: {DEFAULT_ASTAR_RESULTS_DIR})."
+            ),
+        )
+        sp.add_argument(
+            "--efficiency-step-margin", "--efficiency-k",
+            dest="efficiency_step_margin", type=int,
+            default=DEFAULT_EFFICIENCY_STEP_MARGIN,
+            help=(
+                "K in per-task max_steps = optimal_steps + K "
+                f"(default: {DEFAULT_EFFICIENCY_STEP_MARGIN})."
+            ),
+        )
+
     def _add_common_full(sp: argparse.ArgumentParser) -> None:
         sp.add_argument("--analysis-subdir", default=DEFAULT_ANALYSIS_SUBDIR)
         sp.add_argument("--n-perm", type=int, default=common_full["n_perm"])
@@ -72,6 +100,7 @@ def _build_parser() -> argparse.ArgumentParser:
         )
         sp.add_argument("--models", nargs="+", default=None,
                         help="Restrict to these model ids (default: all).")
+        _add_efficiency(sp)
 
     # grid: walk outputs/ tree → full report
     sp = subs.add_parser("grid", help="Run full analysis on the grid output tree.")
@@ -83,6 +112,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sp = subs.add_parser("xlsx", help="Convert the xlsx sweep to per_run.csv.")
     sp.add_argument("--xlsx", required=True, help="Path to the xlsx sweep.")
     sp.add_argument("--out", required=True, help="Output per_run.csv path.")
+    _add_efficiency(sp)
 
     # per-run: full analysis from a pre-built per_run.csv
     sp = subs.add_parser("per-run", help="Run full analysis on a per_run.csv.")
@@ -146,6 +176,9 @@ def _cmd_grid(args: argparse.Namespace) -> None:
         Path(args.outputs_root),
         models_filter=models_filter,
         vision_filter=_vision_set(args.vision_input),
+        astar_root=Path(args.astar_root),
+        astar_results_dir=args.astar_results_dir,
+        efficiency_step_margin=args.efficiency_step_margin,
     )
     if not rows:
         raise SystemExit(
@@ -162,6 +195,11 @@ def _cmd_grid(args: argparse.Namespace) -> None:
 
 def _cmd_xlsx(args: argparse.Namespace) -> None:
     rows = stats_load.xlsx_to_per_run_rows(Path(args.xlsx))
+    rows = attach_step_efficiency(
+        rows,
+        load_astar_step_references(Path(args.astar_root), args.astar_results_dir),
+        step_margin=args.efficiency_step_margin,
+    )
     if not rows:
         raise SystemExit(f"No usable rows parsed from {args.xlsx}")
     stats_load.write_per_run_csv(rows, Path(args.out))
@@ -172,6 +210,11 @@ def _cmd_xlsx(args: argparse.Namespace) -> None:
 def _cmd_per_run(args: argparse.Namespace) -> None:
     out_dir = ANALYSIS_ROOT / args.analysis_subdir
     rows = stats_load.load_per_run_csv(Path(args.per_run_csv))
+    rows = attach_step_efficiency(
+        rows,
+        load_astar_step_references(Path(args.astar_root), args.astar_results_dir),
+        step_margin=args.efficiency_step_margin,
+    )
     models_filter = set(args.models) if args.models else None
     rows = _filter_rows(rows, models_filter, args.vision_input)
     if not rows:
@@ -225,6 +268,11 @@ def _cmd_all(args: argparse.Namespace) -> None:
     logger.info("[all] stage 2/5: xlsx → per_run.csv")
     xlsx_per_run = out_xlsx / "per_run.csv"
     xlsx_rows = stats_load.xlsx_to_per_run_rows(Path(args.xlsx))
+    xlsx_rows = attach_step_efficiency(
+        xlsx_rows,
+        load_astar_step_references(Path(args.astar_root), args.astar_results_dir),
+        step_margin=args.efficiency_step_margin,
+    )
     stats_load.write_per_run_csv(xlsx_rows, xlsx_per_run)
     logger.info(f"[all] wrote {len(xlsx_rows)} rows to {xlsx_per_run}")
 
