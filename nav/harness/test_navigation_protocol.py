@@ -52,12 +52,11 @@ class NavigationPromptTest(unittest.TestCase):
         # run_config.json records prompt_sha256 and runs made with different
         # bodies cannot be mixed under one output root.
         #
-        # Pinned bodies so far:
-        #   f742a414... archived Kiro run (scene1/point1/cli_agent_gpt-5.6-luna, Step 1).
-        #   6d5489e9... current world-coordinate templates in nav/prompts/.
+        # This branch's Kiro-v1 template retains the archived Kiro body.
+        # World-coordinate variants are separate templates with distinct hashes.
         self.assertEqual(
             hashlib.sha256(render_sample().strip().encode()).hexdigest(),
-            "6d5489e9f4e6c337fa36c8ec8899d77fd60353a335daddbe8458ae8cb7c93fa3",
+            "f742a414829805f13619bd14e12e6b546e2ef692034e846cf54bdb43cfdab208",
         )
 
     def test_action_description_tracks_simulation_step_override(self):
