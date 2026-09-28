@@ -146,3 +146,164 @@ def visual_to_unity_coords(
     u = (px - min_x) / (max_x - min_x)
     v = (py - min_y) / (max_y - min_y)
     return u * map_w, v * map_h
+
+
+def world_to_unity_coords(
+    projector: Optional[dict],
+    world_x: float,
+    world_z: float,
+    map_size: Tuple[float, float] = UNITY_MAP_SIZE,
+) -> Tuple[float, float]:
+    """Project Unity world X/Z to minimap pixels using run calibration.
+
+    The fallback affine is the fixed minimap camera transform used by the
+    standalone client.  A two-point side-channel calibration is preferred so
+    training-time planners remain correct if that camera transform changes.
+    """
+    scale_x = float(map_size[0]) / float(UNITY_MAP_SIZE[0])
+    scale_y = float(map_size[1]) / float(UNITY_MAP_SIZE[1])
+    ax, bx, cx = 9.842864e-10, -0.0754061, 43.76626
+    az, bz, cz = -0.06702765, 1.205371e-08, 68.32464
+    determinant = ax * bz - bx * az
+    if determinant == 0.0:
+        fallback = (0.0, 0.0)
+    else:
+        fallback = (
+            (bz * (float(world_x) - cx) - bx * (float(world_z) - cz))
+            / determinant
+            * scale_x,
+            (ax * (float(world_z) - cz) - az * (float(world_x) - cx))
+            / determinant
+            * scale_y,
+        )
+    if projector is None:
+        return fallback
+
+    spawn_px, spawn_py = projector["spawn_pixel"]
+    spawn_x, spawn_z = projector["spawn_world"]
+    target_px, target_py = projector["target_pixel"]
+    target_x, target_z = projector["target_world"]
+    pixel_x = (
+        spawn_px
+        + (float(world_z) - spawn_z) * (target_px - spawn_px)
+        / (target_z - spawn_z)
+        if abs(target_z - spawn_z) > 1e-6
+        else fallback[0]
+    )
+    pixel_y = (
+        spawn_py
+        + (float(world_x) - spawn_x) * (target_py - spawn_py)
+        / (target_x - spawn_x)
+        if abs(target_x - spawn_x) > 1e-6
+        else fallback[1]
+    )
+    return float(pixel_x), float(pixel_y)
+
+
+def unity_to_visual_coords(
+    margin: Optional[Tuple[float, float, float, float]],
+    unity_px: float,
+    unity_py: float,
+    *,
+    img_shape: Optional[Tuple[int, ...]] = None,
+    map_size: Tuple[float, float] = UNITY_MAP_SIZE,
+) -> Tuple[int, int]:
+    """Invert :func:`visual_to_unity_coords` for a rendered minimap."""
+    if margin is None:
+        px, py = float(unity_px), float(unity_py)
+    else:
+        min_x, max_x, min_y, max_y = margin
+        px = min_x + float(unity_px) / float(map_size[0]) * (max_x - min_x)
+        py = min_y + float(unity_py) / float(map_size[1]) * (max_y - min_y)
+    if img_shape is not None:
+        height, width = int(img_shape[0]), int(img_shape[1])
+        px = np.clip(round(px), 0, width - 1)
+        py = np.clip(round(py), 0, height - 1)
+    return int(px), int(py)
+
+
+def build_axis_aligned_projector(
+    spawn_pixel,
+    spawn_world,
+    target_pixel,
+    target_world,
+) -> Optional[dict]:
+    """Build the per-run world/minimap calibration reported by Unity."""
+    if any(
+        value is None
+        for value in (spawn_pixel, spawn_world, target_pixel, target_world)
+    ):
+        return None
+    return {
+        "spawn_pixel": tuple(map(float, spawn_pixel)),
+        "spawn_world": tuple(map(float, spawn_world)),
+        "target_pixel": tuple(map(float, target_pixel)),
+        "target_world": tuple(map(float, target_world)),
+    }
+
+
+def unity_to_world_coords(
+    projector: Optional[dict], unity_px: float, unity_py: float
+) -> Optional[Tuple[float, float]]:
+    """Invert a calibrated axis-aligned world/minimap projection."""
+    if projector is None:
+        return None
+    spawn_px, spawn_py = projector["spawn_pixel"]
+    spawn_x, spawn_z = projector["spawn_world"]
+    target_px, target_py = projector["target_pixel"]
+    target_x, target_z = projector["target_world"]
+    world_x = (
+        spawn_x
+        + (float(unity_py) - spawn_py) * (target_x - spawn_x)
+        / (target_py - spawn_py)
+        if abs(target_py - spawn_py) > 1e-6
+        else spawn_x - 0.0754061 * (float(unity_py) - spawn_py)
+    )
+    world_z = (
+        spawn_z
+        + (float(unity_px) - spawn_px) * (target_z - spawn_z)
+        / (target_px - spawn_px)
+        if abs(target_px - spawn_px) > 1e-6
+        else spawn_z - 0.06702765 * (float(unity_px) - spawn_px)
+    )
+    return float(world_x), float(world_z)
+
+
+def visual_to_world_coords(
+    margin: Tuple[float, float, float, float],
+    visual_xy: Tuple[float, float],
+    projector: Optional[dict],
+    *,
+    map_size: Tuple[float, float] = UNITY_MAP_SIZE,
+) -> Optional[Tuple[float, float]]:
+    """Convert a rendered minimap point into Unity world X/Z."""
+    if projector is None:
+        return None
+    unity_xy = visual_to_unity_coords(
+        margin,
+        float(visual_xy[0]),
+        float(visual_xy[1]),
+        map_size=map_size,
+    )
+    return unity_to_world_coords(projector, *unity_xy)
+
+
+def world_to_visual_coords(
+    margin: Optional[Tuple[float, float, float, float]],
+    world_x: float,
+    world_z: float,
+    *,
+    img_shape: Optional[Tuple[int, ...]] = None,
+    projector: Optional[dict] = None,
+    map_size: Tuple[float, float] = UNITY_MAP_SIZE,
+) -> Tuple[int, int]:
+    """Project Unity world X/Z into rendered minimap coordinates."""
+    unity_xy = world_to_unity_coords(
+        projector, world_x, world_z, map_size=map_size
+    )
+    return unity_to_visual_coords(
+        margin,
+        *unity_xy,
+        img_shape=img_shape,
+        map_size=map_size,
+    )

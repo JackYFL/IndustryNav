@@ -33,6 +33,8 @@ from nav.config import (
     EVAL_FORWARD_DISTANCE_PER_MOVE_UNIT_M,
     EVAL_LEGACY_COLLISION_PX_THRESH,
 )
+from nav.eval.base import BinaryRateMetric
+from nav.safety.collision import CollisionDetector
 
 
 # ---------------------------------------------------------------------------
@@ -64,10 +66,10 @@ def compute_collision_rate(
     divide-by-zero; the caller can decide whether NaN would be more
     appropriate for downstream aggregation).
     """
-    if not 0.0 < min_forward_ratio <= 1.0:
-        raise ValueError("min_forward_ratio must be in (0, 1]")
-    if forward_distance_per_move_unit_m <= 0.0:
-        raise ValueError("forward_distance_per_move_unit_m must be positive")
+    detector = CollisionDetector(
+        min_forward_ratio=min_forward_ratio,
+        forward_distance_per_move_unit_m=forward_distance_per_move_unit_m,
+    )
 
     rows: List[dict] = []
     with open(actions_csv, newline="") as f:
@@ -92,35 +94,19 @@ def compute_collision_rate(
             rows.append({"step": step_num, "move": move, "pos": pos})
 
     rows.sort(key=lambda r: r["step"])
-    total_forward_steps = 0
-    total_collision_steps = 0
+    metric = BinaryRateMetric()
     for i in range(len(rows) - 1):
         cur, nxt = rows[i], rows[i + 1]
         move = cur["move"]
-        if (
-            math.isfinite(move)
-            and move > 0.0
-            and cur["pos"] is not None
-            and nxt["pos"] is not None
-            and nxt["step"] == cur["step"] + 1
-        ):
-            total_forward_steps += 1
-            actual_distance = math.hypot(
-                nxt["pos"][0] - cur["pos"][0],
-                nxt["pos"][1] - cur["pos"][1],
-            )
-            theoretical_distance = (
-                move * forward_distance_per_move_unit_m
-            )
-            if actual_distance < theoretical_distance * min_forward_ratio:
-                total_collision_steps += 1
+        if nxt["step"] == cur["step"] + 1:
+            assessment = detector.detect(move, cur["pos"], nxt["pos"])
+        else:
+            assessment = detector.detect(0.0, None, None)
+        if assessment.eligible:
+            metric.update(assessment.triggered)
 
-    rate = (
-        total_collision_steps / total_forward_steps
-        if total_forward_steps > 0
-        else 0.0
-    )
-    return total_forward_steps, total_collision_steps, rate
+    result = metric.compute()
+    return result.total, result.triggered, result.rate
 
 
 # ---------------------------------------------------------------------------

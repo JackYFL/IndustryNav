@@ -31,12 +31,19 @@ from nav.config import (
     EVAL_WARNING_THRESHOLD_M,
 )
 from nav.eval.collision import compute_collision_rate
+from nav.eval.base import BaseEvaluator
+from nav.eval.efficiency import (
+    DEFAULT_EFFICIENCY_STEP_MARGIN,
+    compute_efficiency_step_budget_max,
+    compute_step_efficiency,
+)
 from nav.eval.io import (
     find_actions_csv,
     find_depth_dir,
     read_latest_results_row,
 )
-from nav.eval.warning import WarningDetector, compute_warning_rate
+from nav.eval.warning import compute_warning_rate
+from nav.safety import WarningDetector
 
 
 def success_threshold_field(threshold_m: float) -> str:
@@ -76,6 +83,8 @@ class EvaluateOptions:
     warning_image_width: Optional[int] = None
     collision_min_forward_ratio: float = EVAL_COLLISION_MIN_FORWARD_RATIO
     success_dist_m: float = EVAL_SUCCESS_DIST_M
+    efficiency_optimal_steps: Optional[float] = None
+    efficiency_step_margin: int = DEFAULT_EFFICIENCY_STEP_MARGIN
     bottom_margin: float = EVAL_ROI_PARAMS["bottom_margin"]
     top_margin: float = EVAL_ROI_PARAMS["top_margin"]
     bottom_pad: float = EVAL_ROI_PARAMS["bottom_pad"]
@@ -217,10 +226,31 @@ def evaluate_run(
         success = 0
     if steps_taken is not None:
         efficiency_steps = steps_taken
+    try:
+        sim_steps_per_decision = int(
+            float(results_row.get("sim_steps_per_decision", 2))
+        )
+    except (TypeError, ValueError):
+        sim_steps_per_decision = 2
 
     threshold_success = compute_success_at_thresholds(final_distance_world)
+    efficiency_max_steps = compute_efficiency_step_budget_max(
+        opts.efficiency_optimal_steps,
+        opts.efficiency_step_margin,
+    )
+    efficiency = compute_step_efficiency(
+        efficiency_steps,
+        opts.efficiency_optimal_steps,
+        efficiency_max_steps,
+        success,
+    )
 
     return {
+        "scene_name": results_row.get("scene_name", ""),
+        "point_id": results_row.get("point_id", ""),
+        "model": results_row.get("model", ""),
+        "exec_mode": results_row.get("exec_mode", ""),
+        "sim_steps_per_decision": sim_steps_per_decision,
         "input_dir": str(input_dir),
         "depth_dir": depth_dir.name,
         "actions_csv": actions_csv.name,
@@ -228,6 +258,9 @@ def evaluate_run(
         "success_ratio": success,
         **threshold_success,
         "efficiency_steps": efficiency_steps,
+        "optimal_steps": opts.efficiency_optimal_steps,
+        "efficiency_max_steps": efficiency_max_steps,
+        "efficiency": efficiency,
         "distance_ratio": distance_ratio,
         "final_distance_world": final_distance_world,
         "stop_reason": stop_reason,
@@ -237,3 +270,13 @@ def evaluate_run(
         "collision_steps": collision_steps,
         "collision_rate": collision_rate,
     }
+
+
+class RunEvaluator(BaseEvaluator[Path, dict]):
+    """Object-oriented adapter for repeated evaluation with shared options."""
+
+    def __init__(self, options: Optional[EvaluateOptions] = None) -> None:
+        self.options = options or EvaluateOptions()
+
+    def evaluate(self, value: Path) -> dict:
+        return evaluate_run(Path(value), self.options)

@@ -1,6 +1,6 @@
 # Python environment options
 
-This project supports two interchangeable Python environment managers. Pick **one** for your local setup. The entry points (`nav.scripts.run_benchmark_cell`, `nav.scripts.run_benchmark_grid`, `nav.scripts.eval_run`, `nav.scripts.compile_stats`, the `shs/run_headless_benchmark.sh` wrapper, etc.) work identically once the environment is active.
+This project supports two interchangeable Python environment managers. Pick **one** for your local setup. The entry points (`nav.scripts.agent.run_benchmark_cell`, `nav.scripts.agent.run_benchmark_grid`, `nav.scripts.evaluation.eval_run`, `nav.scripts.evaluation.compile_stats`, the `shs/agent/run_headless_benchmark.sh` wrapper, etc.) work identically once the environment is active.
 
 > **Coding agents (Claude Code etc.): prefer `uv` unless the user explicitly asks for conda.** Use `uv run <cmd>` or activate `.venv` before invoking Python scripts.
 
@@ -43,8 +43,8 @@ source .venv/bin/activate     # macOS/Linux
 Or skip activation and prefix any command with `uv run`:
 
 ```bash
-uv run python -m nav.scripts.eval_run --input-dir outputs/scene2/point1/glm-4.6v
-uv run bash shs/run_headless_benchmark.sh scene1 anthropic/claude-sonnet-4.6
+uv run python -m nav.scripts.evaluation.eval_run --input-dir outputs/scene2/point1/glm-4.6v
+uv run bash shs/agent/run_headless_benchmark.sh scene1 anthropic/claude-sonnet-4.6
 ```
 
 ### ml-agents (REQUIRED — cloned from source)

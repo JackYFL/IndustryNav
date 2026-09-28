@@ -11,6 +11,7 @@ before constructing the ``UnityEnvironment``.
 
 from __future__ import annotations
 
+from threading import Lock
 from typing import Optional
 
 import cv2
@@ -32,6 +33,9 @@ from nav.config import (
 from nav.utils import action2signal, obs_to_rgb
 
 
+_DECODER_PATCH_LOCK = Lock()
+
+
 def patch_observation_decoding() -> None:
     """Install a tolerant ``_observation_to_np_array`` for sensor shape mismatches.
 
@@ -40,24 +44,32 @@ def patch_observation_decoding() -> None:
     shape". We fall back to decoding via ``process_pixels`` with an inferred
     channel count. Idempotent; safe to call once at startup before env launch.
     """
-    orig = mlagents_envs.rpc_utils._observation_to_np_array
+    # setup_and_prime calls this for every fresh player. Re-wrapping on every
+    # reset grows a recursive call chain and eventually prevents decoding.
+    # Guard the current callable (not a separate installed flag), so replacing
+    # the library decoder in tests or integrations can still be patched.
+    with _DECODER_PATCH_LOCK:
+        orig = mlagents_envs.rpc_utils._observation_to_np_array
+        if getattr(orig, "_industrynav_shape_tolerance_patch", False) is True:
+            return
 
-    def _patched(obs, expected_shape=None):
-        try:
-            return orig(obs, expected_shape)
-        except UnityObservationException as e:
-            if "Decompressed observation did not have the expected shape" in str(e):
-                expected_channels = 3
-                if hasattr(obs, "shape") and len(obs.shape) > 0 and 1 in obs.shape:
-                    expected_channels = 1
-                return mlagents_envs.rpc_utils.process_pixels(
-                    obs.compressed_data,
-                    expected_channels,
-                    list(obs.compressed_channel_mapping),
-                )
-            raise
+        def _patched(obs, expected_shape=None):
+            try:
+                return orig(obs, expected_shape)
+            except UnityObservationException as e:
+                if "Decompressed observation did not have the expected shape" in str(e):
+                    expected_channels = 3
+                    if hasattr(obs, "shape") and len(obs.shape) > 0 and 1 in obs.shape:
+                        expected_channels = 1
+                    return mlagents_envs.rpc_utils.process_pixels(
+                        obs.compressed_data,
+                        expected_channels,
+                        list(obs.compressed_channel_mapping),
+                    )
+                raise
 
-    mlagents_envs.rpc_utils._observation_to_np_array = _patched
+        _patched._industrynav_shape_tolerance_patch = True
+        mlagents_envs.rpc_utils._observation_to_np_array = _patched
 
 
 def get_obs_safe(decision_steps, modality: str) -> Optional[np.ndarray]:

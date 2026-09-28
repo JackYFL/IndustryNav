@@ -2,6 +2,7 @@
 .DS_Store
 .idea/
 .vscode/
+/.github/
 *.swp
 *.swo
 
@@ -67,8 +68,12 @@ checkpoints/
 runs/
 wandb/
 tensorboard/
+experiments/
 analysis/
+configs/pointgoal_best_20260913/
 tests/
+!nav/scripts/tests/
+!nav/scripts/tests/*.py
 clients/
 datasets/
 

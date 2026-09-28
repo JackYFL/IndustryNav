@@ -27,9 +27,19 @@ from typing import Dict, Iterable, List, Optional
 
 import numpy as np
 
-from nav.config import EVAL_COLLISION_MIN_FORWARD_RATIO
+from nav.config import (
+    EVAL_COLLISION_MIN_FORWARD_RATIO,
+    EVAL_SUCCESS_DIST_M,
+)
 from nav.eval.collision import compute_collision_rate
+from nav.eval.efficiency import (
+    DEFAULT_ASTAR_RESULTS_DIR,
+    DEFAULT_EFFICIENCY_STEP_MARGIN,
+    attach_step_efficiency,
+    load_astar_step_references,
+)
 from nav.eval.metrics import compute_success_efficiency_distance
+from nav.eval.io import find_actions_csv
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +91,9 @@ def discover_grid_runs(
     *,
     models_filter: Optional[set] = None,
     vision_filter: Optional[set] = None,
+    astar_root: Optional[Path] = None,
+    astar_results_dir: str = DEFAULT_ASTAR_RESULTS_DIR,
+    efficiency_step_margin: int = DEFAULT_EFFICIENCY_STEP_MARGIN,
 ) -> List[dict]:
     """Walk the grid output tree and return one row per (scene, point, model, seed) cell.
 
@@ -144,7 +157,15 @@ def discover_grid_runs(
                             models_filter=models_filter,
                         )
                     )
-    return rows
+    astar_references = load_astar_step_references(
+        astar_root if astar_root is not None else outputs_root,
+        astar_results_dir,
+    )
+    return attach_step_efficiency(
+        rows,
+        astar_references,
+        step_margin=efficiency_step_margin,
+    )
 
 
 def _rows_from_seed_dir(
@@ -158,18 +179,18 @@ def _rows_from_seed_dir(
     models_filter: Optional[set],
 ) -> List[dict]:
     """Yield row dicts for the contents of one ``seed<k>/`` directory."""
-    actions_csv = seed_dir / "agent_actions.csv"
-    if actions_csv.exists():
+    actions_csv = find_actions_csv(seed_dir)
+    if actions_csv is not None:
         try:
-            sr_canon, eff_steps, dr = compute_success_efficiency_distance(actions_csv)
+            _, eff_steps, dr = compute_success_efficiency_distance(actions_csv)
             _, _, cr = compute_collision_rate(
                 actions_csv,
                 min_forward_ratio=EVAL_COLLISION_MIN_FORWARD_RATIO,
             )
         except Exception:
-            sr_canon, eff_steps, dr, cr = 0, 0, float("nan"), float("nan")
+            eff_steps, dr, cr = 0, float("nan"), float("nan")
     else:
-        sr_canon, eff_steps, dr, cr = 0, 0, float("nan"), float("nan")
+        eff_steps, dr, cr = 0, float("nan"), float("nan")
 
     out: List[dict] = []
     with open(rcsv) as f:
@@ -180,21 +201,28 @@ def _rows_from_seed_dir(
             dist = _to_float_or_nan(r.get("distance_world"))
             if not math.isfinite(dist):
                 continue
+            actual_value = _to_float_or_nan(r.get("steps_taken"))
+            actual_steps = int(actual_value) if math.isfinite(actual_value) else 0
+            sim_steps_value = _to_float_or_nan(r.get("sim_steps_per_decision"))
+            sim_steps = int(sim_steps_value) if math.isfinite(sim_steps_value) else 2
             out.append({
                 "scene_name": r.get("scene_name") or scene_name,
                 "point_id": r.get("point_id") or point_id,
                 "model": model,
                 "model_short": model_short_clean,
+                "exec_mode": r.get("exec_mode") or "",
                 "vision_input": vision,
                 "seed_id": r.get("seed_id") or seed_dir.name.replace("seed", ""),
-                # Canonical SR comes from the world-distance evaluation helper.
-                "success": int(sr_canon),
+                "sim_steps_per_decision": sim_steps,
+                # results.csv is authoritative for the terminal world pose.
+                "success": int(dist <= EVAL_SUCCESS_DIST_M),
                 "distance_world": dist,
                 "distance_ratio": dr,
                 "collision_rate": cr,
                 "warning_rate": float("nan"),  # grid runs don't preserve raw depth
                 "efficiency_steps": eff_steps,
-                "steps_taken": int(_to_float_or_nan(r.get("steps_taken")) or 0),
+                "steps_taken": actual_steps,
+                "efficiency_max_steps": float("nan"),
             })
     return out
 
@@ -273,13 +301,18 @@ def _parse_xlsx_sheet(ws, scene_name: str) -> List[dict]:
             "point_id": current_point,
             "model": m,
             "model_short": m.split("/")[-1],
+            "exec_mode": "astar" if m.lower().startswith("astar") else "llm",
             "vision_input": True,        # xlsx is single-condition vision-on
             "seed_id": "0",              # one run per cell, no replicates
+            "sim_steps_per_decision": 2,
             "success": success,
             "distance_world": float("nan"),  # not recorded in the xlsx
             "distance_ratio": _normalize_ratio(dr),
             "collision_rate": _normalize_ratio(cr),
             "warning_rate": _normalize_ratio(wr),
+            "efficiency": float("nan"),
+            "optimal_steps": float("nan"),
+            "efficiency_max_steps": float("nan"),
             "efficiency_steps": eff_int,
             "steps_taken": eff_int,
         })
@@ -316,13 +349,22 @@ def load_per_run_csv(csv_path: Path) -> List[dict]:
                 "point_id": r["point_id"],
                 "model": r["model"],
                 "model_short": r.get("model_short") or r["model"].split("/")[-1],
+                "exec_mode": r.get("exec_mode") or "",
                 "vision_input": _vision_input_bool(r.get("vision_input", "True")),
                 "seed_id": r.get("seed_id") or "0",
+                "sim_steps_per_decision": _int_or_zero(
+                    r.get("sim_steps_per_decision") or 2
+                ),
                 "success": success,
                 "distance_world": _to_float_or_nan(r.get("distance_world")),
                 "distance_ratio": _to_float_or_nan(r.get("distance_ratio")),
                 "collision_rate": _to_float_or_nan(r.get("collision_rate")),
                 "warning_rate": _to_float_or_nan(r.get("warning_rate")),
+                "efficiency": _to_float_or_nan(r.get("efficiency")),
+                "optimal_steps": _to_float_or_nan(r.get("optimal_steps")),
+                "efficiency_max_steps": _to_float_or_nan(
+                    r.get("efficiency_max_steps")
+                ),
                 "efficiency_steps": _int_or_zero(r.get("efficiency_steps")),
                 "steps_taken": _int_or_zero(r.get("steps_taken")),
             })

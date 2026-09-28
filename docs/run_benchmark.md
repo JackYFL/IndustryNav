@@ -2,10 +2,10 @@
 
 This is the canonical guide for running AI navigation benchmarks against the **unified** Unity client (`scene_all`, 24 scenes bundled, scene chosen at runtime with zero-based `scene_id` values `0..23`). Legacy per-scene clients and the older `run_sync.py` / `run_async.py` / `shs/run_agent.sh` flow are **not** the latest; treat them as reference only.
 
-The current entry point is `nav/scripts/run_benchmark_cell.py` (run via `python -m nav.scripts.run_benchmark_cell`), driven by:
+The current entry point is `nav/scripts/agent/run_benchmark_cell.py` (run via `python -m nav.scripts.agent.run_benchmark_cell`), driven by:
 
-- `shs/run_headless_benchmark.sh` on macOS, or
-- `shs/run_headless_benchmark.sh` on Ubuntu Linux.
+- `shs/agent/run_headless_benchmark.sh` on macOS, or
+- `shs/agent/run_headless_benchmark.sh` on Ubuntu Linux.
 
 The Python script itself is OS-agnostic; the wrappers only differ in client-path defaults and (on Linux) wrapping each invocation in `xvfb-run` to provide a virtual display surface. Linux Unity launches default to windowed mode rather than `-batchmode`; set `INDUSTRYNAV_UNITY_BATCHMODE=1` only if your local Linux player supports batchmode.
 
@@ -18,7 +18,7 @@ The Python script itself is OS-agnostic; the wrappers only differ in client-path
    - **Preferred (any OS):** drop your build into the gitignored in-repo `unity_client/` folder — macOS `unity_client/scene_all.app`, Linux `unity_client/scene_all/scene_all.x86_64`. `--file_name auto` (the default) finds it there first (anchored to `REPO_ROOT`), so no env var or absolute path is needed.
    - macOS — set up via the [`unity_client_setup_macos`](../.claude/skills/unity_client_setup_macos/SKILL.md) skill (covers the Gatekeeper `xattr -dr com.apple.quarantine` step). Legacy override: `SCENE_ALL_APP=/path/to/scene_all.app`.
    - Ubuntu Linux — set up via the [`unity_client_setup_linux`](../.claude/skills/unity_client_setup_linux/SKILL.md) skill. Legacy override: `SCENE_ALL_BIN=/path/to/scene_all/scene_all.x86_64` (or add a fallback path to `config.SCENE_ALL_BUILDS["Linux"]`).
-   - **Auto-discovery**: the Python entry points (`nav.scripts.run_benchmark_cell`, `nav.scripts.run_benchmark_grid`) accept `--file_name auto` (the default), which scans `config.SCENE_ALL_BUILDS` for the current OS and uses the first listed build path that exists locally. Both wrappers default the env var to `auto` as well. To onboard a new dev box, add its scene_all path to `config.SCENE_ALL_BUILDS[<OS>]` rather than re-hardcoding it in scripts.
+   - **Auto-discovery**: the Python entry points (`nav.scripts.agent.run_benchmark_cell`, `nav.scripts.agent.run_benchmark_grid`) accept `--file_name auto` (the default), which scans `config.SCENE_ALL_BUILDS` for the current OS and uses the first listed build path that exists locally. Both wrappers default the env var to `auto` as well. To onboard a new dev box, add its scene_all path to `config.SCENE_ALL_BUILDS[<OS>]` rather than re-hardcoding it in scripts.
 3. **Xvfb (Linux only)** — `sudo apt install -y xvfb`. The wrapper requires it; pass `USE_XVFB=0` only if you have a real X display exported as `DISPLAY` and don't mind it going to sleep mid-run.
 4. **OpenRouter key** — `source tmp/secrets.sh` (or `export OPENROUTER_API_KEY=…`) before invoking the wrapper for `agent` mode runs.
 
@@ -29,13 +29,13 @@ The Python script itself is OS-agnostic; the wrappers only differ in client-path
 macOS:
 ```bash
 source tmp/secrets.sh
-bash shs/run_headless_benchmark.sh scene1 google/gemini-3-flash-preview
+bash shs/agent/run_headless_benchmark.sh scene1 google/gemini-3-flash-preview
 ```
 
 Ubuntu Linux:
 ```bash
 source tmp/secrets.sh
-bash shs/run_headless_benchmark.sh scene1 google/gemini-3-flash-preview
+bash shs/agent/run_headless_benchmark.sh scene1 google/gemini-3-flash-preview
 ```
 
 This iterates every point under `input_points.json["scene1"]` and produces (per-run
@@ -66,22 +66,39 @@ trajectory visualization and image-based diagnostics.
 
 The wrapper reads spawn + target from `input_points.json`, picks a free TCP base port for each
 point (so multiple scenes can run in parallel from different terminals), and dispatches one
-`python -m nav.scripts.run_benchmark_cell` per point.
+`python -m nav.scripts.agent.run_benchmark_cell` per point.
 
 The full list of valid `<scene_code>` values (and their `scene_id` mapping) is documented in [`scene_list.md`](scene_list.md). For the Unity scene files and Python/Unity interface details, see [`scene_files_and_interfaces.md`](scene_files_and_interfaces.md).
 
 ### Baselines and sweeps
 
 - **Non-LLM baselines** (no API key): set `BASELINE` ∈ `{astar, bc, random}`, e.g.
-  `BASELINE=astar bash shs/run_headless_benchmark.sh scene1`. The output subdir is named by the
+  `BASELINE=astar bash shs/agent/run_headless_benchmark.sh scene1`. The output subdir is named by the
   baseline token instead of a model name. `llm` (default) is the only one that calls OpenRouter.
   The same routing interface can be extended for additional baselines. For A* commands, tuning, debug visualizations, and extension notes, see [`astar_workflow.md`](astar_workflow.md).
   For BC data collection, training, and checkpoint inference, see [`bc_workflow.md`](bc_workflow.md).
-- **Grid sweeps** across `model × scene × point × seed × vision × history_size` go through the
-  orchestrator: `python -m nav.scripts.run_benchmark_grid --models … --scenes … [--history_sizes 0 5 10]`.
+- **Grid sweeps** across `model × scene × point × seed × vision × history_size × topdown_input` go through the
+  orchestrator: `python -m nav.scripts.agent.run_benchmark_grid --models … --scenes … [--history_sizes 0 5 10]`.
   Aggregates land under `analysis/grid_runs/<timestamp>/`; non-default history sizes are routed under
   `outputs/_history_size/hs<k>/` so the stats loader isn't polluted. Omit `--history_sizes` for a normal
-  single-history sweep.
+  single-history sweep. Use `--topdown_input both` for paired map-off/map-on cells;
+  map-on model directories receive the `_topdown` suffix. `--tasks_file` accepts
+  a frozen JSON list of `{scene_name, point_id}` pairs for sampled evaluations.
+
+For a **minimap-only** evaluation, combine `--vision_input off`,
+`--topdown_input on`, and `--history_sizes 0`. The default prompt for this
+combination is `nav/prompts/nav_minimap_only.txt`; it has no history block.
+The API receives only the annotated minimap, not egocentric RGB or depth.
+Pose/goal state, the action contract, and safety evaluation remain enabled.
+Directories use the `_novision_topdown` suffix, isolated from RGB + map results.
+The fixed Gemini/GLM 32-task extension is prepared by
+`shs/agent/run_llm_topdown_only_ablation.sh` (`DRY_RUN=1` makes no API calls).
+Paid launch requires separate authorization, `CONFIRM_TOPDOWN_ONLY_API=1`, and
+a dedicated persistent request counter; retries count against its allowance.
+Add `--include-topdown-only` to `nav.scripts.evaluation.summarize_llm_ablation`
+to include this extra condition. Since its prompt differs from the RGB + map
+prompt, report it as a prompt-and-input variant, not a prompt-controlled
+image-only causal ablation.
 
 ### API navigation protocol
 
@@ -90,10 +107,12 @@ API runs share the following navigation protocol:
 - The vision navigation prompt specifies world-axis directions
   (`+X = North`, `+Z = West`), obstacle recovery rules,
   and the action descriptions (approximately 45° per turn and 1.50 m forward).
-- Each request includes only the latest egocentric RGB image, pose/target state,
+- By default, each request includes only the latest egocentric RGB image, pose/target state,
   and the last five actions with the model's `observation` descriptions. The
   API attaches the image bytes directly.
-  Depth and minimap are not sent to the model. No-vision runs store no visual memory.
+  Depth is never sent to the model. With `--topdown_input on`, the annotated
+  minimap is attached as a second image (agent/heading in red, target in green)
+  and recorded in `run_config.json`; no-vision runs store no visual memory.
 - Default LLM sensors are RGB/depth **320×240** and minimap **431×256**. A*/BC/random
   retain their previous defaults. Explicit resolution overrides remain supported.
 - Defaults include two simulation steps per decision, a dynamic initial budget
@@ -110,7 +129,7 @@ Use a **fresh output root** to keep old results separate. This command is an
 offline plan only; remove `--dry_run` only when ready to authorize/run API calls:
 
 ```bash
-python -m nav.scripts.run_benchmark_grid \
+python -m nav.scripts.agent.run_benchmark_grid \
   --models qwen/qwen3.8-flash --seeds 0 \
   --output_root outputs/_api_v1 --dry_run
 ```
@@ -141,8 +160,8 @@ Grid outputs include a `seed<N>` directory. To inspect and then resume a run:
 
 ```bash
 RUN_DIR="outputs/scene1/point1/gemini-3-flash-preview"
-python -m nav.scripts.resume_benchmark "$RUN_DIR" --dry-run
-python -m nav.scripts.resume_benchmark "$RUN_DIR"
+python -m nav.scripts.agent.resume_benchmark "$RUN_DIR" --dry-run
+python -m nav.scripts.agent.resume_benchmark "$RUN_DIR"
 ```
 
 The convenience command reconstructs the recorded run settings. Its `--dry-run`
@@ -155,7 +174,7 @@ or set `RESUME=1` for the shell wrapper. For example, for a run originally launc
 with the quickstart defaults:
 
 ```bash
-RESUME=1 bash shs/run_headless_benchmark.sh scene1 google/gemini-3-flash-preview
+RESUME=1 bash shs/agent/run_headless_benchmark.sh scene1 google/gemini-3-flash-preview
 ```
 
 Retain the original output root, model, prompt, seed, scene, sensors, modalities,
@@ -229,7 +248,7 @@ normal completions and empty action logs are skipped. Conflicting final poses ar
 reported as blocked, without silently choosing an earlier recovery point.
 
 ```bash
-python -m nav.scripts.reconstruct_gemini_runs \
+python -m nav.scripts.agent.reconstruct_gemini_runs \
   --source-root outputs --output-root analysis/gemini_reconstructed
 ```
 
@@ -248,7 +267,7 @@ protocol adapter and an explicitly verified provider/request allowance.
 Run a zero-model-call smoke test on a separate copy:
 
 ```bash
-python -m nav.scripts.smoke_reconstructed_gemini \
+python -m nav.scripts.agent.smoke_reconstructed_gemini \
   analysis/gemini_reconstructed/scene10/point1/gemini-3.8-flash/seed0 \
   --output-dir analysis/gemini_reconstruction_smoke --unity
 ```
@@ -267,7 +286,7 @@ recovery tool, but has **dynamic per-task budgets**. Preserve each task's record
 steps or recalculate them from the remaining distance.
 
 ```bash
-python -m nav.scripts.reconstruct_qwen_runs \
+python -m nav.scripts.agent.reconstruct_qwen_runs \
   --source-root outputs --output-root analysis/qwen_reconstructed \
   --job-dir analysis/queued_runs/qwen38_after_deepseek_20260904
 ```
@@ -289,7 +308,7 @@ The shared zero-model-call smoke tool also accepts Qwen bundles and preserves
 their recorded dynamic budget:
 
 ```bash
-python -m nav.scripts.smoke_reconstructed_gemini \
+python -m nav.scripts.agent.smoke_reconstructed_gemini \
   analysis/qwen_reconstructed/scene17/point2/qwen3.8-flash/seed0 \
   --output-dir analysis/qwen_reconstruction_smoke --unity
 ```
@@ -330,12 +349,13 @@ and provider-default reasoning. Effective transport settings are included in
 
 ### English GIF gallery
 
-`python -m nav.scripts.export_llm_gallery` generates English page labels and
-GIF annotations, including success thresholds and warning/collision overlays.
+`python -m nav.scripts.gallery.export_llm_gallery` generates English page labels and
+GIF annotations, including success thresholds, per-run distance ratio, the filtered
+mean distance ratio, and warning/collision overlays.
 To refresh only an existing page while preserving its manifest and GIFs:
 
 ```bash
-python -m nav.scripts.export_llm_gallery \
+python -m nav.scripts.gallery.export_llm_gallery \
   --output-dir analysis/cli_agent_gif_gallery --html-only \
   --gallery-title "Navigation Baseline Comparison"
 ```
@@ -343,10 +363,31 @@ python -m nav.scripts.export_llm_gallery \
 Generated galleries remain local under the gitignored `analysis/` directory;
 the generator and its regression tests are version-controlled.
 
+For a complete 96-point PPO evaluation without recorded images, archive its
+audited `summary.json` alongside the gallery. This does not add a summary table
+or GIF cards, or mix the original score with a later visual replay:
+
+```bash
+python -m nav.scripts.gallery.register_pointgoal_evaluation \
+  --summary outputs/original_ppo_evaluation/summary.json \
+  --gallery-dir analysis/cli_agent_gif_gallery \
+  --id ppo-original --name "PPO original evaluation" \
+  --recording-note "Not recorded; original metrics only"
+```
+
+To record a new run, use the persistent point-goal evaluator with `--save-visuals`;
+it saves RGB, depth PNG and float32 depth NPY (meters), minimaps, actions/poses,
+and final results. Use a new output directory and model ID, append its GIFs,
+then register its own summary under a different `--id` with `--model` matching
+the replay cards. Original reports are copied byte-for-byte into `reports/`,
+and `evaluation_runs.json` survives HTML-only refreshes without appearing on
+the page. A model-specific page
+can be opened with `index.html?model=<model-id>`.
+
 To add another model without regenerating or replacing existing entries:
 
 ```bash
-python -m nav.scripts.export_llm_gallery \
+python -m nav.scripts.gallery.export_llm_gallery \
   --input-glob 'outputs/scene*/point*/gemini-3.8-flash/seed0' \
   --output-dir analysis/cli_agent_gif_gallery --append --skip-incomplete
 ```
@@ -357,6 +398,20 @@ final distances or success outcomes. It does not rerun any navigation tasks.
 Add `--normal-only` to exclude provider/JSON/Unity errors and retain only runs
 whose latest `stop_reason` is `max_steps` or `reached_vicinity`.
 
+To replace corrected runs in place and layer their static A* results over the
+canonical efficiency references:
+
+```bash
+python -m nav.scripts.gallery.export_llm_gallery \
+  --input-glob 'outputs/scene21/point2/astar_corrected_dynamic' \
+  --output-dir analysis/cli_agent_gif_gallery --replace --normal-only \
+  --astar-results-dir astar_static_all_points \
+  --astar-results-dir astar_corrected_static
+```
+
+Replacement matching uses model, scene, and point, so the existing GIF name is
+reused and the gallery keeps exactly one card for that tuple.
+
 ### Top-down trajectory comparison gallery
 
 Build a separate 96-card gallery (24 scenes x 4 targets) that overlays every
@@ -365,7 +420,7 @@ collision points are red, the start uses the GIF gallery's coral agent marker,
 and the target uses its green marker:
 
 ```bash
-python -m nav.scripts.export_topdown_comparison_gallery \
+python -m nav.scripts.gallery.export_topdown_comparison_gallery \
   --source-manifest analysis/cli_agent_gif_gallery/manifest.json \
   --output-dir analysis/topdown_trajectory_comparison_gallery
 ```
@@ -380,10 +435,10 @@ The shell wrappers use environment variables as lightweight "macros": set them b
 Example:
 
 ```bash
-BASELINE=astar MAX_STEPS=100 bash shs/run_headless_benchmark.sh scene1
+BASELINE=astar MAX_STEPS=100 bash shs/agent/run_headless_benchmark.sh scene1
 ```
 
-#### `shs/run_headless_benchmark.sh`
+#### `shs/agent/run_headless_benchmark.sh`
 
 This is the general benchmark wrapper for `llm`, `astar`, `bc`, and `random`.
 
@@ -429,7 +484,7 @@ The Python cell and grid runners expose the equivalent
 `--step_budget_overhead`. Ordinary LLM runs enable dynamic initialization by
 default. Unlike A*, their budget is not expanded from a replanned path.
 
-#### `shs/run_Astar.sh`
+#### `shs/astar/run_Astar.sh`
 
 This is a convenience wrapper around `run_benchmark_cell --baseline astar`. It supports all variables above that relate to runtime launch, plus A*-specific controls.
 
@@ -472,33 +527,33 @@ remain an internal image-processing detail.
 
 ```bash
 # Freeze workers, spline vehicles, animations, and environment physics.
-DYNAMIC_OBJECTS=static bash shs/run_Astar.sh scene1 point1
+DYNAMIC_OBJECTS=static bash shs/astar/run_Astar.sh scene1 point1
 
 # Equivalent direct Python flag.
-python -m nav.scripts.run_benchmark_cell --dynamic_objects static ...
+python -m nav.scripts.agent.run_benchmark_cell --dynamic_objects static ...
 ```
 
 ```bash
-ASTAR_DEBUG_VIZ=1 bash shs/run_Astar.sh scene1 point1
-ASTAR_OBSTACLE_CLEARANCE_M=0.9 RUN_NAME=astar_clearance09 bash shs/run_Astar.sh scene1 point1
-ASTAR_STEP_BUDGET_MAX=200 bash shs/run_Astar.sh all
-MAX_STEPS=120 bash shs/run_Astar.sh all  # fixed-budget override
+ASTAR_DEBUG_VIZ=1 bash shs/astar/run_Astar.sh scene1 point1
+ASTAR_OBSTACLE_CLEARANCE_M=0.9 RUN_NAME=astar_clearance09 bash shs/astar/run_Astar.sh scene1 point1
+ASTAR_STEP_BUDGET_MAX=200 bash shs/astar/run_Astar.sh all
+MAX_STEPS=120 bash shs/astar/run_Astar.sh all  # fixed-budget override
 ```
 
-#### `shs/train_bc.sh`
+#### `shs/bc/train_bc.sh`
 
-This wrapper is intentionally small. It forwards most configuration to `python -m nav.scripts.train_bc`.
+This wrapper is intentionally small. It forwards most configuration to `python -m nav.scripts.bc.train_bc`.
 
 | Variable / arg | Default | Meaning |
 |---|---|---|
 | first positional arg | `resnet50` | BC preset: `cnn`, `resnet50`, or `dinov2`. |
 | `PYTHON_BIN` | `<repo>/.venv/bin/python` | Python interpreter. |
-| extra args | none | Forwarded directly to `nav.scripts.train_bc`, e.g. `--data_root`, `--epochs`, `--output_dir`. |
+| extra args | none | Forwarded directly to `nav.scripts.bc.train_bc`, e.g. `--data_root`, `--epochs`, `--output_dir`. |
 
 Example:
 
 ```bash
-bash shs/train_bc.sh resnet50 --data_root collect_data --epochs 20
+bash shs/bc/train_bc.sh resnet50 --data_root collect_data --epochs 20
 ```
 
 ### Single-point run (for debugging)
@@ -507,7 +562,7 @@ Call the Python script directly. macOS:
 
 ```bash
 SCENE_ALL_APP=/home/liyifa11/MyCodes/IndustryNav/scene_files/Linux/scene_all/scene_all.x86_64
-.venv/bin/python -m nav.scripts.run_benchmark_cell \
+.venv/bin/python -m nav.scripts.agent.run_benchmark_cell \
   --baseline llm \
   --file_name "$SCENE_ALL_APP" \
   --scene_id 0 --base_port 5520 --max_steps 70 \
@@ -521,7 +576,7 @@ SCENE_ALL_APP=/home/liyifa11/MyCodes/IndustryNav/scene_files/Linux/scene_all/sce
 Ubuntu Linux (note the `xvfb-run` prefix and the ELF path):
 
 ```bash
-xvfb-run -a -s "-screen 0 1724x1024x24" .venv/bin/python -m nav.scripts.run_benchmark_cell \
+xvfb-run -a -s "-screen 0 1724x1024x24" .venv/bin/python -m nav.scripts.agent.run_benchmark_cell \
   --baseline llm \
   --file_name /mnt/ss2/devops/sandbox/industrynav2/client/scene_all/scene_all.x86_64 \
   --scene_id 0 --base_port 5520 --max_steps 70 \
@@ -548,10 +603,10 @@ and the `DepthSensor` observation:
 | `run_headless_benchmark.sh`, `run_Astar.sh` | `MINIMAP_WIDTH=<W>` or `MINIMAP_HEIGHT=<H>` |
 
 ```bash
-EGO_WIDTH=768 EGO_HEIGHT=432 bash shs/run_headless_benchmark.sh scene1
-MINIMAP_WIDTH=431 bash shs/run_headless_benchmark.sh scene1
+EGO_WIDTH=768 EGO_HEIGHT=432 bash shs/agent/run_headless_benchmark.sh scene1
+MINIMAP_WIDTH=431 bash shs/agent/run_headless_benchmark.sh scene1
 
-python -m nav.scripts.run_benchmark_cell \
+python -m nav.scripts.agent.run_benchmark_cell \
   --ego_width 768 --ego_height 432 --minimap_width 431 \
   ...
 ```
@@ -565,10 +620,10 @@ agents, particles, and timelines. The controlled `WarehouseAgent` and its
 cameras remain active.
 
 ```bash
-DYNAMIC_OBJECTS=static bash shs/run_headless_benchmark.sh scene1
-DYNAMIC_OBJECTS=static bash shs/run_Astar.sh scene1 point1
-python -m nav.scripts.collect_data --dynamic_objects static ...
-python -m nav.scripts.run_benchmark_grid --dynamic_objects static ...
+DYNAMIC_OBJECTS=static bash shs/agent/run_headless_benchmark.sh scene1
+DYNAMIC_OBJECTS=static bash shs/astar/run_Astar.sh scene1 point1
+python -m nav.scripts.bc.collect_data --dynamic_objects static ...
+python -m nav.scripts.agent.run_benchmark_grid --dynamic_objects static ...
 ```
 
 Human, vehicle, and robot movers use separate absolute speeds in Unity world
@@ -577,14 +632,14 @@ or independent ranges:
 
 ```bash
 HUMAN_SPEED_MPS=1.0 VEHICLE_SPEED_MPS=3.0 ROBOT_SPEED_MPS=1.4 \
-  bash shs/run_headless_benchmark.sh scene1
+  bash shs/agent/run_headless_benchmark.sh scene1
 HUMAN_SPEED_MIN_MPS=0.9 HUMAN_SPEED_MAX_MPS=1.4 \
 VEHICLE_SPEED_MIN_MPS=2.0 VEHICLE_SPEED_MAX_MPS=3.5 \
 ROBOT_SPEED_MIN_MPS=1.0 ROBOT_SPEED_MAX_MPS=2.0 MOTION_RANDOM_SEED=42 \
-  bash shs/run_Astar.sh scene1 point1
-python -m nav.scripts.collect_data \
+  bash shs/astar/run_Astar.sh scene1 point1
+python -m nav.scripts.bc.collect_data \
   --human_speed_mps 1.0 --vehicle_speed_mps 3.0 --robot_speed_mps 1.4 ...
-python -m nav.scripts.run_benchmark_grid \
+python -m nav.scripts.agent.run_benchmark_grid \
   --human_speed_min_mps 0.9 --human_speed_max_mps 1.4 \
   --vehicle_speed_min_mps 2.0 --vehicle_speed_max_mps 3.5 \
   --robot_speed_min_mps 1.0 --robot_speed_max_mps 2.0 \
@@ -607,10 +662,10 @@ point, and benchmark seed identifiers. Each Unity Light keeps its authored
 relative intensity; repeated episode resets do not accumulate scaling.
 
 ```bash
-GLOBAL_LIGHT_INTENSITY=0.8 bash shs/run_Astar.sh scene1 point1
+GLOBAL_LIGHT_INTENSITY=0.8 bash shs/astar/run_Astar.sh scene1 point1
 LIGHT_INTENSITY_MIN=0.7 LIGHT_INTENSITY_MAX=1.3 LIGHT_RANDOM_SEED=42 \
-  bash shs/run_headless_benchmark.sh scene1
-python -m nav.scripts.collect_data \
+  bash shs/agent/run_headless_benchmark.sh scene1
+python -m nav.scripts.bc.collect_data \
   --light_intensity_min 0.7 --light_intensity_max 1.3 \
   --light_random_seed 42 ...
 ```
@@ -641,7 +696,7 @@ Useful when you've changed the script or the Unity client and want to verify the
 
 ```bash
 SCENE_ALL_APP=/home/liyifa11/MyCodes/IndustryNav/scene_files/Linux/scene_all/scene_all.x86_64
-.venv/bin/python -m nav.scripts.run_benchmark_cell \
+.venv/bin/python -m nav.scripts.agent.run_benchmark_cell \
   --baseline random \
   --file_name "$SCENE_ALL_APP" \
   --scene_id 0 --max_steps 2 \
@@ -653,7 +708,7 @@ SCENE_ALL_APP=/home/liyifa11/MyCodes/IndustryNav/scene_files/Linux/scene_all/sce
 Ubuntu Linux:
 
 ```bash
-xvfb-run -a -s "-screen 0 1724x1024x24" .venv/bin/python -m nav.scripts.run_benchmark_cell \
+xvfb-run -a -s "-screen 0 1724x1024x24" .venv/bin/python -m nav.scripts.agent.run_benchmark_cell \
   --baseline random \
   --file_name /mnt/ss2/devops/sandbox/industrynav2/client/scene_all/scene_all.x86_64 \
   --scene_id 0 --max_steps 2 \
@@ -677,10 +732,10 @@ Target visual(550, 450) -> unity(551, 455) -> world(9.63, 25.66)
 
 `input_points.json` mixes two coordinate spaces, and getting them wrong silently spawns the agent in invalid space:
 
-- **`start.{x, z, direction}` are Unity world coordinates.** The fields are named `x`/`z` (Unity's horizontal axes) and `direction` is yaw in degrees. Pass these to `nav.scripts.run_benchmark_cell` as `--init_world_x` / `--init_world_z` / `--init_curr_direction`. The unified client spawns directly at that world point.
+- **`start.{x, z, direction}` are Unity world coordinates.** The fields are named `x`/`z` (Unity's horizontal axes) and `direction` is yaw in degrees. Pass these to `nav.scripts.agent.run_benchmark_cell` as `--init_world_x` / `--init_world_z` / `--init_curr_direction`. The unified client spawns directly at that world point.
 - **`target.{x, y}` are visual minimap pixels** (range 0..862 × 0..512). Pass as `--target_x` / `--target_y`. The script converts to Unity pixel via the letterbox-aware margin and the client maps to world internally.
 
-The legacy `--init_curr_x` / `--init_curr_y` (visual minimap pixels) are still accepted for the spawn, but only used when the world args are absent. **Do not feed `start.x`/`start.z` into `--init_curr_x/y`** — their magnitudes (~30–50) are world units, not pixels, so treating them as pixels lands you at the top-left edge of the minimap and the agent walks into a wall. `nav.scripts.run_benchmark_grid` already routes them correctly.
+The legacy `--init_curr_x` / `--init_curr_y` (visual minimap pixels) are still accepted for the spawn, but only used when the world args are absent. **Do not feed `start.x`/`start.z` into `--init_curr_x/y`** — their magnitudes (~30–50) are world units, not pixels, so treating them as pixels lands you at the top-left edge of the minimap and the agent walks into a wall. `nav.scripts.agent.run_benchmark_grid` already routes them correctly.
 
 ---
 
@@ -695,23 +750,23 @@ Tested OpenRouter model ids:
 | GPT-5.2 | `openai/gpt-5.2` | high |
 | Qwen 3.5 Plus | `qwen/qwen3.5-plus-02-15` | low |
 
-Pass via `bash shs/run_headless_benchmark.sh <scene_code> <model_id>`.
+Pass via `bash shs/agent/run_headless_benchmark.sh <scene_code> <model_id>`.
 
 ---
 
 ## Important: do not clobber historical results
 
-- `experiment_results_v6.csv`, `eval_results.xlsx`, `history_size_metrics.xlsx` at the repo root are legit historical benchmark artifacts. **`nav.scripts.run_benchmark_cell` never writes to those by default** — it writes `results.csv` under `<frame_save_dir>` instead. Pass `--results_csv` only if you actually want to merge into an existing aggregate file (and even then, the script appends).
+- `experiment_results_v6.csv`, `eval_results.xlsx`, `history_size_metrics.xlsx` at the repo root are legit historical benchmark artifacts. **`nav.scripts.agent.run_benchmark_cell` never writes to those by default** — it writes `results.csv` under `<frame_save_dir>` instead. Pass `--results_csv` only if you actually want to merge into an existing aggregate file (and even then, the script appends).
 - The `outputs/` tree is the canonical location for new runs. Treat new runs as additive — pick a fresh `<model_short_name>` directory if you don't want to overwrite a previous run's frames.
 
 ---
 
 ## Where final aggregate metrics come from
 
-`nav.scripts.run_benchmark_cell` does **not** compute final benchmark scores by itself. It only writes raw per-step actions + frames + a one-row session summary. Aggregate metrics (success rate, total steps, distance, etc. — the columns in `eval_results.xlsx`) are produced by the **post-hoc** `nav.scripts.eval_run`:
+`nav.scripts.agent.run_benchmark_cell` does **not** compute final benchmark scores by itself. It only writes raw per-step actions + frames + a one-row session summary. Aggregate metrics (success rate, total steps, distance, etc. — the columns in `eval_results.xlsx`) are produced by the **post-hoc** `nav.scripts.evaluation.eval_run`:
 
 ```bash
-.venv/bin/python -m nav.scripts.eval_run --input-dir outputs/scene1/point1/gemini-3-flash-preview
+.venv/bin/python -m nav.scripts.evaluation.eval_run --input-dir outputs/scene1/point1/gemini-3-flash-preview
 ```
 
 Runtime and post-hoc evaluation use the final Unity world distance with a
@@ -723,13 +778,39 @@ the backward-compatible `success_ratio` column. These variants are derived
 from the saved final world distance and therefore do not require rerunning the
 agent.
 
+Step efficiency is reported on `[0, 1]` (higher is better):
+
+```text
+success * clip((max_steps - actual_steps) /
+               (max_steps - optimal_steps), 0, 1)
+
+max_steps = optimal_steps + K
+```
+
+`optimal_steps` is derived from the successful **static-scene** A* trajectory
+for the same `scene/point` (`dynamic_objects=static`). It is action-space aware:
+A* forward and turn control effort is converted to equivalent atomic agent
+steps, so A*'s smaller smooth steering increments are not counted as if they
+were the agent's larger turns. Evaluated A* runs use their native step count,
+but are still compared against the static A* reference. The normalization ceiling is task-specific:
+`max_steps = optimal_steps + K`, so the equivalent simplified score is
+`success * clip((optimal_steps + K - actual_steps) / K, 0, 1)`. `K` defaults
+to 100 steps and can be changed with `--efficiency-step-margin K` (or the short
+alias `--efficiency-k K`) on the evaluation/statistics CLIs. This metric-only
+ceiling does not change the benchmark's runtime termination budget. Failed
+episodes receive zero efficiency. If the matching A* trajectory is unavailable,
+efficiency is left undefined rather than silently substituting another task.
+
+The evaluation CLIs use `outputs/scene*/point*/astar_static_all_points` by
+default. Override the source with `--astar-root` or `--astar-results-dir`.
+
 Each saved depth step contains two files. `<step>.png` is a fixed-scale
 grayscale view of the Unity sensor output; `<step>.npy` is a float32 depth map
 in meters, decoded from sRGB and clipped by the Unity shader at 20 m. Warning
 rate evaluation reads the `.npy` files. Do not compare old min-max-normalized
 depth PNG brightness directly with newly generated runs.
 
-Aggregation across runs into `eval_results.xlsx` is a manual / sheet-export step downstream of `nav.scripts.eval_run`.
+Aggregation across runs into `eval_results.xlsx` is a manual / sheet-export step downstream of `nav.scripts.evaluation.eval_run`.
 
 ---
 
@@ -747,9 +828,9 @@ Despite the name, this script does **not** run with `-nographics`. The unified U
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `Environment shut down with return code -9 (SIGKILL).` (macOS) | Gatekeeper quarantine or `-nographics` flag | `xattr -dr com.apple.quarantine $SCENE_ALL_APP`; remove `-nographics`. |
-| `Environment shut down with return code -11 (SIGSEGV).` (Linux, at `UnityEnvironment(...)` init) | No display surface — running without `xvfb-run` and without a real `DISPLAY` | Wrap the invocation in `xvfb-run -a -s "-screen 0 1724x1024x24"`, or use `shs/run_headless_benchmark.sh`. Verified failure mode on this build. |
+| `Environment shut down with return code -11 (SIGSEGV).` (Linux, at `UnityEnvironment(...)` init) | No display surface — running without `xvfb-run` and without a real `DISPLAY` | Wrap the invocation in `xvfb-run -a -s "-screen 0 1724x1024x24"`, or use `shs/agent/run_headless_benchmark.sh`. Verified failure mode on this build. |
 | `Minimap unavailable; cannot compute coordinate margin.` (right after the brain connects) | Camera sensors are returning blank frames. On Linux this happens when `-nographics` is in `additional_args` or `no_graphics=True` is passed to `UnityEnvironment(...)` — Unity launches but never populates sensor textures. | Remove `-nographics`; keep `no_graphics=False`. Verified on Linux (under `xvfb-run`, both flags reproduce this exact error). |
 | `xvfb-run: error: Xvfb failed to start.` | Linux: Xvfb not installed or `/tmp` unwritable | `sudo apt install -y xvfb`; confirm `/tmp` is writable. |
-| `dict contains fields not in fieldnames: 'X'` | Schema drift in `utils.append_results_csv` | Either drop `X` from the result dict in `nav.scripts.run_benchmark_cell` or extend the schema in `utils.append_results_csv`. |
+| `dict contains fields not in fieldnames: 'X'` | Schema drift in `utils.append_results_csv` | Either drop `X` from the result dict in `nav.scripts.agent.run_benchmark_cell` or extend the schema in `utils.append_results_csv`. |
 | LLM connection failure | `OPENROUTER_API_KEY` missing or invalid | `source tmp/secrets.sh`; verify key. |
 | Unity port already in use | Stale `worker_id` / `base_port` collision | The wrapper picks a fresh free port per point; if calling Python directly, pass a fresh `--base_port`. |

@@ -33,18 +33,18 @@ Tasks added for the newly included scenes are initial templates based on valid
 spawn coordinates and shared-map targets. Validate their complete routes in the
 24-scene Unity client before using them for official benchmark reporting.
 
-`bash shs/run_Astar.sh all` and the grid runner's default scene selection iterate
+`bash shs/astar/run_Astar.sh all` and the grid runner's default scene selection iterate
 the canonical `SCENE_CODES` order and validate that all 24 scenes have point
 data.
 
 ## Where The Mapping Is Used
 
 - `nav/config.py`: canonical `SCENE_ID_MAP`.
-- `shs/run_headless_benchmark.sh` and `shs/run_Astar.sh`: import the canonical
+- `shs/agent/run_headless_benchmark.sh` and `shs/astar/run_Astar.sh`: import the canonical
   Python mapping instead of maintaining separate shell tables.
-- `nav.scripts.run_benchmark_grid`: validates requested scene codes against the
+- `nav.scripts.agent.run_benchmark_grid`: validates requested scene codes against the
   canonical mapping.
-- `nav.scripts.run_benchmark_cell`: accepts `--scene_id <int>` directly
+- `nav.scripts.agent.run_benchmark_cell`: accepts `--scene_id <int>` directly
   (`0..23`).
 
 ## Overriding The Mapping
@@ -53,7 +53,7 @@ If a custom Unity client was built with a different internal ordering, override
 the ID for one wrapper invocation:
 
 ```bash
-SCENE_ID=7 bash shs/run_headless_benchmark.sh scene1 google/gemini-3-flash-preview
+SCENE_ID=7 bash shs/agent/run_headless_benchmark.sh scene1 google/gemini-3-flash-preview
 ```
 
 For a permanent ordering change, update the Unity build settings and
@@ -64,7 +64,7 @@ For a permanent ordering change, update the Unity build settings and
 Use the interactive minimap editor to replace or append points for any scene:
 
 ```bash
-python -m nav.scripts.edit_input_points
+python -m nav.scripts.tools.edit_input_points
 ```
 
 On the first run, the editor launches each of the 24 scenes once and stores its
@@ -108,7 +108,7 @@ pair, so the append limit is only a cap rather than a required count.
 The initial scene and pair count can also be supplied on the command line:
 
 ```bash
-python -m nav.scripts.edit_input_points --scene 17 --pairs 4 --auto-load
+python -m nav.scripts.tools.edit_input_points --scene 17 --pairs 4 --auto-load
 ```
 
 ### Point Editor Options
@@ -129,16 +129,16 @@ Examples:
 
 ```bash
 # Append at most two pairs to scene8 and open it immediately
-python -m nav.scripts.edit_input_points \
+python -m nav.scripts.tools.edit_input_points \
   --scene scene8 --pairs 2 --mode append --auto-load
 
 # Rebuild all minimaps and projection metadata after rebuilding the client
-python -m nav.scripts.edit_input_points --refresh-cache --auto-load
+python -m nav.scripts.tools.edit_input_points --refresh-cache --auto-load
 ```
 
 ### Rendering the 24-Scene Point Overview
 
-`nav.scripts.render_input_points_overview` reads the cached minimaps and
+`nav.scripts.gallery.render_input_points_overview` reads the cached minimaps and
 `input_points.json`, projects every world-space start back onto its scene, and
 renders all scenes in row-major order. Each panel shows colored task lines,
 green start markers, red target markers, `S1..S4` / `T1..T4` labels, and the
@@ -147,7 +147,7 @@ initial-heading arrows. It does not launch Unity.
 Generate the default 4-column × 6-row, full-resolution overview:
 
 ```bash
-python -m nav.scripts.render_input_points_overview
+python -m nav.scripts.gallery.render_input_points_overview
 ```
 
 The default output is:
@@ -160,7 +160,7 @@ The output directory is ignored by Git. To regenerate the smaller image used
 by the repository README:
 
 ```bash
-python -m nav.scripts.render_input_points_overview \
+python -m nav.scripts.gallery.render_input_points_overview \
   --panel-width 500 \
   --output docs/assets/industrynav_24_scene_points_overview.png
 ```
@@ -186,5 +186,5 @@ When replacing the initial task templates with manually curated routes:
 3. Run a dry check before launching Unity:
 
 ```bash
-DRY_RUN=1 bash shs/run_Astar.sh scene13 point1
+DRY_RUN=1 bash shs/astar/run_Astar.sh scene13 point1
 ```

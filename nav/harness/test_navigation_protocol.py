@@ -26,12 +26,17 @@ from nav.harness.prompt_assembly import (
     add_api_observation_contract, format_history_for_prompt, render_nav_prompt,
 )
 from nav.harness.routing import execute_decision
-from nav.scripts import run_benchmark_cell as cell_runner
-from nav.scripts import run_benchmark_grid as grid_runner
+from nav.scripts.agent import run_benchmark_cell as cell_runner
+from nav.scripts.agent import run_benchmark_grid as grid_runner
 from nav.utils import load_prompt_template
 
 
-def render_sample(history="No previous movements yet.", template=DEFAULT_PROMPT_VISION, **kwargs):
+KIRO_V1_PROMPT = str(
+    Path(__file__).resolve().parents[1] / "prompts" / "nav_ego_state_history_kiro_v1.txt"
+)
+
+
+def render_sample(history="No previous movements yet.", template=KIRO_V1_PROMPT, **kwargs):
     return render_nav_prompt(
         load_prompt_template(template), (168, 184), (724, 478), 180, 0,
         list(ACTION_SPACE_AGENTS), history, curr_world_xz=(30.21, 54.69),
@@ -47,12 +52,11 @@ class NavigationPromptTest(unittest.TestCase):
         # run_config.json records prompt_sha256 and runs made with different
         # bodies cannot be mixed under one output root.
         #
-        # Pinned bodies so far:
-        #   f742a414... archived Kiro run (scene1/point1/cli_agent_gpt-5.6-luna, Step 1).
-        #   6d5489e9... current world-coordinate templates in nav/prompts/.
+        # This branch's Kiro-v1 template retains the archived Kiro body.
+        # World-coordinate variants are separate templates with distinct hashes.
         self.assertEqual(
             hashlib.sha256(render_sample().strip().encode()).hexdigest(),
-            "6d5489e9f4e6c337fa36c8ec8899d77fd60353a335daddbe8458ae8cb7c93fa3",
+            "f742a414829805f13619bd14e12e6b546e2ef692034e846cf54bdb43cfdab208",
         )
 
     def test_action_description_tracks_simulation_step_override(self):
@@ -73,6 +77,13 @@ class NavigationPromptTest(unittest.TestCase):
         self.assertIn("No camera or map images are attached.", prompt)
         self.assertIn("increasing world X is North", prompt)
         self.assertNotIn("Inspect the attached image", prompt)
+
+    def test_topdown_contract_names_both_images_in_provider_order(self):
+        prompt = add_api_observation_contract(render_sample(), ["ego", "topdown"])
+        self.assertIn("attached images", prompt)
+        self.assertLess(prompt.index("1. Egocentric RGB"), prompt.index("2. Top-down minimap"))
+        self.assertIn("agent shown in red", prompt)
+        self.assertIn("target shown in green", prompt)
 
     def test_visual_memory_survives_provider_routing_and_next_prompt(self):
         for provider in ("openrouter", "gemini", "openai", "anthropic"):
@@ -180,8 +191,8 @@ class NavigationConfigTest(unittest.TestCase):
             self.assertEqual(old.read_text(), "old experiment\n")
             self.assertFalse((root / "run_config.json").exists())
 
-    @patch("nav.scripts.run_benchmark_grid.free_tcp_port", return_value=55555)
-    @patch("nav.scripts.run_benchmark_grid.subprocess.run")
+    @patch("nav.scripts.agent.run_benchmark_grid.free_tcp_port", return_value=55555)
+    @patch("nav.scripts.agent.run_benchmark_grid.run_cell_subprocess")
     def test_worker_command_preserves_effective_configuration(self, run, port):
         with tempfile.TemporaryDirectory() as tmpdir:
             argv = ["grid", "--models", "test/model", "--seeds", "0",
@@ -242,6 +253,31 @@ class NavigationConfigTest(unittest.TestCase):
         with patch.dict(os.environ, {"OPENROUTER_API_KEY": "do-not-record-this-secret"}):
             config = navigation_run_config(argparse.Namespace(), "prompt")
         self.assertNotIn("do-not-record-this-secret", json.dumps(config))
+
+    def test_topdown_modality_is_recorded_without_changing_ego_only_manifests(self):
+        ego_only = navigation_run_config(argparse.Namespace(), "prompt")
+        with_map = navigation_run_config(
+            argparse.Namespace(topdown_input=True), "prompt"
+        )
+        self.assertEqual(ego_only["input_modalities"], ["ego"])
+        self.assertNotIn("topdown_input", ego_only["settings"])
+        self.assertEqual(with_map["input_modalities"], ["ego", "topdown"])
+        self.assertTrue(with_map["settings"]["topdown_input"])
+
+    def test_grid_topdown_axis_and_task_manifest_filter(self):
+        tasks = [("scene1", "point1"), ("scene2", "point3")]
+        cells = grid_runner.build_grid(
+            ["test/model"], list(grid_runner.SCENE_CODES), ["0"], [True],
+            [0, 5], output_root="/tmp/ablation", topdown_modes=[False, True],
+            tasks=tasks,
+        )
+        self.assertEqual(len(cells), 8)
+        self.assertEqual(
+            {(cell.scene_name, cell.point_id) for cell in cells}, set(tasks)
+        )
+        self.assertEqual({cell.history_size for cell in cells}, {0, 5})
+        self.assertEqual({cell.topdown_input for cell in cells}, {False, True})
+        self.assertEqual(len({cell.frame_save_dir for cell in cells}), 8)
 
 
 if __name__ == "__main__":

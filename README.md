@@ -35,6 +35,14 @@
 <a id="news"></a>
 ## 📰 News
 
+- **2026-09-28**
+  - Refactored the navigation codebase around reusable agent, environment, and trainer contracts, with shared PPO/DAgger training and evaluation workflows.
+  - Added in-episode LLM failure retries, direct Anthropic API support, and cross-output-root sweep continuation; refreshed environment setup.
+- **2026-09-10**
+  - Added gated PPO/DAgger recovery, reaching 61/96 (63.5%) Success@2m on the fixed-seed PointGoal benchmark while reducing collision and warning rates.
+- **2026-09-08**
+  - Added resampled PointGoal/DAgger training and safety-aware PPO/DDP-PPO baselines.
+  - Organized Python and shell entry points by workflow.
 - **2026-09-06**
   - Added an A*-supervised PointGoal training pipeline and a 96-task top-down trajectory gallery with distinct safety markers.
   - Improved A* robustness under varied lighting and atomic-action recovery.
@@ -122,7 +130,7 @@ The Python side provides:
 
 - a unified benchmark runner for the `scene_all` Unity client;
 - LLM-based navigation through OpenRouter;
-- built-in baselines including LLM, A*, BC, and random policies;
+- built-in baselines including LLM, A*, BC, PPO, and random policies;
 - a shared baseline interface for adding additional navigation methods;
 - telemetry output for frames, actions, per-run results, and downstream analysis.
 
@@ -136,7 +144,7 @@ The current benchmark uses one compiled Unity client, `scene_all`, which contain
 | Scenes and tasks | 24 warehouse scenes, 96 PointGoal tasks, and an interactive point editor. |
 | Observations | RGB, metric depth, minimap, pose, heading, target, and action history. |
 | Runtime controls | Adjustable sensor resolution, object motion, category speeds, and lighting. |
-| Baselines | LLM, A*, BC, random, and an extension interface for new baselines. |
+| Baselines | LLM, A*, BC, PPO, random, and an extension interface for new baselines. |
 | Recovery | Resume interrupted API LLM episodes with saved pose/history and original budgets; skip completed tasks. |
 | Data and training | Data collection, trajectory recording, BC training, and inference. |
 | Evaluation | Success, distance, efficiency, collision, warning, trajectory, and aggregate metrics. |
@@ -152,36 +160,52 @@ IndustryNav/
 ├── pyproject.toml             # uv project config and pinned dependencies
 ├── requirements.txt           # pip/conda dependency fallback
 ├── docs/                      # Detailed notes about the project, including scene file and interfaces, and behavior cloning
-├── shs/                       # Shell wrappers for common runs
-│   ├── run_headless_benchmark.sh
-│   ├── run_Astar.sh
-│   └── train_bc.sh
+├── shs/                       # Functionally grouped shell wrappers
+│   ├── agent/                 # Benchmark and LLM-agent launchers
+│   ├── astar/                 # A* runs and data-collection pipelines
+│   ├── bc/                    # BC/DAgger training pipelines
+│   ├── rl/                    # PPO/DDP-PPO launchers
+│   └── gallery/               # GIF and gallery export wrappers
 └── nav/                       # Main Python package
     ├── config.py              # Central constants and path discovery
-    ├── scripts/               # CLI entry points
-    ├── harness/               # Unity/env setup, routing, prompts, side channels
-    ├── baselines/             # A* baseline implementation
-    ├── eval/                  # Post-hoc run evaluation
+    ├── scripts/               # Functionally grouped CLI entry points
+    │   ├── agent/             # Benchmark grids, LLM runs, resume, reconstruction
+    │   ├── astar/             # A* PointGoal collection and export
+    │   ├── bc/                # BC/DAgger collection, validation, and training
+    │   ├── rl/                # PPO/DDP-PPO training
+    │   ├── evaluation/        # Run evaluation, aggregation, and statistics
+    │   ├── gallery/           # GIFs, trajectory galleries, and overviews
+    │   ├── tools/             # Point sampling and task editing
+    │   └── tests/             # Script/workflow regression tests
+    ├── core/                  # Stable agent contracts, types, and PointGoal geometry
+    ├── data/                  # Shared datasets and transforms
+    ├── harness/               # Benchmark orchestration, prompts, and side channels
+    ├── baselines/             # A*, BC, and RL method logic
+    ├── envs/                  # Unity and future environment adapters
+    ├── safety/                # Shared online collision and warning detectors
+    ├── eval/                  # Metric lifecycle and post-hoc aggregation
     ├── stats/                 # Aggregate statistical analysis
-    ├── models/                # BC model definitions
-    └── train/                 # BC training/inference utilities
+    ├── models/                # Reusable encoders and policy architectures
+    └── train/                 # Algorithm-neutral training infrastructure
 ```
 
 Main entry points:
 
-- `python -m nav.scripts.run_benchmark_cell`
-- `python -m nav.scripts.run_benchmark_grid`
-- `python -m nav.scripts.resume_benchmark <run_dir>`
-- `python -m nav.scripts.eval_run`
-- `python -m nav.scripts.compile_stats`
+- `python -m nav.scripts.agent.run_benchmark_cell`
+- `python -m nav.scripts.agent.run_benchmark_grid`
+- `python -m nav.scripts.agent.resume_benchmark <run_dir>`
+- `python -m nav.scripts.evaluation.eval_run`
+- `python -m nav.scripts.evaluation.compile_stats`
 
 Workflow and scene/client docs:
 
 - [`docs/run_benchmark.md`](docs/run_benchmark.md): benchmark commands, API protocol, checkpoint/resume, and GIF gallery workflows.
+- [`docs/architecture.md`](docs/architecture.md): package responsibilities, dependency direction, and extension contracts.
 - [`docs/scene_list.md`](docs/scene_list.md): all 24 scene codes, benchmark task definitions, cached point editing, and overview rendering.
 - [`docs/scene_files_and_interfaces.md`](docs/scene_files_and_interfaces.md): runtime scene codes, environment parameters, side channels, and spawn/target mapping.
 - [`docs/astar_workflow.md`](docs/astar_workflow.md): A* commands plus the shared baseline extension interface.
 - [`docs/bc_workflow.md`](docs/bc_workflow.md): behavior-cloning data collection, training, and inference.
+- [`docs/rl_workflow.md`](docs/rl_workflow.md): PointGoal PPO/DDP-PPO architecture, safety rewards, training, resume, and evaluation.
 
 <a id="setup"></a>
 ## ⚙️ Environment Setup
@@ -297,7 +321,7 @@ For details about scene-code mapping, Unity environment parameters, and Python/U
 The easiest way to run an LLM benchmark is the shell wrapper:
 
 ```bash
-bash shs/run_headless_benchmark.sh scene1 google/gemini-3-flash-preview
+bash shs/agent/run_headless_benchmark.sh scene1 google/gemini-3-flash-preview
 ```
 
 This runs every point in `input_points.json["scene1"]` and writes outputs under:
@@ -329,7 +353,7 @@ Example:
 
 ```bash
 OPENROUTER_API_KEY="..." \
-bash shs/run_headless_benchmark.sh scene1 google/gemini-3-flash-preview
+bash shs/agent/run_headless_benchmark.sh scene1 google/gemini-3-flash-preview
 ```
 
 LLM runs initialize their per-point decision budget from start-target world
@@ -341,7 +365,7 @@ the former fixed-budget protocol.
 To run one explicit benchmark cell:
 
 ```bash
-python -m nav.scripts.run_benchmark_cell \
+python -m nav.scripts.agent.run_benchmark_cell \
   --baseline llm \
   --file_name auto \
   --scene_id 0 \
@@ -417,8 +441,8 @@ load the original provider key, then use the existing per-task output directory
 
 ```bash
 RUN_DIR="outputs/scene1/point1/gemini-3-flash-preview"
-python -m nav.scripts.resume_benchmark "$RUN_DIR" --dry-run
-python -m nav.scripts.resume_benchmark "$RUN_DIR"
+python -m nav.scripts.agent.resume_benchmark "$RUN_DIR" --dry-run
+python -m nav.scripts.agent.resume_benchmark "$RUN_DIR"
 ```
 
 For a batch, add `--resume` to the original LLM grid command, or set `RESUME=1`
@@ -442,10 +466,10 @@ A* is the offline classical navigation baseline. It does not call OpenRouter.
 Common commands:
 
 ```bash
-bash shs/run_Astar.sh scene1
-bash shs/run_Astar.sh scene1 point1
-bash shs/run_Astar.sh all
-ASTAR_DEBUG_VIZ=1 bash shs/run_Astar.sh scene1 point1
+bash shs/astar/run_Astar.sh scene1
+bash shs/astar/run_Astar.sh scene1 point1
+bash shs/astar/run_Astar.sh all
+ASTAR_DEBUG_VIZ=1 bash shs/astar/run_Astar.sh scene1 point1
 ```
 
 A* uses a dynamic per-point step budget by default. Short routes receive fewer

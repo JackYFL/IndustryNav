@@ -144,8 +144,19 @@ class AStarParams:
     contrast_background_px: int = 21
     contrast_threshold: int = 35
     contrast_min_area_px: int = 300
+    # The top-down render contains long, narrow floor-boundary seams which are
+    # visually dark but have no corresponding navigation obstacle. Suppress
+    # only sufficiently long/thin seams; solid racks and walls remain blocked.
+    decorative_edge_max_width_m: float = 0.65
+    decorative_edge_min_length_m: float = 3.0
+    decorative_edge_min_aspect_ratio: float = 4.0
+    decorative_edge_color_saturation_threshold: int = 80
     min_free_ratio: float = 0.55
     obstacle_clearance_m: float = 0.6
+    # Retry disconnected plans with the smallest clearance that still leaves
+    # a physical body margin. This opens scene21's narrow aisle without making
+    # ordinary routes hug obstacles as they do with a global 0.3 m clearance.
+    minimum_obstacle_clearance_m: float = 0.3
     path_smoothing: bool = True
     path_corner_smoothing_m: float = 1.0
     stanley_gain: float = 1.0
@@ -165,7 +176,10 @@ class AStarParams:
     front_cone_deg: float = 140.0
     hysteresis_reset_deg: float = 45.0
     hysteresis_lock_deg: float = 165.0
-    stuck_distance_m: float = 0.05
+    # Contacts with walls can still produce about 0.06-0.12 m of sliding per
+    # decision. Treat that collision creep as stuck instead of letting the
+    # controller oscillate forever along the same short segment.
+    stuck_distance_m: float = 0.15
     stuck_steps: int = 4
     recovery_turn_steps: int = 3
     stuck_block_ahead_m: float = 2.1
@@ -237,7 +251,9 @@ RESULTS_CSV_FIELDS: List[str] = [
     "provider",
     "model",
     "vision_input",
+    "topdown_input",
     "max_steps",
+    "step_budget_max",
     "step_budget_mode",
     "initial_step_budget",
     "astar_max_planned_path_m",
@@ -304,6 +320,7 @@ GRID_CSV_FIELDS: List[str] = [
     "model",
     "seed_id",
     "vision_input",
+    "topdown_input",
     "history_size",
     "dynamic_objects",
     *MOTION_SPEED_CSV_FIELDS,
@@ -326,6 +343,8 @@ GRID_CSV_FIELDS: List[str] = [
 # Prompts and analysis output
 
 DEFAULT_PROMPT_VISION: str = str(_prompt_path_of(PromptName.EGO_STATE_HISTORY))
+DEFAULT_PROMPT_TOPDOWN: str = str(_prompt_path_of(PromptName.EGO_MINIMAP))
+DEFAULT_PROMPT_TOPDOWN_ONLY: str = str(_prompt_path_of(PromptName.MINIMAP_ONLY))
 DEFAULT_PROMPT_NOVISION: str = str(_prompt_path_of(PromptName.STATE_HISTORY_NO_VISION))
 
 ANALYSIS_ROOT: Path = Path("analysis")
@@ -336,6 +355,9 @@ STATS_METRIC_FIELDS: Tuple[str, ...] = (
     "distance_ratio",
     "collision_rate",
     "warning_rate",
+    "efficiency",
+    "optimal_steps",
+    "efficiency_max_steps",
     "efficiency_steps",
     "steps_taken",
 )
@@ -345,6 +367,7 @@ STATS_REPORT_BASE_METRICS: Tuple[Tuple[str, str, str], ...] = (
     ("cr", "collision_rate", "CR"),
 )
 STATS_REPORT_OPTIONAL_METRICS: Dict[str, Tuple[str, str, str]] = {
+    "efficiency": ("eff", "efficiency", "Efficiency"),
     "warning_rate": ("wr", "warning_rate", "WR"),
     "distance_world": ("dist", "distance_world", "Mean dist (m)"),
 }
@@ -412,6 +435,19 @@ BC_ACTION_TO_LABEL: Dict[str, int] = {
 
 BC_LABEL_TO_ACTION: Dict[int, str] = {v: k for k, v in BC_ACTION_TO_LABEL.items()}
 
+# PointGoal rollouts terminate deterministically from metric distance, so the
+# learned controller only needs movement actions. The extra vocabulary id is a
+# history-only beginning-of-sequence token and is never predicted.
+BC_NAV_ACTION_TO_LABEL: Dict[str, int] = {
+    "forward": 0,
+    "turn right": 1,
+    "turn left": 2,
+}
+BC_NAV_LABEL_TO_ACTION: Dict[int, str] = {
+    v: k for k, v in BC_NAV_ACTION_TO_LABEL.items()
+}
+BC_NAV_BOS_LABEL: int = len(BC_NAV_ACTION_TO_LABEL)
+
 BC_EPISODE_CSV: str = "keyboard_actions.csv"
 BC_RGB_SUBDIR: str = "keyboard_fp"
 BC_DEPTH_SUBDIR: str = "keyboard_depth"
@@ -448,6 +484,9 @@ class BCTrainConfig:
 
     data_root: str = "collect_data"
     output_dir: str = "outputs/nav_bc"
+    # Optional compatible policy checkpoint used to initialize a new training
+    # run (for example, fine-tuning on an aggregated DAgger dataset).
+    init_checkpoint: str = ""
     img_size: int = 256
     batch_size: int = 16
     num_workers: int = 4
@@ -470,19 +509,38 @@ class BCTrainConfig:
     seq_len: int = 8
     num_layers: int = 2
     goal_rep: str = "cartesian"  # cartesian | polar
+    # v2 follows Unity's yaw convention and encodes Cartesian goals as
+    # [forward, right], or polar goals as [distance, signed bearing].
+    goal_encoding: str = "unity_egocentric_v2"
     # Zero preserves legacy raw goal coordinates. A positive value scales
     # distance/cartesian coordinates and maps polar angles from [-pi, pi] to
     # [-1, 1].
     goal_distance_scale_m: float = 0.0
     horizontal_flip_prob: float = 0.0
+    # Randomly replace a fraction of previous-action tokens during training so
+    # the sequence policy remains useful after its own closed-loop mistakes.
+    previous_action_noise_prob: float = 0.0
     # 1.0 is full inverse-frequency weighting; 0.5 is a softer square-root
     # correction that preserves more emphasis on the dominant forward class.
     class_weight_power: float = 1.0
+    label_smoothing: float = 0.0
+    # Extra two-way supervision on left-vs-right examples. This addresses the
+    # severe forward/turn imbalance without oversampling terminal stop frames.
+    turn_aux_loss_weight: float = 0.0
+    # Overall accuracy is retained as the backward-compatible default.
+    checkpoint_metric: str = "acc"  # acc | macro_acc | macro_nav_acc
+    # Optional direct goal-to-action residual beside the visual transformer.
+    # It provides a short path for target bearing while vision learns obstacle
+    # corrections and remains disabled for existing checkpoints.
+    goal_action_residual: bool = False
     chunk_size: int = 1
     # Observation and expert action are recorded at the same decision state.
     # Set to 1 only for explicitly legacy-shifted datasets.
     sequence_action_offset: int = 0
     include_stop_targets: bool = True
+    # Use a true three-class output head (forward/right/left). The sequence
+    # history retains a separate BOS token, but stop is not an output class.
+    navigation_only_actions: bool = False
 
 
 BC_BASE_PRESETS: Dict[str, BCTrainConfig] = {
@@ -514,10 +572,12 @@ BC_BASE_PRESETS: Dict[str, BCTrainConfig] = {
 
 # Benchmark/eval file discovery
 
-BENCHMARK_BASELINES: List[str] = ["random", "llm", "bc", "astar"]
+BENCHMARK_BASELINES: List[str] = ["random", "llm", "bc", "ppo", "astar"]
 EVAL_RUN_PREFIXES: List[str] = [
     "llm",
     "bc",
+    "ppo",
+    "dagger",
     "astar",
     "random",
     "agent",

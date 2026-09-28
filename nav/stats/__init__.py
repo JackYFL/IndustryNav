@@ -29,5 +29,5 @@ Submodules
 - :mod:`nav.stats.merge` — supersession merge for combining grid + xlsx.
 - :mod:`nav.stats.pipeline` — high-level orchestrators: ``run_full_analysis``,
   ``run_partial_analysis``, ``run_merge_pipeline``. The CLI driver in
-  :mod:`nav.scripts.compile_stats` calls into these.
+  :mod:`nav.scripts.evaluation.compile_stats` calls into these.
 """

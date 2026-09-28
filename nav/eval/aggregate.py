@@ -7,7 +7,7 @@ than raising — the caller decides how to surface them.
 
 :func:`write_aggregate_xlsx` is the xlsx-emission half. It depends on
 ``openpyxl`` being installed; if not, it falls back to CSV. Used by
-``nav.scripts.aggregate_eval``.
+``nav.scripts.evaluation.aggregate_eval``.
 """
 
 from __future__ import annotations
@@ -16,22 +16,24 @@ import csv
 import math
 from collections import defaultdict
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Mapping, Optional
 
 import numpy as np
 
 from nav.eval.metrics import (
     SUCCESS_THRESHOLD_FIELDS,
     EvaluateOptions,
-    evaluate_run,
+    RunEvaluator,
 )
+from nav.eval.efficiency import AStarStepReference, TaskKey, attach_step_efficiency
 
 
 #: Schema for the per-run rows produced by :func:`aggregate_runs`.
 AGGREGATE_ROW_FIELDS: List[str] = [
-    "scene_name", "point_id", "model",
+    "scene_name", "point_id", "model", "exec_mode", "sim_steps_per_decision",
     "success_ratio",
     *(field for _, field in SUCCESS_THRESHOLD_FIELDS),
+    "efficiency", "optimal_steps", "efficiency_max_steps",
     "efficiency_steps", "distance_ratio",
     "final_distance_world", "stop_reason",
     "warning_rate", "warning_steps", "total_steps",
@@ -43,6 +45,12 @@ AGGREGATE_ROW_FIELDS: List[str] = [
 def _row_axes_from_path(input_dir: Path) -> dict:
     """Infer (scene_name, point_id, model) from a path ending in those parts."""
     parts = input_dir.parts
+    if parts and parts[-1].startswith("seed") and len(parts) >= 4:
+        return {
+            "scene_name": parts[-4],
+            "point_id": parts[-3],
+            "model": parts[-2],
+        }
     return {
         "scene_name": parts[-3] if len(parts) >= 3 else "",
         "point_id": parts[-2] if len(parts) >= 2 else "",
@@ -56,6 +64,9 @@ def _error_row(input_dir: Path, error: Exception) -> dict:
         "input_dir": str(input_dir),
         "success_ratio": 0,
         **{field: 0 for _, field in SUCCESS_THRESHOLD_FIELDS},
+        "efficiency": float("nan"),
+        "optimal_steps": float("nan"),
+        "efficiency_max_steps": float("nan"),
         "efficiency_steps": 0,
         "distance_ratio": 0.0,
         "final_distance_world": None,
@@ -74,6 +85,7 @@ def _error_row(input_dir: Path, error: Exception) -> dict:
 def aggregate_runs(
     input_dirs: Iterable[Path],
     opts: Optional[EvaluateOptions] = None,
+    astar_references: Optional[Mapping[TaskKey, AStarStepReference]] = None,
 ) -> List[dict]:
     """Evaluate each directory and return one row per input.
 
@@ -82,17 +94,28 @@ def aggregate_runs(
     cleanly separate ok vs errored rows by ``row.get("error")``.
     """
     opts = opts or EvaluateOptions()
+    evaluator = RunEvaluator(opts)
     rows: List[dict] = []
     for input_dir in input_dirs:
         input_dir = Path(input_dir)
         if not input_dir.is_dir():
             continue
         try:
-            metrics = evaluate_run(input_dir, opts)
-            row = {**_row_axes_from_path(input_dir), **metrics, "error": ""}
+            metrics = evaluator.evaluate(input_dir)
+            axes = _row_axes_from_path(input_dir)
+            for field in ("scene_name", "point_id", "model"):
+                if not metrics.get(field):
+                    metrics.pop(field, None)
+            row = {**axes, **metrics, "error": ""}
         except Exception as exc:  # noqa: BLE001 — surface any read failure
             row = _error_row(input_dir, exc)
         rows.append(row)
+    if astar_references is not None:
+        rows = attach_step_efficiency(
+            rows,
+            astar_references,
+            step_margin=opts.efficiency_step_margin,
+        )
     return rows
 
 
@@ -137,6 +160,12 @@ def summarize_by(rows: List[dict], axis: str) -> List[dict]:
         warn_vals = [float(r["warning_rate"]) for r in group if r["warning_rate"] not in (None, "")]
         coll_vals = [float(r["collision_rate"]) for r in group]
         eff_vals = [float(r["efficiency_steps"]) for r in group]
+        normalized_eff_vals = [
+            float(r["efficiency"])
+            for r in group
+            if r.get("efficiency") not in (None, "")
+            and np.isfinite(float(r["efficiency"]))
+        ]
         summary_rows.append({
             axis: key,
             "N": n,
@@ -146,6 +175,10 @@ def summarize_by(rows: List[dict], axis: str) -> List[dict]:
                 round(float(np.nanmean(dist_vals)) * 100, 2) if dist_vals else float("nan")
             ),
             "efficiency_steps": round(float(np.mean(eff_vals)), 2) if eff_vals else 0.0,
+            "efficiency": (
+                round(float(np.mean(normalized_eff_vals)), 4)
+                if normalized_eff_vals else float("nan")
+            ),
             "warning_rate_%": (
                 round(float(np.mean(warn_vals)) * 100, 2) if warn_vals else float("nan")
             ),

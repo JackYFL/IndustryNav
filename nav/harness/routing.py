@@ -24,7 +24,9 @@ import time
 
 import numpy as np
 
+from nav.baselines.dagger import decide_dagger
 from nav.config import LLM_ERROR_SENTINELS
+from nav.core.geometry import transformed_path_length_m
 from nav.harness.llm_provider import llm_generate_decision
 
 logger = logging.getLogger(__name__)
@@ -46,21 +48,8 @@ def _llm_decision_failed(decision: dict) -> bool:
 
 
 def astar_path_length_m(path, point_to_world) -> float | None:
-    """Return the world-space length of an A* pixel path when calibrated."""
-    if point_to_world is None or len(path) < 2:
-        return None
-    world_points = [point_to_world(point) for point in path]
-    if any(point is None for point in world_points):
-        return None
-    return float(
-        sum(
-            np.hypot(
-                float(current[0]) - float(previous[0]),
-                float(current[1]) - float(previous[1]),
-            )
-            for previous, current in zip(world_points, world_points[1:])
-        )
-    )
+    """Compatibility name for the shared calibrated path-length helper."""
+    return transformed_path_length_m(path, point_to_world)
 
 
 def execute_decision(baseline: str, payload: dict, result_container: dict) -> None:
@@ -121,6 +110,19 @@ def execute_decision(baseline: str, payload: dict, result_container: dict) -> No
                 target_world_z=payload["target_world_z"],
             )
             result_container["reasoning"] = "BC model decision."
+        elif baseline == "ppo":
+            result_container["action"] = payload["ppo_controller"].predict_action(
+                depth_obs=payload["depth_obs"],
+                curr_world_x=payload["curr_world_x"],
+                curr_world_z=payload["curr_world_z"],
+                curr_yaw_deg=payload["curr_yaw_deg"],
+                target_world_x=payload["target_world_x"],
+                target_world_z=payload["target_world_z"],
+                scene_id=payload.get("scene_id"),
+            )
+            result_container["reasoning"] = "PPO actor-critic decision."
+        elif baseline == "dagger":
+            result_container.update(decide_dagger(payload))
         elif baseline == "astar":
             action, reasoning, _path = payload["astar_planner"].decide(
                 minimap_rgb=payload["minimap_rgb"],

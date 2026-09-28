@@ -297,13 +297,14 @@ def _render_report(
 ) -> str:
     has_wr = any(short == "wr" for short, _, _ in metrics)
     has_dist = any(short == "dist" for short, _, _ in metrics)
+    has_eff = any(short == "eff" for short, _, _ in metrics)
 
     md: List[str] = []
     md.append("# Full statistical analysis\n\n")
     md.append(f"Source: `{source_label}` ({len(rows)} runs total). ")
     md.append(f"Permutations: {n_perm:,}. Bootstrap resamples: {n_boot:,}. "
               f"Spearman split: `{spearman_split}`.\n\n")
-    md.append("**Metric definitions** (matching `eval_metrics.py`):\n")
+    md.append("**Metric definitions** (matching `nav.eval`):\n")
     md.append(
         f"- **SR** (success rate): final `distance_world <= {EVAL_SUCCESS_DIST_M:g} m`. "
         "Per-cell binary 0/1.\n"
@@ -324,6 +325,15 @@ def _render_report(
         md.append("- **WR** (warning rate): **DEFERRED** — grid runs did not save raw depth NPYs. Re-enable NPY saving to recover this.\n")
     if has_dist:
         md.append("- **Mean dist (m)**: average final `distance_world` per run.\n")
+    if has_eff:
+        md.append(
+            "- **Efficiency**: success-weighted inverse min-max normalization "
+            "`S × (max_steps − actual_steps) / (max_steps − optimal_steps)`, "
+            "where `max_steps = optimal_steps + K`; clipped to `[0, 1]`, and "
+            "higher is better. `optimal_steps` comes from "
+            "the matching A* trajectory after converting its forward and turn "
+            "control effort to the evaluated agent's action granularity.\n"
+        )
     md.append("\n")
     md.append(
         "> **CR calibration.** Theoretical distance is the logged move command × "
@@ -402,7 +412,8 @@ def _render_report(
 
     md.append("\n## (2b) Paired permutation: within model, vision on vs off (modality ablation)\n")
     md.append("A = vision-on, B = vision-off. **Positive ΔSR/ΔDR ⇒ vision helps**; "
-              "**negative Δdist/ΔCR ⇒ vision helps**. Significance at p < 0.05.\n\n")
+              "**positive ΔEfficiency ⇒ vision helps**; **negative Δdist/ΔCR ⇒ "
+              "vision helps**. Significance at p < 0.05.\n\n")
     modality = [r for r in perm_rows if r["comparison_kind"] == "modality_ablation"]
     if modality:
         hdr = "| Model | N cells "
