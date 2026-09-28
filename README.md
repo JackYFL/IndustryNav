@@ -35,11 +35,14 @@
 <a id="news"></a>
 ## 📰 News
 
+- **2026-09-28**
+  - Refactored the navigation codebase around reusable agent, environment, and trainer contracts, with shared PPO/DAgger training and evaluation workflows.
+  - Added in-episode LLM failure retries, direct Anthropic API support, and cross-output-root sweep continuation; refreshed environment setup.
 - **2026-09-10**
   - Added gated PPO/DAgger recovery, reaching 61/96 (63.5%) Success@2m on the fixed-seed PointGoal benchmark while reducing collision and warning rates.
 - **2026-09-08**
   - Added resampled PointGoal/DAgger training and safety-aware PPO/DDP-PPO baselines.
-  - Reorganized the Python architecture into reusable core, model, baseline, environment, safety, train, and evaluation layers.
+  - Organized Python and shell entry points by workflow.
 - **2026-09-06**
   - Added an A*-supervised PointGoal training pipeline and a 96-task top-down trajectory gallery with distinct safety markers.
   - Improved A* robustness under varied lighting and atomic-action recovery.
